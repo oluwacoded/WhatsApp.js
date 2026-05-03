@@ -1,0 +1,17 @@
+// 1. Status Endpoint
+app.get('/status', (req, res) => {
+    res.json({ connected: client.info ? true : false });
+});
+
+// 2. QR Code Endpoint
+app.get('/qr', (req, res) => {
+    // Logic to send the latest QR code image/string to the frontend
+    res.send(latestQR); 
+});
+
+// 3. Update Personality Endpoint
+app.post('/update-prompt', (req, res) => {
+    const newPrompt = req.body.prompt;
+    // Save newPrompt to your Postgres database
+    res.json({ success: true });
+});
