@@ -1,6 +1,5 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
-const qrcode = require('qrcode-terminal');
 const cors = require('cors');
 
 const app = express();
@@ -9,7 +8,7 @@ app.use(express.json());
 
 const port = process.env.PORT || 8080;
 
-// GLOBAL VARIABLES
+// --- GLOBAL STATE ---
 let lastQr = "";
 let isConnected = false;
 let systemPrompt = "You are a helpful assistant.";
@@ -21,7 +20,7 @@ const client = new Client({
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            // THIS LINE HIDES THE BOT FROM WHATSAPP SECURITY
+            // ANTI-DETECTION: Masks the bot as a real MacBook Pro
             '--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         ],
     }
@@ -37,7 +36,7 @@ client.on('qr', (qr) => {
 client.on('ready', () => {
     isConnected = true;
     lastQr = ""; 
-    console.log('BOT IS READY!');
+    console.log('BOT IS READY AND CONNECTED!');
 });
 
 client.on('disconnected', () => {
@@ -45,27 +44,33 @@ client.on('disconnected', () => {
     console.log('BOT DISCONNECTED');
 });
 
-// FEATURE: REJECT CALLS (DND)
+// FEATURE: REJECT CALLS (DND MODE)
 client.on('call', async (call) => {
     console.log('Incoming call detected, rejecting...');
     await call.reject();
-    await client.sendMessage(call.from, "Automatic Message: I cannot accept calls right now. Please leave a text message.");
+    await client.sendMessage(call.from, "Automatic Message: I cannot accept WhatsApp calls right now. Please leave a text message.");
 });
 
-// FEATURE: AUTO-REPLY & CHAT TRAINING LOGIC
+// FEATURE: AUTO-REPLY & GREETING
 client.on('message', async (msg) => {
-    // 1. Initial Greeting for new texts
+    const chat = await msg.getChat();
+    
+    // Initial Greeting for new conversations
     if (msg.body.toLowerCase().includes('hello') || msg.body.toLowerCase().includes('hi')) {
-        msg.reply("HI IM MFG_bot version 0.1\nMy creator is offline I’ll handle the text from now on.");
+        await msg.reply("HI IM MFG_bot version 0.1\nMy creator is offline. I’ll handle the texts from now on.");
     }
 
-    // 2. AI Response Logic (Placeholder for your Chat Training)
-    // This is where we will eventually plug in the OpenAI/Gemini API 
-    // to read previous chats and respond as 'You'.
+    // Note: AI Training logic (reading previous chats) will be connected here via API in the next step.
 });
 
-// --- API ENDPOINTS FOR LOVABLE DASHBOARD ---
+// --- API ENDPOINTS FOR YOUR DASHBOARD ---
 
+// 1. Health Check
+app.get('/', (req, res) => {
+    res.send("Bot is running");
+});
+
+// 2. Dashboard Status Polling
 app.get('/status', (req, res) => {
     res.json({ 
         connected: isConnected, 
@@ -73,23 +78,37 @@ app.get('/status', (req, res) => {
     });
 });
 
+// 3. QR Code Fetching
 app.get('/qr', (req, res) => {
     res.send(lastQr);
 });
 
-app.get('/', (req, res) => {
-    res.send("Bot is running");
+// 4. BACKUP LINK METHOD: Pairing Code
+app.post('/request-pairing-code', async (req, res) => {
+    const { phoneNumber } = req.body; // Expects format like "2348012345678"
+    if (!phoneNumber) return res.status(400).json({ error: "Phone number is required" });
+    
+    try {
+        console.log(`Requesting pairing code for: ${phoneNumber}`);
+        const code = await client.requestPairingCode(phoneNumber);
+        res.json({ pairingCode: code });
+    } catch (error) {
+        console.error("Pairing Error:", error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
+// 5. Update Bot Personality
 app.post('/update-prompt', (req, res) => {
     systemPrompt = req.body.prompt;
-    console.log("System Prompt Updated: " + systemPrompt);
+    console.log("New System Prompt Set: " + systemPrompt);
     res.json({ success: true });
 });
 
-// START SERVER
+// --- STARTUP ---
+
 app.listen(port, () => {
-    console.log(`Server on port ${port}`);
+    console.log(`Server is live on port ${port}`);
 });
 
 client.initialize();
