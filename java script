@@ -1,17 +1,95 @@
-// 1. Status Endpoint
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const express = require('express');
+const qrcode = require('qrcode-terminal');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const port = process.env.PORT || 8080;
+
+// GLOBAL VARIABLES
+let lastQr = "";
+let isConnected = false;
+let systemPrompt = "You are a helpful assistant.";
+
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            // THIS LINE HIDES THE BOT FROM WHATSAPP SECURITY
+            '--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        ],
+    }
+});
+
+// --- BOT EVENTS ---
+
+client.on('qr', (qr) => {
+    lastQr = qr;
+    console.log('NEW QR RECEIVED');
+});
+
+client.on('ready', () => {
+    isConnected = true;
+    lastQr = ""; 
+    console.log('BOT IS READY!');
+});
+
+client.on('disconnected', () => {
+    isConnected = false;
+    console.log('BOT DISCONNECTED');
+});
+
+// FEATURE: REJECT CALLS (DND)
+client.on('call', async (call) => {
+    console.log('Incoming call detected, rejecting...');
+    await call.reject();
+    await client.sendMessage(call.from, "Automatic Message: I cannot accept calls right now. Please leave a text message.");
+});
+
+// FEATURE: AUTO-REPLY & CHAT TRAINING LOGIC
+client.on('message', async (msg) => {
+    // 1. Initial Greeting for new texts
+    if (msg.body.toLowerCase().includes('hello') || msg.body.toLowerCase().includes('hi')) {
+        msg.reply("HI IM MFG_bot version 0.1\nMy creator is offline I’ll handle the text from now on.");
+    }
+
+    // 2. AI Response Logic (Placeholder for your Chat Training)
+    // This is where we will eventually plug in the OpenAI/Gemini API 
+    // to read previous chats and respond as 'You'.
+});
+
+// --- API ENDPOINTS FOR LOVABLE DASHBOARD ---
+
 app.get('/status', (req, res) => {
-    res.json({ connected: client.info ? true : false });
+    res.json({ 
+        connected: isConnected, 
+        hasQr: lastQr !== "" 
+    });
 });
 
-// 2. QR Code Endpoint
 app.get('/qr', (req, res) => {
-    // Logic to send the latest QR code image/string to the frontend
-    res.send(latestQR); 
+    res.send(lastQr);
 });
 
-// 3. Update Personality Endpoint
+app.get('/', (req, res) => {
+    res.send("Bot is running");
+});
+
 app.post('/update-prompt', (req, res) => {
-    const newPrompt = req.body.prompt;
-    // Save newPrompt to your Postgres database
+    systemPrompt = req.body.prompt;
+    console.log("System Prompt Updated: " + systemPrompt);
     res.json({ success: true });
 });
+
+// START SERVER
+app.listen(port, () => {
+    console.log(`Server on port ${port}`);
+});
+
+client.initialize();
