@@ -1158,8 +1158,38 @@ app.get("/api/status", (req, res) => res.json({
   uptime: Math.floor((Date.now() - startTime) / 1000),
   messageCount,
   chatCount: allChats.length,
-  aiEnabled: settings.aiEnabled
+  aiEnabled: settings.aiEnabled,
+  hasGroqKey: !!process.env.GROQ_API_KEY,
+  aiPausedCount: aiPaused.size
 }));
+
+// Diagnostic — tests if Groq actually works on this backend
+app.get("/api/diag", async (req, res) => {
+  const out = {
+    hasGroqKey: !!process.env.GROQ_API_KEY,
+    groqKeyLen: (process.env.GROQ_API_KEY || "").length,
+    aiEnabled: settings.aiEnabled,
+    connected: isConnected,
+    aiPausedJids: [...aiPaused.keys()],
+    groqTest: null,
+    groqError: null
+  };
+  if (!process.env.GROQ_API_KEY) {
+    out.groqError = "GROQ_API_KEY env var is missing on this Railway backend";
+    return res.json(out);
+  }
+  try {
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: "say hi" }], max_tokens: 10 })
+    });
+    const j = await r.json();
+    if (j.error) out.groqError = j.error.message || JSON.stringify(j.error);
+    else out.groqTest = j.choices?.[0]?.message?.content || "empty";
+  } catch (e) { out.groqError = e.message; }
+  res.json(out);
+});
 
 app.get("/api/qr", (req, res) =>
   currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "no qr available" })
