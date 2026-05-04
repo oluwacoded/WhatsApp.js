@@ -55,6 +55,10 @@ let allChats = [];
 let commandStats = {};
 let messageCount = 0;
 
+// ─── Pairing Code State ──────────────────────────────────────────────────────
+let pendingPairPhone = null;   // set before restarting socket in pairing mode
+let pairCodeResolve = null;    // Promise resolver waiting for the code
+
 function trackCommand(cmd) {
   commandStats[cmd] = (commandStats[cmd] || 0) + 1;
 }
@@ -107,9 +111,11 @@ async function connectToWhatsApp() {
   }));
   console.log(`[MFG_bot] WA version: ${version.join(".")} (latest: ${isLatest})`);
 
+  const usingPairingCode = !!pendingPairPhone;
+
   sock = makeWASocket({
     version, auth: state,
-    printQRInTerminal: true,
+    printQRInTerminal: !usingPairingCode,   // QR off when using phone pairing
     logger: pino({ level: "silent" }),
     browser: Browsers.ubuntu("Chrome"),
     connectTimeoutMs: 60000,
@@ -120,6 +126,24 @@ async function connectToWhatsApp() {
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
   });
+
+  // ─── Pairing Code Request ─────────────────────────────────────────────────
+  if (usingPairingCode) {
+    const phone = pendingPairPhone;
+    pendingPairPhone = null;
+    // Give the socket ~2 s to connect to WA servers before requesting code
+    setTimeout(async () => {
+      try {
+        console.log(`[MFG_bot] Requesting pairing code for ${phone}...`);
+        const code = await sock.requestPairingCode(phone);
+        console.log(`[MFG_bot] Pairing code generated: ${code}`);
+        if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
+      } catch (e) {
+        console.error("[MFG_bot] Pairing code error:", e.message);
+        if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
+      }
+    }, 2000);
+  }
 
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -419,21 +443,37 @@ app.get("/api/qr", (req, res) =>
   currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "no qr available" })
 );
 
-// Pairing code — more reliable than QR on newer WhatsApp versions
+// Pairing code — restarts the socket in phone-pairing mode (no QR conflict)
 app.post("/api/pair", async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ error: "missing phone number" });
-  if (!sock) return res.status(503).json({ error: "bot not initialised" });
   if (isConnected) return res.status(400).json({ error: "already connected" });
-  try {
-    const clean = phone.replace(/[^0-9]/g, "");
-    const code = await sock.requestPairingCode(clean);
-    console.log(`[MFG_bot] Pairing code for ${clean}: ${code}`);
-    res.json({ success: true, code });
-  } catch (e) {
-    console.error("[MFG_bot] Pairing code error:", e.message);
-    res.status(500).json({ error: e.message });
+
+  const clean = phone.replace(/[^0-9]/g, "");
+  if (!clean) return res.status(400).json({ error: "invalid phone number" });
+
+  // Store the phone so the next connectToWhatsApp() uses pairing mode
+  pendingPairPhone = clean;
+  hasQr = false; currentQr = null;
+
+  // Create a Promise that resolves when the pairing code is ready (or times out)
+  const codePromise = new Promise((resolve) => {
+    pairCodeResolve = resolve;
+    setTimeout(() => {
+      if (pairCodeResolve) { pairCodeResolve({ success: false, error: "timeout — make sure bot is not already connected" }); pairCodeResolve = null; }
+    }, 30000);
+  });
+
+  // Tear down the existing socket to force a fresh connection in pairing mode
+  if (sock) {
+    try { sock.ev.removeAllListeners(); sock.end(new Error("switching to pairing code")); } catch (e) {}
+    sock = null;
   }
+  connectToWhatsApp();
+
+  const result = await codePromise;
+  if (result.success) return res.json({ success: true, code: result.code });
+  return res.status(500).json({ error: result.error });
 });
 
 app.get("/api/settings", (req, res) => res.json(settings));
