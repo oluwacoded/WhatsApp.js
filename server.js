@@ -1,3 +1,9 @@
+// ─── Crypto polyfill (required for baileys on Node 18) ───────────────────────
+if (!globalThis.crypto) {
+  const { webcrypto } = require("crypto");
+  globalThis.crypto = webcrypto;
+}
+
 const {
   default: makeWASocket,
   DisconnectReason,
