@@ -1,14 +1,9 @@
 FROM node:18-slim
 
 RUN apt-get update && apt-get install -y \
-    git \
-    ffmpeg \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libxcomposite1 \
-    libxrandr2 \
-    libgbm1 \
-    libasound2 \
+    python3 \
+    make \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
