@@ -1,3 +1,6 @@
+const { webcrypto } = require('node:crypto');
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
+
 const {
   default: makeWASocket,
   DisconnectReason,
@@ -186,7 +189,7 @@ async function connectToWhatsApp(phoneForPairing) {
 app.get("/", (req, res) => res.send("Bot is running"));
 app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode }));
 app.get("/qr", (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR available" }));
-app.get("/pairing-code", (req, res) => currentPairingCode ? res.json({ code: currentPairingCode, phone: pairedPhone }) : res.status(404).json({ error: "No pairing code — call /request-pairing-code first" }));
+app.get("/pairing-code", (req, res) => currentPairingCode ? res.json({ code: currentPairingCode, phone: pairedPhone }) : res.status(404).json({ error: "No pairing code" }));
 
 app.get("/debug", (req, res) => {
   let baileysVersion = "unknown";
@@ -214,6 +217,7 @@ app.post("/request-pairing-code", async (req, res) => {
     if (!cleaned) return res.status(400).json({ error: "phoneNumber required (digits only, with country code)" });
     if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} sock = null; }
     clearAuthFolder();
+    currentPairingCode = null;
     await new Promise(r => setTimeout(r, 1000));
     connectToWhatsApp(cleaned);
     await new Promise(r => setTimeout(r, 6000));
