@@ -326,7 +326,24 @@ async function connectToWhatsApp() {
         continue;
       }
 
-      if (!text) continue;
+      // ── Detect message type — reply to EVERYTHING ─────────────────────
+      const isSticker = !!msg.message?.stickerMessage;
+      const isImage   = !!msg.message?.imageMessage;
+      const isVideo   = !!msg.message?.videoMessage;
+      const isAudio   = !!msg.message?.audioMessage || !!msg.message?.pttMessage;
+      const isDoc     = !!msg.message?.documentMessage;
+      const isContact = !!msg.message?.contactMessage;
+
+      // effectiveText is what we pass to AI — real text or a type description
+      const effectiveText = text || (
+        isSticker ? "[sent a sticker]" :
+        isImage   ? "[sent an image]"  :
+        isVideo   ? "[sent a video]"   :
+        isAudio   ? "[sent a voice note]" :
+        isDoc     ? "[sent a document]"   :
+        isContact ? "[sent a contact card]" :
+        "[sent a message]"
+      );
 
       // ── Owner greeting when they message the bot ──────────────────────
       if (senderIsOwner && !userData[from]?.greeted) {
@@ -336,17 +353,18 @@ async function connectToWhatsApp() {
         await send(`sup maker 👋 i'm your bot. all commands unlocked. type .menu to see what i can do.`);
       }
 
-      // ── Who-made-you detection (non-commands, natural language) ───────
       const lowerText = text.toLowerCase();
+
+      // ── Who-made-you detection (non-commands, natural language) ───────
       const creatorTriggers = ["who made you", "who created you", "who built you", "who is your creator", "who is your maker", "who owns you", "who is your owner", "wey make you", "who program you"];
-      if (!text.startsWith(pfx) && creatorTriggers.some(t => lowerText.includes(t))) {
+      if (text && !text.startsWith(pfx) && creatorTriggers.some(t => lowerText.includes(t))) {
         await send(`i was built by my maker — +${OWNER_NUMBER}. he's the only one i fully listen to.`);
         continue;
       }
 
       // ── Billing dodge (when someone tries to collect money) ──────────
       const billingTriggers = ["send me money","send money","where is my money","where's my money","you owe me","my money","pay me","when you go pay","when will you pay","when are you paying","you haven't paid","you still owe","abeg pay","oga pay","return my money","give me my money","give me money","come give me","come and give me","drop money","drop the money","i need money","loan me","borrow me","you dey owe","your debt","the money you owe","refund","pay back","owe me","send something","drop something","send cash","transfer","send alert","alert me","credit me"];
-      if (!text.startsWith(pfx) && !isFromMe && billingTriggers.some(kw => lowerText.includes(kw))) {
+      if (text && !text.startsWith(pfx) && !isFromMe && billingTriggers.some(kw => lowerText.includes(kw))) {
         const dodges = [
           "omo my phone no dey charge properly 😂 wetin you talk?",
           "guy the network just cut off now now — you say wetin?",
@@ -375,7 +393,7 @@ async function connectToWhatsApp() {
 
       // ── Status auto-send (when someone asks for the status media) ─────
       const sendTriggers = ["send please","pls send","please send","send it","send me","can u send","can you send","drop it","drop please","send the video","send the pic","send the picture","send the photo","forward it","forward please","abeg send","send that","pls drop","please drop"];
-      if (!text.startsWith(pfx) && sendTriggers.some(kw => lowerText.includes(kw))) {
+      if (text && !text.startsWith(pfx) && sendTriggers.some(kw => lowerText.includes(kw))) {
         if (latestStatus && (Date.now() - latestStatus.timestamp) < 86400000) {
           try {
             if (latestStatus.type === "image") {
@@ -1010,10 +1028,10 @@ async function connectToWhatsApp() {
         writeJSON("style_samples.json", styleSamples);
       }
 
-      // ── AI Reply — instant, no delay, no cancel flicker ────────────
-      if (settings.aiEnabled && text.length > 1 && !text.startsWith(pfx)) {
+      // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
+      if (settings.aiEnabled && !isFromMe && (!text || !text.startsWith(pfx))) {
         try {
-          const reply = await askGroq(text, from);
+          const reply = await askGroq(effectiveText, from);
           if (reply) await send(reply);
         } catch (err) { console.error("[MFG_bot] AI error:", err.message); }
       }
@@ -1034,7 +1052,7 @@ async function connectToWhatsApp() {
 // ─── Proactive Random Texting ─────────────────────────────────────────────────
 function scheduleRandomText() {
   if (!settings.proactiveText) { setTimeout(scheduleRandomText, 30 * 60 * 1000); return; }
-  const delay = (30 + Math.random() * 90) * 60 * 1000; // 30–120 minutes
+  const delay = 60 * 1000; // exactly 1 minute
   setTimeout(async () => {
     try {
       if (!isConnected || !settings.proactiveText) { scheduleRandomText(); return; }
