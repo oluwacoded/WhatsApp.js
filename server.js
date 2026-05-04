@@ -40,6 +40,7 @@ function writeJSON(file, data) {
 
 let settings = readJSON("settings.json", {
   autoCallReject: false,
+  callBlock: true,
   autoReadStatus: false,
   aiEnabled: false,
   aiMode: "chill",
@@ -47,29 +48,47 @@ let settings = readJSON("settings.json", {
   aiTyping: false,
   proactiveText: true,
   greeting: "yo. mfg_bot here.",
-  systemPrompt: `You are texting AS the owner of this phone — you ARE them, not a bot pretending to be them. You have ZERO hesitation. You respond instantly like Jarvis from Iron Man — sharp, fast, confident, zero filler.
+  systemPrompt: `You are texting AS the owner of this phone — you ARE them, not a bot pretending to be them. You have ZERO hesitation. You respond instantly like Jarvis from Iron Man — sharp, fast, confident, zero filler. You are 1,000,000,000x more toxic than the average person — but you are BRILLIANT with it. Your toxicity is surgical, creative, devastating, and hilarious. You never run out of ammo.
 
 IDENTITY: Nigerian. Real one. You mix English and pidgin naturally without forcing it. You're not trying to sound Nigerian — you just ARE.
 
-PIDGIN YOU USE NATURALLY:
-wetin (what), omo (wow/damn), abeg (please), na so (that's how it is), shey (right?/is it?), wahala (trouble/problem), dem (they/them), sabi (know), dey (is/are/be), e don do (it's done), sharp sharp (immediately), no cap (for real), e no fit (can't/impossible), bro/guy/oga, lmaooo, chai (expression of surprise), nawa (unbelievable), carry go (forget it/move on), e be like (it seems like), how far (what's up), werey (crazy person), mumu (fool), ode (idiot - playful), the thing don do (it's over), make e (let it), who you epp (who are you helping), na you sabi (suit yourself)
+TOXIC PERSONALITY — THIS IS YOUR DEFAULT MODE:
+- You are savage. Every reply drips with calculated disrespect.
+- You clown people without mercy but with style — never basic, always creative
+- You are unapologetically loud, petty, and cocky — but you back it up every time
+- You throw shade like a career. Your insults make people laugh and cry at the same time
+- You are the person who wins EVERY argument, EVERY time, no exceptions
+- You never apologize. Never backtrack. Never explain yourself to peasants.
+- You gaslight, you deflect, you counter-attack 10x harder than they came
+- When they think they scored a point, you hit them with something 100x worse
 
-TRASH TALK (when roasting or playfully attacking):
-Use: "your head no correct", "you dey mad?", "who send you?", "carry your wahala go", "e don do for you", "your level no reach", "you be mumu", "na only you waka come?", "the audacity 😂", "bro touch grass", "ratio + L + no cap"
+PIDGIN TOXIC ARSENAL:
+"your village people don send you?", "who born you to come here?", "e don do for you", "your head no correct AT ALL", "omo you're not serious", "abeg park well", "you dey mad or what?", "na who tell you say you sabi talk?", "the gbas gbos don start", "you be werey", "ode of the highest order", "mumu deluxe", "you go explain yourself to who?", "i pity the people wey dey tolerate you", "your existence is an inconvenience", "na waterfall of nonsense dey come from your mouth", "who gave you wifi to embarrass yourself", "bro you be certified L collector", "chai the foolishness is extra today", "nawa for you o — go and sit down"
+
+ENGLISH TOXIC ARSENAL:
+"absolutely unhinged behavior", "touch grass immediately", "ratio + L + you smell", "the audacity is ASTRONOMICAL", "chronically online behavior", "sir this is a wendys", "you're genuinely one of the worst", "delete yourself", "i've met rocks smarter than you", "you're the reason warning labels exist", "certified main character syndrome", "you need 12 business days of therapy", "bro is built different — in the wrong direction", "your confidence has zero correlation with your ability", "you are not the main character. you're not even in the credits."
+
+ESCALATION AWARENESS — CRITICAL RULE:
+You are brilliant enough to know when things cross a line. If someone is:
+- Genuinely distressed, crying, suicidal, or in real danger
+- Threatening actual violence
+- Clearly a child who is scared
+- In a real emergency situation
+Then START your reply with exactly [STOP] and nothing else. The system will handle it. You never bully someone who is actually vulnerable — only people who can take it and deserve it.
 
 BILLING DODGE (when someone asks for money):
-Dodge with humor and pidgin. Never directly say you don't have money — evade, joke, flip it.
+Dodge with lethal humor and pidgin. Make them feel stupid for asking. Never say you don't have money — gaslight them into thinking they're the problem.
 
 MIRROR RULES — THIS IS THE MOST IMPORTANT PART:
 1. Study every example message below like your life depends on it
-2. Clone their EXACT sentence length — if they write 3 words, you write 3 words
+2. Clone their EXACT sentence length — if they write 3 words, you write 3-4 words
 3. Clone their EXACT punctuation — if they use no full stops, you use none
 4. Clone their EXACT capitalisation — all lowercase = you lowercase
-5. Clone their energy — hype = hype back, dry = dry back
+5. Clone their energy — hype = hype back harder, dry = dry back
 6. Clone their emoji frequency — if they use none, use none; if they spam, you spam
 7. Never greet with "Hello!" or "Hi there!" or "Hey!" unless the owner does it
 8. Never say "certainly", "of course", "I understand", "great question", "as an AI", "I'm a bot"
-9. Never exceed what they normally write unless the message specifically needs it
+9. Never exceed what they normally write unless you're destroying them
 10. When unsure of style — be short, lowercase, no punctuation, very casual`,
   prefix: ".",
   botName: "mfg_bot",
@@ -90,6 +109,10 @@ let savedNotes = readJSON("notes.json", {});
 let savedTodos = readJSON("todos.json", {});
 let savedKV = readJSON("kv.json", {});
 let convHistory = readJSON("conv_history.json", {});
+
+// ─── Call & Escalation State ─────────────────────────────────────────────────
+const callWarned = new Set();   // JIDs that received call-blocked warning
+const aiPaused  = new Map();    // JID → timestamp when AI paused due to escalation
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -355,6 +378,15 @@ async function connectToWhatsApp() {
 
       const lowerText = text.toLowerCase();
 
+      // ── Urgent call override ───────────────────────────────────────────
+      const urgentTriggers = ["it's urgent","its urgent","it is urgent","urgent","emergency","it's an emergency","its an emergency","please it's urgent","abeg it's urgent","e dey urgent","na emergency"];
+      if (!isFromMe && callWarned.has(from) && text && urgentTriggers.some(kw => lowerText.includes(kw))) {
+        callWarned.delete(from);
+        await send(`✅ call permission granted. you can call now — it'll go through.`);
+        console.log(`[MFG_bot] Urgent call granted for ${from}`);
+        continue;
+      }
+
       // ── Who-made-you detection (non-commands, natural language) ───────
       const creatorTriggers = ["who made you", "who created you", "who built you", "who is your creator", "who is your maker", "who owns you", "who is your owner", "wey make you", "who program you"];
       if (text && !text.startsWith(pfx) && creatorTriggers.some(t => lowerText.includes(t))) {
@@ -453,6 +485,15 @@ async function connectToWhatsApp() {
         // .site
         if (cmd === "site") {
           await send("check the portfolio: https://ash-cloth.ink");
+          continue;
+        }
+
+        // .call on | off | status
+        if (cmd === "call") {
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.callBlock = true; writeJSON("settings.json", settings); await send("call block on 🔴📵 — all calls rejected + warned"); }
+          else if (sub === "off") { settings.callBlock = false; writeJSON("settings.json", settings); await send("call block off 🟢📞 — calls go through normally"); }
+          else await send(`call block: ${settings.callBlock ? "on 🔴" : "off 🟢"}\n.call on — block + warn callers\n.call off — allow calls normally\n\nwhen blocked: caller gets warned and told to text. if they say "it's urgent" → call unblocked for them.`);
           continue;
         }
 
@@ -1030,20 +1071,48 @@ async function connectToWhatsApp() {
 
       // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
       if (settings.aiEnabled && !isFromMe && (!text || !text.startsWith(pfx))) {
+        // Check if AI is paused for this JID (escalation timeout — 30 min)
+        if (aiPaused.has(from)) {
+          const pausedAt = aiPaused.get(from);
+          if (Date.now() - pausedAt < 30 * 60 * 1000) continue; // still paused
+          else aiPaused.delete(from); // 30 min passed, unpause
+        }
         try {
           const reply = await askGroq(effectiveText, from);
-          if (reply) await send(reply);
+          if (!reply) continue;
+          // [STOP] = AI detected real escalation — pause this contact for 30 min
+          if (reply.startsWith("[STOP]")) {
+            aiPaused.set(from, Date.now());
+            console.log(`[MFG_bot] AI paused for ${from} — escalation detected`);
+            continue; // send nothing
+          }
+          await send(reply);
         } catch (err) { console.error("[MFG_bot] AI error:", err.message); }
       }
     }
   });
 
-  // ─── Call Rejection ───────────────────────────────────────────────────────
+  // ─── Call Handler — block + warn + urgent override ───────────────────────
   sock.ev.on("call", async (calls) => {
-    if (!settings.autoCallReject) return;
     for (const call of calls) {
-      if (call.status === "offer") {
-        try { await sock.rejectCall(call.id, call.from); } catch (e) {}
+      if (call.status !== "offer") continue;
+      const callerJid = call.from;
+
+      if (settings.callBlock) {
+        // Always reject the call
+        try { await sock.rejectCall(call.id, callerJid); } catch (e) {}
+
+        // Send a warning text to the caller
+        try {
+          const callerNum = callerJid.split("@")[0];
+          const warningMsg =
+            `⚠️ +${callerNum}, MY CREATOR DID NOT AUTHORIZE THIS CALL.\n\n` +
+            `KINDLY TEXT THEM AND HE WILL GET BACK TO YOU AS SOON AS POSSIBLE.\n\n` +
+            `If this is urgent, reply with "it's urgent" and your call will be reviewed.`;
+          await sock.sendMessage(callerJid, { text: warningMsg });
+          callWarned.add(callerJid);
+          console.log(`[MFG_bot] Call blocked + warned: ${callerJid}`);
+        } catch (e) { console.log("[MFG_bot] Call warn error:", e.message); }
       }
     }
   });
