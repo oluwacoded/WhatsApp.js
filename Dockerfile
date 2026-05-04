@@ -13,17 +13,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /usr/src/app
 
-# Install root dependencies
 COPY package*.json ./
 RUN npm install
 
-# Install and build the React frontend
-COPY client/package*.json ./client/
-RUN cd client && npm install
-COPY client/ ./client/
-RUN cd client && npm run build
-
-# Copy the rest of the backend
 COPY . .
 
 EXPOSE 8080
