@@ -558,12 +558,10 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.log(`[MFG_bot] Port ${PORT} busy, retrying in 3s...`);
-    setTimeout(() => {
-      server.close();
-      server.listen(PORT, "0.0.0.0");
-    }, 3000);
+    console.error(`[MFG_bot] Port ${PORT} in use — exiting so workflow can restart cleanly`);
+    process.exit(1);
   } else {
     console.error("[MFG_bot] Server error:", err);
+    process.exit(1);
   }
 });
