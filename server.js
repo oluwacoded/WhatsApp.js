@@ -102,6 +102,7 @@ let userData = readJSON("users.json", {});
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
 let allChats = [];
+let recentMsgLog = [];
 let commandStats = {};
 let messageCount = 0;
 let latestStatus = null;
@@ -304,6 +305,17 @@ async function connectToWhatsApp() {
         msg.message.imageMessage?.caption ||
         msg.message.videoMessage?.caption || ""
       ).trim();
+      // Debug log — keep last 30 messages with metadata for diagnostics
+      recentMsgLog.unshift({
+        t: new Date().toISOString().slice(11,19),
+        from: from?.slice(-20),
+        fromMe: isFromMe,
+        kind: Object.keys(msg.message).filter(k => k !== "messageContextInfo")[0] || "?",
+        text: text ? text.slice(0, 60) : "(no text)",
+        result: "pending"
+      });
+      if (recentMsgLog.length > 30) recentMsgLog.length = 30;
+      const logTag = (r) => { if (recentMsgLog[0]) recentMsgLog[0].result = r; };
       const pfx = settings.prefix || ".";
 
       const send = (t) => sock.sendMessage(from, { text: t });
@@ -1070,24 +1082,31 @@ async function connectToWhatsApp() {
       }
 
       // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
-      if (settings.aiEnabled && !isFromMe && (!text || !text.startsWith(pfx))) {
-        // Check if AI is paused for this JID (escalation timeout — 30 min)
-        if (aiPaused.has(from)) {
-          const pausedAt = aiPaused.get(from);
-          if (Date.now() - pausedAt < 30 * 60 * 1000) continue; // still paused
-          else aiPaused.delete(from); // 30 min passed, unpause
+      if (!settings.aiEnabled) { logTag("skip:ai_disabled"); continue; }
+      if (isFromMe) { logTag("skip:fromMe"); continue; }
+      if (text && text.startsWith(pfx)) { logTag("skip:command"); continue; }
+      if (from?.endsWith("@g.us")) { logTag("skip:group"); continue; }
+      if (from?.endsWith("@broadcast")) { logTag("skip:broadcast"); continue; }
+      if (aiPaused.has(from)) {
+        const pausedAt = aiPaused.get(from);
+        if (Date.now() - pausedAt < 30 * 60 * 1000) { logTag("skip:paused"); continue; }
+        else aiPaused.delete(from);
+      }
+      try {
+        logTag("calling_groq");
+        const reply = await askGroq(effectiveText, from);
+        if (!reply) { logTag("err:groq_empty"); continue; }
+        if (reply.startsWith("[STOP]")) {
+          aiPaused.set(from, Date.now());
+          logTag("paused:escalation");
+          console.log(`[MFG_bot] AI paused for ${from} — escalation detected`);
+          continue;
         }
-        try {
-          const reply = await askGroq(effectiveText, from);
-          if (!reply) continue;
-          // [STOP] = AI detected real escalation — pause this contact for 30 min
-          if (reply.startsWith("[STOP]")) {
-            aiPaused.set(from, Date.now());
-            console.log(`[MFG_bot] AI paused for ${from} — escalation detected`);
-            continue; // send nothing
-          }
-          await send(reply);
-        } catch (err) { console.error("[MFG_bot] AI error:", err.message); }
+        await send(reply);
+        logTag("REPLIED: " + reply.slice(0, 40));
+      } catch (err) {
+        logTag("err:" + err.message.slice(0, 40));
+        console.error("[MFG_bot] AI error:", err.message);
       }
     }
   });
@@ -1162,6 +1181,9 @@ app.get("/api/status", (req, res) => res.json({
   hasGroqKey: !!process.env.GROQ_API_KEY,
   aiPausedCount: aiPaused.size
 }));
+
+// Recent messages log for debugging
+app.get("/api/recent", (req, res) => res.json({ recent: recentMsgLog }));
 
 // Diagnostic — tests if Groq actually works on this backend
 app.get("/api/diag", async (req, res) => {
