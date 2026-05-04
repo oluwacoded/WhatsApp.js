@@ -9,7 +9,8 @@ const {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  Browsers
+  Browsers,
+  downloadMediaMessage
 } = require("baileys");
 const express = require("express");
 const cors = require("cors");
@@ -201,7 +202,8 @@ async function connectToWhatsApp() {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
-      if (msg.key.fromMe || !msg.message) continue;
+      if (!msg.message) continue;
+      const isFromMe = msg.key.fromMe;
       messageCount++;
       const from = msg.key.remoteJid;
       const text = (
@@ -213,7 +215,11 @@ async function connectToWhatsApp() {
       const pfx = settings.prefix || ".";
 
       const send = (t) => sock.sendMessage(from, { text: t });
-      const senderIsOwner = isOwner(from);
+      // fromMe = sent from owner's linked device → always treat as owner
+      const senderIsOwner = isFromMe || isOwner(from);
+
+      // Skip non-command fromMe messages (don't echo back AI replies to yourself)
+      if (isFromMe && !text.startsWith(pfx)) continue;
 
       // Auto-read status
       if (settings.autoReadStatus && from.endsWith("@broadcast")) {
@@ -245,10 +251,39 @@ async function connectToWhatsApp() {
         const cmd = rawCmd.toLowerCase();
         trackCommand(cmd);
 
-        // .vv — resend as view once
+        // .vv — reveal a view-once photo/video (reply to it with .vv)
         if (cmd === "vv") {
-          const content = args.join(" ");
-          await sock.sendMessage(from, { text: content || "view this once." }, { viewOnce: true });
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          const quotedMsg = ctx?.quotedMessage;
+          if (!quotedMsg) {
+            await send("reply to a view-once photo or video with .vv to reveal it.");
+            continue;
+          }
+          const voContent =
+            quotedMsg.viewOnceMessage?.message ||
+            quotedMsg.viewOnceMessageV2?.message ||
+            quotedMsg.viewOnceMessageV2Extension?.message ||
+            quotedMsg;
+          const imgMsg = voContent.imageMessage;
+          const vidMsg = voContent.videoMessage;
+          if (!imgMsg && !vidMsg) {
+            await send("no view-once media found in that reply.");
+            continue;
+          }
+          try {
+            const fakeMsg = {
+              key: { remoteJid: from, id: ctx.stanzaId, fromMe: false, participant: ctx.participant },
+              message: voContent
+            };
+            const buffer = await downloadMediaMessage(fakeMsg, "buffer", {});
+            if (imgMsg) {
+              await sock.sendMessage(from, { image: buffer, caption: "👁 revealed" });
+            } else {
+              await sock.sendMessage(from, { video: buffer, caption: "👁 revealed" });
+            }
+          } catch (e) {
+            await send("couldn't restore that media. it may have expired.");
+          }
           continue;
         }
 
@@ -277,22 +312,29 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // .learnme — store style samples
+        // .learnme — teach the bot your style
+        // .learnme <text>  → save a style sample
+        // .learnme view    → see saved samples
+        // .learnme clear   → wipe all samples
         if (cmd === "learnme") {
           const sub = args[0]?.toLowerCase();
-          if (sub === "add") {
-            const sample = args.slice(1).join(" ");
-            if (sample) { styleSamples.push(sample); writeJSON("style_samples.json", styleSamples); await send("style learned."); }
-          } else if (sub === "view") {
-            await send(styleSamples.length ? styleSamples.slice(-5).join("\n---\n") : "no samples yet.");
+          if (sub === "view") {
+            await send(styleSamples.length
+              ? `saved style samples (${styleSamples.length}):\n\n` + styleSamples.slice(-5).map((s, i) => `${i + 1}. ${s}`).join("\n")
+              : "no style samples saved yet. send: .learnme <any text to teach me>");
           } else if (sub === "clear") {
-            styleSamples = []; writeJSON("style_samples.json", styleSamples); await send("style cleared.");
-          } else if (sub === "auto") {
-            if (!userData[from]) userData[from] = {};
-            userData[from].autoLearn = true; writeJSON("users.json", userData);
-            await send("auto-learn enabled for this chat.");
+            styleSamples = []; writeJSON("style_samples.json", styleSamples);
+            await send("all style samples cleared.");
           } else {
-            await send(".learnme add <text> | .learnme view | .learnme clear | .learnme auto");
+            const sample = args.join(" ").trim();
+            if (sample) {
+              styleSamples.push(sample);
+              if (styleSamples.length > 100) styleSamples = styleSamples.slice(-100);
+              writeJSON("style_samples.json", styleSamples);
+              await send(`got it. style sample saved (${styleSamples.length} total).\n\nuse .learnme view to see them, .learnme clear to reset.`);
+            } else {
+              await send("how to use .learnme:\n\n.learnme <text> — teach me your writing style\n.learnme view — see what you've taught me\n.learnme clear — forget everything");
+            }
           }
           continue;
         }
