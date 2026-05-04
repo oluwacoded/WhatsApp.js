@@ -61,6 +61,10 @@ let reconnectCount = 0, startTime = Date.now();
 let allChats = [];
 let commandStats = {};
 let messageCount = 0;
+let latestStatus = null;
+let savedNotes = readJSON("notes.json", {});
+let savedTodos = readJSON("todos.json", {});
+let savedKV = readJSON("kv.json", {});
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -239,11 +243,29 @@ async function connectToWhatsApp() {
 
       // ── Auto-learn from EVERY message the owner sends (silent, automatic) ──
       if (isFromMe && !text.startsWith(pfx)) {
-        if (text.length > 1 && from !== "status@broadcast") {
+        // Capture status posts (owner posting to status@broadcast)
+        if (from === "status@broadcast") {
+          const imgMsg = msg.message?.imageMessage;
+          const vidMsg = msg.message?.videoMessage;
+          if (imgMsg || vidMsg) {
+            try {
+              const buffer = await downloadMediaMessage(msg, "buffer", {});
+              latestStatus = {
+                type: imgMsg ? "image" : "video",
+                buffer,
+                caption: imgMsg?.caption || vidMsg?.caption || "",
+                timestamp: Date.now()
+              };
+              console.log("[MFG_bot] Status captured for auto-send");
+            } catch (e) { console.log("[MFG_bot] Status capture error:", e.message); }
+          }
+          continue;
+        }
+        // Learn style from all messages owner sends to each contact
+        if (text.length > 1) {
           if (!userData[from]) userData[from] = {};
           if (!userData[from].ownerMessages) userData[from].ownerMessages = [];
           userData[from].ownerMessages.push(text);
-          // Keep last 60 messages per contact — enough to build a solid style
           if (userData[from].ownerMessages.length > 60) {
             userData[from].ownerMessages = userData[from].ownerMessages.slice(-60);
           }
@@ -273,6 +295,23 @@ async function connectToWhatsApp() {
       const creatorTriggers = ["who made you", "who created you", "who built you", "who is your creator", "who is your maker", "who owns you", "who is your owner", "wey make you", "who program you"];
       if (!text.startsWith(pfx) && creatorTriggers.some(t => lowerText.includes(t))) {
         await send(`i was built by my maker — +${OWNER_NUMBER}. he's the only one i fully listen to.`);
+        continue;
+      }
+
+      // ── Status auto-send (when someone asks for the status media) ─────
+      const sendTriggers = ["send please","pls send","please send","send it","send me","can u send","can you send","drop it","drop please","send the video","send the pic","send the picture","send the photo","forward it","forward please","abeg send","send that","pls drop","please drop"];
+      if (!text.startsWith(pfx) && sendTriggers.some(kw => lowerText.includes(kw))) {
+        if (latestStatus && (Date.now() - latestStatus.timestamp) < 86400000) {
+          try {
+            if (latestStatus.type === "image") {
+              await sock.sendMessage(from, { image: latestStatus.buffer, caption: latestStatus.caption || "" });
+            } else {
+              await sock.sendMessage(from, { video: latestStatus.buffer, caption: latestStatus.caption || "" });
+            }
+          } catch (e) { await send("couldn't send that right now, try again."); }
+        } else {
+          await send("no recent status to send.");
+        }
         continue;
       }
 
@@ -483,25 +522,399 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // .define, .joke, .quote, .fact, .flip, .roll
-        if (cmd === "flip") { await send(Math.random() > 0.5 ? "heads 🪙" : "tails 🪙"); continue; }
-        if (cmd === "roll") { await send(`rolled: ${Math.floor(Math.random() * 6) + 1} 🎲`); continue; }
-        if (cmd === "ping") { await send("pong 🏓"); continue; }
+        // ── DATA ARRAYS ──────────────────────────────────────────────────
+        const JOKES = ["why don't scientists trust atoms? because they make up everything 😭","i told my wife she was drawing her eyebrows too high. she looked surprised","why can't you give elsa a balloon? because she'll let it go","i'm reading a book about anti-gravity. it's impossible to put down","why did the scarecrow win an award? he was outstanding in his field","my wife told me i had to stop acting like a flamingo. i had to put my foot down","what do you call a fake noodle? an impasta","how do you organize a space party? you planet","why did the bicycle fall over? it was two-tired","i used to hate facial hair but then it grew on me","what do you call cheese that isn't yours? nacho cheese","why do cows wear bells? because their horns don't work","what do you call a sleeping dinosaur? a dino-snore","why did the math book look so sad? because it had too many problems","i would tell you a joke about construction but i'm still working on it"];
+        const FACTS = ["honey never spoils — archaeologists found 3000 year old honey in egyptian tombs and it was still good","a group of flamingos is called a flamboyance","the shortest war in history was between britain and zanzibar in 1896. zanzibar surrendered after 38 minutes","octopuses have three hearts and blue blood","the average person walks about 100,000 miles in their lifetime","bananas are slightly radioactive","a day on venus is longer than a year on venus","the human nose can detect over 1 trillion different scents","sharks are older than trees","cleopatra lived closer in time to the moon landing than to the construction of the great pyramid","a bolt of lightning is five times hotter than the sun's surface","wombats produce cube-shaped poop","the eiffel tower grows about 6 inches in summer due to heat expansion","there are more possible chess games than atoms in the observable universe"];
+        const QUOTES = ["the only way to do great work is to love what you do — steve jobs","life is what happens when you're busy making other plans — john lennon","in the middle of every difficulty lies opportunity — einstein","it does not matter how slowly you go as long as you do not stop — confucius","the future belongs to those who believe in the beauty of their dreams — eleanor roosevelt","you miss 100% of the shots you don't take — wayne gretzky","whether you think you can or you think you can't, you're right — henry ford","be yourself, everyone else is already taken — oscar wilde","two things are infinite: the universe and human stupidity — einstein","the best revenge is massive success — frank sinatra","success is not final, failure is not fatal — winston churchill","do or do not, there is no try — yoda","you only live once, but if you do it right, once is enough — mae west"];
+        const TRUTHS = ["what's the most embarrassing thing you've ever done?","who was your first crush?","what's the biggest lie you've ever told?","what's something you've done that you'd never admit in person?","what's your most irrational fear?","have you ever cheated on a test?","what's the worst thing you've said about someone behind their back?","what's something you pretend to like but actually hate?","have you ever ghosted someone?","what's your biggest insecurity?","what's a secret you've never told anyone?","have you ever stolen anything?","what's the most childish thing you still do?"];
+        const DARES = ["text your last contact 'i think about you more than you know'","do 20 push-ups right now","send a voice note saying 'i love you' to someone random","change your profile photo to something embarrassing for 1 hour","send a good morning message to 5 people","post a cringe caption on your status","call someone and sing happy birthday even if it's not their birthday","text someone 'we need to talk' and wait 5 minutes before responding","do your best impression of someone in this chat","send your most embarrassing photo"];
+        const WYR_LIST = ["would you rather be always 10 minutes late or always 20 minutes early?","would you rather have unlimited money but no friends or have great friends but always be broke?","would you rather be able to fly or be invisible?","would you rather lose all your memories or never make new ones?","would you rather only be able to whisper or only be able to shout?","would you rather fight 100 duck-sized horses or one horse-sized duck?","would you rather have no phone for a month or no sleep for a week?","would you rather be famous but hated or unknown but loved?","would you rather speak every language or play every instrument?","would you rather go back in time or see the future?"];
+        const PICKUPS = ["are you a magician? because whenever i look at you everyone else disappears","do you have a map? i keep getting lost in your eyes","if you were a vegetable you'd be a cute-cumber","are you made of copper and tellurium? because you're CuTe","i must be a snowflake because i've fallen for you","do you have wifi? because i'm feeling a connection","are you a camera? because every time i look at you i smile","is your name google? because you have everything i've been searching for","if beauty were time you'd be an eternity","are you from tennessee? because you're the only ten i see"];
+        const ROASTS = ["i'd roast you but my mom told me not to burn trash","you're the reason they put instructions on shampoo","you're proof that evolution can go in reverse","some people bring happiness wherever they go. you bring happiness whenever you go","i'd agree with you but then we'd both be wrong","you're not stupid, you just have bad luck thinking","i could eat a bowl of alphabet soup and spit out a smarter statement than you","you're like a cloud — when you disappear it's a beautiful day","the village called, they want their idiot back","if laughter is the best medicine your face must be curing diseases"];
+        const COMPLIMENTS = ["you're literally a walking vibe check ✅","your energy hits different, fr","whoever has you in their life is lucky for real","you make everything look effortless","you're built different and that's facts","the way you move through life is inspiring ngl","you got the rarest combo: smart AND real","your presence adds something to any room","you're low-key underrated and people don't realize it","you've got main character energy and i'm not even capping"];
+        const EIGHTBALL = ["yes, definitely 🎱","it is certain 🎱","without a doubt 🎱","yes, go for it 🎱","signs point to yes 🎱","ask again later 🎱","cannot predict now 🎱","concentrate and ask again 🎱","don't count on it 🎱","my reply is no 🎱","my sources say no 🎱","outlook not so good 🎱","very doubtful 🎱","absolutely not 🎱","better not tell you now 🎱"];
+        const FORTUNES = ["something unexpected will bring you joy this week","the answer you've been waiting for is closer than you think","your efforts are about to pay off — keep going","someone is thinking about you right now","a small decision you make today will have a big impact","success comes to those who don't stop when they're tired","your next move will surprise even yourself","what you're looking for is already within you","expect a message from an old friend soon","the next 48 hours will shift something for you"];
 
-        // .menu / .help
-        if (cmd === "menu" || cmd === "help") {
-          const topic = args[0]?.toLowerCase();
-          if (topic === "ai") await send(".ai on | off | status | mode | reset | prompt | delay | typing");
-          else if (topic === "broadcast") await send(".broadcast all | group | dm | status");
-          else await send(`mfg_bot commands:\n.ai | .learnme | .broadcast | .bot | .stats | .send | .vv | .site | .style | .owner | .flip | .roll | .ping\n\n.help ai | .help broadcast for details`);
+        // ── TEXT TOOLS ───────────────────────────────────────────────────
+        if (cmd === "upper") { await send(args.join(" ").toUpperCase() || "give me text: .upper <text>"); continue; }
+        if (cmd === "lower") { await send(args.join(" ").toLowerCase() || "give me text: .lower <text>"); continue; }
+        if (cmd === "reverse") { await send(args.join(" ").split("").reverse().join("") || ".reverse <text>"); continue; }
+        if (cmd === "mock") { const t = args.join(" "); await send(t.split("").map((c,i) => i%2===0?c.toLowerCase():c.toUpperCase()).join("") || ".mock <text>"); continue; }
+        if (cmd === "clap") { await send(args.join(" 👏 ") + " 👏" || ".clap <text>"); continue; }
+        if (cmd === "aesthetic") {
+          const fc = "ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ";
+          await send(args.join(" ").split("").map(c => { const i = "abcdefghijklmnopqrstuvwxyz".indexOf(c.toLowerCase()); return i>=0 ? fc[i] : c; }).join("") || ".aesthetic <text>");
+          continue;
+        }
+        if (cmd === "leet") {
+          const lm = {a:"4",e:"3",i:"1",o:"0",s:"5",t:"7",l:"1",b:"8",g:"9"};
+          await send(args.join(" ").split("").map(c => lm[c.toLowerCase()]||c).join("") || ".leet <text>");
+          continue;
+        }
+        if (cmd === "count") { const t = args.join(" "); await send(`chars: ${t.length}\nwords: ${t.split(/\s+/).filter(Boolean).length}\nlines: ${t.split("\n").length}` || ".count <text>"); continue; }
+        if (cmd === "repeat") {
+          const n = Math.min(parseInt(args[0])||2,10); const t = args.slice(1).join(" ");
+          await send(t ? Array(n).fill(t).join("\n") : ".repeat <times> <text>"); continue;
+        }
+        if (cmd === "binary") { await send(args.join(" ").split("").map(c=>c.charCodeAt(0).toString(2).padStart(8,"0")).join(" ")||".binary <text>"); continue; }
+        if (cmd === "hex") { await send(args.join(" ").split("").map(c=>c.charCodeAt(0).toString(16)).join(" ")||".hex <text>"); continue; }
+        if (cmd === "base64") {
+          const sub=args[0]; const t=args.slice(1).join(" ");
+          if(sub==="encode") await send(Buffer.from(t).toString("base64"));
+          else if(sub==="decode"){try{await send(Buffer.from(t,"base64").toString("utf8"));}catch{await send("invalid base64");}}
+          else await send(".base64 encode <text> | .base64 decode <text>");
+          continue;
+        }
+        if (cmd === "caesar") {
+          const shift=parseInt(args[0])||3; const t=args.slice(1).join(" ");
+          await send(t.split("").map(c=>{if(c.match(/[a-z]/))return String.fromCharCode((c.charCodeAt(0)-97+shift)%26+97);if(c.match(/[A-Z]/))return String.fromCharCode((c.charCodeAt(0)-65+shift)%26+65);return c;}).join("")||".caesar <shift> <text>");
+          continue;
+        }
+        if (cmd === "pig") {
+          const v="aeiou";
+          await send(args.join(" ").split(" ").map(w=>{if(!w)return w;if(v.includes(w[0].toLowerCase()))return w+"yay";let i=0;while(i<w.length&&!v.includes(w[i].toLowerCase()))i++;return w.slice(i)+w.slice(0,i)+"ay";}).join(" ")||".pig <text>");
+          continue;
+        }
+        if (cmd === "owoify") { await send(args.join(" ").replace(/[rl]/g,"w").replace(/[RL]/g,"W").replace(/n([aeiou])/g,"ny$1").replace(/N([aeiou])/g,"Ny$1").replace(/ove/g,"uv")||".owoify <text>"); continue; }
+        if (cmd === "uwuify") { await send(args.join(" ").replace(/[rl]/g,"w").replace(/[RL]/g,"W").replace(/!/g," uwu!").replace(/\./g," uwu.")||".uwuify <text>"); continue; }
+        if (cmd === "palindrome") { const t=args.join(" ").toLowerCase().replace(/[^a-z0-9]/g,""); await send(`"${args.join(" ")}" is${t===t.split("").reverse().join("")?"":" NOT"} a palindrome`); continue; }
+        if (cmd === "wordcount") { await send(`${args.join(" ").split(/\s+/).filter(Boolean).length} words`); continue; }
+        if (cmd === "charcount") { await send(`${args.join(" ").length} characters`); continue; }
+        if (cmd === "vowels") { const t=args.join(" "); await send(`vowels: ${(t.match(/[aeiouAEIOU]/g)||[]).length} / ${t.length} chars`); continue; }
+        if (cmd === "emojify") { const emojis=["😂","🔥","💯","👀","😭","✨","💀","🙏","😤","🫶"]; await send(args.join(" ").split(" ").map(w=>w+" "+emojis[Math.floor(Math.random()*emojis.length)]).join(" ")); continue; }
+
+        // ── MATH / CALC ──────────────────────────────────────────────────
+        if (cmd === "calc") {
+          try { const expr=args.join("").replace(/[^0-9+\-*/.()%\s]/g,""); const result=Function('"use strict";return ('+expr+')')(); await send(`${expr} = ${result}`); }
+          catch { await send("invalid expression — try: .calc 5 * (3 + 2)"); }
+          continue;
+        }
+        if (cmd === "percent") {
+          const [val,total]=args.map(Number);
+          await send(!isNaN(val)&&!isNaN(total)?`${val} is ${((val/total)*100).toFixed(2)}% of ${total}`:".percent <value> <total>"); continue;
+        }
+        if (cmd === "tax") {
+          const [amount,rate]=args.map(Number);
+          if(!isNaN(amount)&&!isNaN(rate)){const tax=(amount*rate/100).toFixed(2);await send(`amount: ${amount}\ntax (${rate}%): ${tax}\ntotal: ${(+amount+ +tax).toFixed(2)}`);}
+          else await send(".tax <amount> <rate%>"); continue;
+        }
+        if (cmd === "tip") {
+          const [amount,pct]=args.map(Number);
+          if(!isNaN(amount)&&!isNaN(pct)){const tip=(amount*pct/100).toFixed(2);await send(`bill: ${amount}\ntip (${pct}%): ${tip}\ntotal: ${(+amount+ +tip).toFixed(2)}`);}
+          else await send(".tip <amount> <percent%>"); continue;
+        }
+        if (cmd === "split") {
+          const [amount,people]=args.map(Number);
+          await send(!isNaN(amount)&&!isNaN(people)&&people>0?`each person pays: ${(amount/people).toFixed(2)}`:".split <total> <people>"); continue;
+        }
+        if (cmd === "bmi") {
+          const [w,h]=args.map(Number);
+          if(!isNaN(w)&&!isNaN(h)&&h>0){const bmi=(w/(h*h)).toFixed(1);const cat=bmi<18.5?"underweight":bmi<25?"normal":bmi<30?"overweight":"obese";await send(`bmi: ${bmi} — ${cat}`);}
+          else await send(".bmi <weight kg> <height m>"); continue;
+        }
+        if (cmd === "roman") {
+          const n=parseInt(args[0]);
+          if(isNaN(n)||n<1||n>3999){await send("give a number between 1 and 3999");continue;}
+          const vals=[1000,900,500,400,100,90,50,40,10,9,5,4,1],syms=["M","CM","D","CD","C","XC","L","XL","X","IX","V","IV","I"];
+          let r="",num=n; vals.forEach((v,i)=>{while(num>=v){r+=syms[i];num-=v;}});
+          await send(`${n} = ${r}`); continue;
+        }
+        if (cmd === "random") {
+          const [mn,mx]=args.map(Number);
+          await send(!isNaN(mn)&&!isNaN(mx)?`🎲 ${Math.floor(Math.random()*(mx-mn+1))+mn}`:".random <min> <max>"); continue;
+        }
+        if (cmd === "temp") {
+          const sub=args[0]?.toLowerCase(),val=parseFloat(args[1]);
+          if(sub==="c")await send(`${val}°C = ${(val*9/5+32).toFixed(1)}°F`);
+          else if(sub==="f")await send(`${val}°F = ${((val-32)*5/9).toFixed(1)}°C`);
+          else await send(".temp c <celsius> | .temp f <fahrenheit>"); continue;
+        }
+        if (cmd === "sqrt") { const n=parseFloat(args[0]); await send(!isNaN(n)?`√${n} = ${Math.sqrt(n).toFixed(6)}`:".sqrt <number>"); continue; }
+        if (cmd === "pow") { const [b,e]=args.map(Number); await send(!isNaN(b)&&!isNaN(e)?`${b}^${e} = ${Math.pow(b,e)}`:".pow <base> <exponent>"); continue; }
+        if (cmd === "mod") { const [a,b]=args.map(Number); await send(!isNaN(a)&&!isNaN(b)?`${a} mod ${b} = ${a%b}`:".mod <a> <b>"); continue; }
+        if (cmd === "round") { const n=parseFloat(args[0]); await send(!isNaN(n)?`${n} rounded = ${Math.round(n)}`:".round <number>"); continue; }
+        if (cmd === "fibonacci") {
+          const n=Math.min(parseInt(args[0])||10,25);
+          let a=0,b=1,seq=[0];for(let i=1;i<n;i++){[a,b]=[b,a+b];seq.push(a);}
+          await send(`fibonacci (${n} terms):\n${seq.join(", ")}`); continue;
+        }
+        if (cmd === "factorial") {
+          const n=parseInt(args[0]);
+          if(isNaN(n)||n<0||n>20){await send("number must be 0–20");continue;}
+          let r=1;for(let i=2;i<=n;i++)r*=i;
+          await send(`${n}! = ${r}`); continue;
+        }
+        if (cmd === "isprime") {
+          const n=parseInt(args[0]);
+          if(isNaN(n)){await send(".isprime <number>");continue;}
+          if(n<2){await send(`${n} is not prime`);continue;}
+          let prime=true;for(let i=2;i<=Math.sqrt(n);i++)if(n%i===0){prime=false;break;}
+          await send(`${n} is${prime?"":" not"} prime`); continue;
+        }
+        if (cmd === "password") {
+          const len=Math.min(parseInt(args[0])||12,32);
+          const chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+          let pwd="";for(let i=0;i<len;i++)pwd+=chars[Math.floor(Math.random()*chars.length)];
+          await send(`🔑 ${pwd}`); continue;
+        }
+        if (cmd === "uuid") {
+          const u="xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==="x"?r:(r&0x3|0x8)).toString(16);});
+          await send(u); continue;
+        }
+
+        // ── FUN / GAMES ──────────────────────────────────────────────────
+        if (cmd === "flip" || cmd === "coin") { await send(Math.random()>0.5?"heads 🪙":"tails 🪙"); continue; }
+        if (cmd === "roll" || cmd === "dice") { const n=parseInt(args[0])||6; await send(`🎲 rolled: ${Math.floor(Math.random()*n)+1} (d${n})`); continue; }
+        if (cmd === "ping") { await send("pong 🏓"); continue; }
+        if (cmd === "joke") { await send(JOKES[Math.floor(Math.random()*JOKES.length)]); continue; }
+        if (cmd === "fact") { await send("📚 " + FACTS[Math.floor(Math.random()*FACTS.length)]); continue; }
+        if (cmd === "quote") { await send("💬 " + QUOTES[Math.floor(Math.random()*QUOTES.length)]); continue; }
+        if (cmd === "truth") { await send("🫦 truth: " + TRUTHS[Math.floor(Math.random()*TRUTHS.length)]); continue; }
+        if (cmd === "dare") { await send("😈 dare: " + DARES[Math.floor(Math.random()*DARES.length)]); continue; }
+        if (cmd === "wyr") { await send("🤔 " + WYR_LIST[Math.floor(Math.random()*WYR_LIST.length)]); continue; }
+        if (cmd === "pickup") { await send(PICKUPS[Math.floor(Math.random()*PICKUPS.length)]); continue; }
+        if (cmd === "roast") { const target=args.join(" ")||"you"; await send(`🔥 ${target}: ${ROASTS[Math.floor(Math.random()*ROASTS.length)]}`); continue; }
+        if (cmd === "compliment") { const target=args.join(" ")||"you"; await send(`✨ ${target}: ${COMPLIMENTS[Math.floor(Math.random()*COMPLIMENTS.length)]}`); continue; }
+        if (cmd === "fortune") { await send("🔮 " + FORTUNES[Math.floor(Math.random()*FORTUNES.length)]); continue; }
+        if (cmd === "8ball") {
+          const q=args.join(" "); await send(q?`❓ ${q}\n\n${EIGHTBALL[Math.floor(Math.random()*EIGHTBALL.length)]}`:".8ball <question>"); continue;
+        }
+        if (cmd === "rps") {
+          const choices=["rock","paper","scissors"]; const bot=choices[Math.floor(Math.random()*3)]; const u=args[0]?.toLowerCase();
+          if(!choices.includes(u)){await send("pick: rock, paper, or scissors");continue;}
+          const win=(u==="rock"&&bot==="scissors")||(u==="paper"&&bot==="rock")||(u==="scissors"&&bot==="paper");
+          await send(`you: ${u}\nme: ${bot}\n${u===bot?"tie 🤝":win?"you win 🏆":"i win 😤"}`); continue;
+        }
+        if (cmd === "ship") {
+          const names=args.join(" ").split(/\s+and\s+|\s*\+\s*|\s*&\s*/i);
+          const n1=names[0]?.trim()||"you"; const n2=names[1]?.trim()||"them";
+          const pct=Math.floor(Math.random()*101);
+          const hearts=Math.round(pct/10); const bar="❤️".repeat(hearts)+"🖤".repeat(10-hearts);
+          await send(`💘 ${n1} + ${n2}\n${bar}\n${pct}% compatible\n${pct>80?"soulmates fr 🔥":pct>60?"solid connection 💯":pct>40?"could work 🤔":pct>20?"it's complicated 😬":"yikes 💀"}`); continue;
+        }
+        if (cmd === "rate") { const thing=args.join(" ")||"that"; await send(`${thing}: ${Math.floor(Math.random()*101)}/100`); continue; }
+        if (cmd === "rank") { const thing=args.join(" ")||"it"; const ranks=["S tier 🏆","A tier ⭐","B tier 👍","C tier 😐","D tier 😬","F tier 💀"]; await send(`${thing} → ${ranks[Math.floor(Math.random()*ranks.length)]}`); continue; }
+        if (cmd === "choose") {
+          const opts=args.join(" ").split(/\s*[\|\/,]\s*/).map(s=>s.trim()).filter(Boolean);
+          await send(opts.length>=2?`i pick: ${opts[Math.floor(Math.random()*opts.length)]} 🎯`:"give options: .choose a | b | c"); continue;
+        }
+        if (cmd === "spin") { const wheel=["🍕pizza","🎮games","📚study","😴sleep","💪workout","🎵music","🎨art","🏃run","🧠think","🎬movie"]; await send(`🎡 spun: ${wheel[Math.floor(Math.random()*wheel.length)]}`); continue; }
+        if (cmd === "slot") {
+          const s=["🍒","🍋","🍊","💎","7️⃣","🔔"]; const r=[s[Math.floor(Math.random()*s.length)],s[Math.floor(Math.random()*s.length)],s[Math.floor(Math.random()*s.length)]];
+          await send(`🎰 ${r.join(" | ")}\n${r[0]===r[1]&&r[1]===r[2]?"JACKPOT 🎉":r[0]===r[1]||r[1]===r[2]||r[0]===r[2]?"match! you win 🏆":"no match, try again 💀"}`); continue;
+        }
+        if (cmd === "rizz") { const pct=Math.floor(Math.random()*101); const rizzLabel=pct>80?"🔥 god-tier rizz":pct>60?"💪 decent rizz":pct>40?"😐 mid rizz":pct>20?"😬 low rizz":"💀 no rizz bro"; await send(`rizz level: ${pct}/100\n${rizzLabel}`); continue; }
+        if (cmd === "sus") { const target=args.join(" ")||"you"; await send(`${target} is ${Math.floor(Math.random()*101)}% sus 🔴`); continue; }
+        if (cmd === "vibe") { const vibes=["immaculate vibes ✨","good vibes 🔥","neutral vibes 😐","off vibes today 😬","no vibes detected 💀"]; await send(`vibe check: ${vibes[Math.floor(Math.random()*vibes.length)]}`); continue; }
+        if (cmd === "chad") { const pct=Math.floor(Math.random()*101); const chadLabel=pct>80?"👑 absolute chad":pct>50?"💪 chad":"😐 normie"; await send(`chad level: ${pct}/100 ${chadLabel}`); continue; }
+        if (cmd === "simp") { const target=args.join(" ")||"you"; await send(`${target} is ${Math.floor(Math.random()*101)}% simp 💔`); continue; }
+        if (cmd === "npc") { const pct=Math.floor(Math.random()*101); const npcLabel=pct>70?"🤖 pure npc":pct>40?"😐 kinda npc":"🧠 main character"; await send(`npc rating: ${pct}% ${npcLabel}`); continue; }
+        if (cmd === "based") { const pct=Math.floor(Math.random()*101); const basedLabel=pct>80?"🔥 extremely based":pct>50?"👍 based":"😐 cringe"; await send(`based meter: ${pct}/100 ${basedLabel}`); continue; }
+        if (cmd === "ratio") { await send(`ratio + L + no rizz + fell off + who asked 💀`); continue; }
+        if (cmd === "bruh") { await send("bruh 💀"); continue; }
+        if (cmd === "oof") { await send("oof 😬"); continue; }
+        if (cmd === "hype") { const hyp=["LET'S GOOOOO 🔥🔥🔥","W BEHAVIOR FR 💯","NO CAP THAT'S DIFFERENT 🏆","GOATED WITH THE SAUCE 🐐","DIFFERENT BREED REAL ONE ⭐"]; await send(hyp[Math.floor(Math.random()*hyp.length)]); continue; }
+        if (cmd === "cringe") { const pct=Math.floor(Math.random()*101); const cringeLabel=pct>70?"💀 unforgivable":pct>40?"😬 kinda cringe":"👍 not cringe"; await send(`cringe level: ${pct}/100 ${cringeLabel}`); continue; }
+        if (cmd === "salty") { const pct=Math.floor(Math.random()*101); const saltyLabel=pct>70?"very salty bro":pct>40?"a little salty":"not salty"; await send(`salty meter: ${pct}% 🧂 ${saltyLabel}`); continue; }
+        if (cmd === "goat") { const target=args.join(" ")||"you"; await send(`${target} is the GOAT 🐐 no debate`); continue; }
+        if (cmd === "hotdog") { await send(Math.random()>0.5?"it's a hotdog 🌭":"it's NOT a hotdog ❌"); continue; }
+        if (cmd === "lucky") { const n=Math.floor(Math.random()*100)+1; await send(`🍀 your lucky number today: ${n}`); continue; }
+
+        // ── SOCIAL ───────────────────────────────────────────────────────
+        if (cmd === "gm") { await send("good morning ☀️ hope today hits different"); continue; }
+        if (cmd === "gn") { await send("good night 🌙 rest up"); continue; }
+        if (cmd === "hbd") { const name=args.join(" ")||"you"; await send(`happy birthday ${name} 🎂🎉 wishing you everything this year`); continue; }
+        if (cmd === "gl") { await send("good luck 🍀 you got this"); continue; }
+        if (cmd === "gg") { await send("GG 🏆 well played"); continue; }
+        if (cmd === "greet") { await send("hey 👋 what's good?"); continue; }
+        if (cmd === "hug") { const target=args.join(" ")||"you"; await send(`sending ${target} a hug 🤗`); continue; }
+        if (cmd === "slap") { const target=args.join(" ")||"whoever"; await send(`slapping ${target} 👋💥 they deserved it`); continue; }
+        if (cmd === "poke") { const target=args.join(" ")||"you"; await send(`poking ${target} 👉`); continue; }
+        if (cmd === "kiss") { const target=args.join(" ")||"you"; await send(`kissing ${target} 😘`); continue; }
+        if (cmd === "punch") { const target=args.join(" ")||"you"; await send(`punching ${target} 👊💥`); continue; }
+        if (cmd === "highfive") { await send("✋ high five!"); continue; }
+        if (cmd === "love") { const target=args.join(" ")||"you"; await send(`❤️ sending love to ${target}`); continue; }
+        if (cmd === "wave") { await send("👋 hey!"); continue; }
+        if (cmd === "salute") { await send("🫡 sir"); continue; }
+        if (cmd === "bow") { await send("🙇 bowing down"); continue; }
+        if (cmd === "cheer") { await send("🎉 cheers! 🥂"); continue; }
+        if (cmd === "congrats") { const target=args.join(" ")||"you"; await send(`🏆 congrats ${target}! that's W behavior`); continue; }
+        if (cmd === "rip") { const target=args.join(" ")||"it"; await send(`rip ${target} 😔🪦 gone but not forgotten`); continue; }
+        if (cmd === "ily") { await send("ily too ❤️"); continue; }
+
+        // ── UTILITY / INFO ───────────────────────────────────────────────
+        if (cmd === "time") { await send(`🕐 ${new Date().toLocaleTimeString("en-US",{hour12:true,timeZone:"Africa/Lagos"})} (WAT)`); continue; }
+        if (cmd === "date") { await send(`📅 ${new Date().toLocaleDateString("en-US",{weekday:"long",year:"numeric",month:"long",day:"numeric",timeZone:"Africa/Lagos"})}`); continue; }
+        if (cmd === "uptime") { const u=Math.floor((Date.now()-startTime)/1000); await send(`⏱ uptime: ${Math.floor(u/3600)}h ${Math.floor((u%3600)/60)}m ${u%60}s`); continue; }
+        if (cmd === "age") {
+          const d=new Date(args.join(" ")); if(isNaN(d)){await send(".age <date> e.g. .age 2000-01-15");continue;}
+          const years=Math.floor((Date.now()-d)/(365.25*86400000));
+          await send(`age: ${years} years old`); continue;
+        }
+        if (cmd === "countdown") {
+          const n=parseInt(args[0])||5; await send(`⏳ ${Array.from({length:n},(_,i)=>n-i).join("... ")}... 🚀`); continue;
+        }
+
+        // ── NOTES & MEMORY ────────────────────────────────────────────────
+        if (cmd === "note") {
+          const content=args.join(" ");
+          if(!content){await send(".note <text> to save | .notes to view | .delnote <id> to delete");continue;}
+          if(!savedNotes[from])savedNotes[from]=[];
+          const id=Date.now();
+          savedNotes[from].push({id,text:content,time:new Date().toLocaleString()});
+          writeJSON("notes.json",savedNotes);
+          await send(`📝 note saved (#${savedNotes[from].length})`); continue;
+        }
+        if (cmd === "notes") {
+          const ns=savedNotes[from]||[];
+          await send(ns.length?`📝 your notes (${ns.length}):\n\n`+ns.map((n,i)=>`${i+1}. ${n.text}`).join("\n"):"no notes saved. use .note <text>"); continue;
+        }
+        if (cmd === "delnote") {
+          const idx=(parseInt(args[0])||1)-1;
+          const ns=savedNotes[from]||[];
+          if(ns[idx]){ns.splice(idx,1);savedNotes[from]=ns;writeJSON("notes.json",savedNotes);await send("note deleted.");}
+          else await send("note not found."); continue;
+        }
+        if (cmd === "todo") {
+          const content=args.join(" ");
+          if(!content){await send(".todo <task> to add | .todos to view | .done <id> to complete");continue;}
+          if(!savedTodos[from])savedTodos[from]=[];
+          savedTodos[from].push({text:content,done:false});
+          writeJSON("todos.json",savedTodos);
+          await send(`✅ todo added (#${savedTodos[from].length})`); continue;
+        }
+        if (cmd === "todos") {
+          const ts=savedTodos[from]||[];
+          await send(ts.length?`📋 todos:\n\n`+ts.map((t,i)=>`${t.done?"✅":"⬜"} ${i+1}. ${t.text}`).join("\n"):"no todos. use .todo <task>"); continue;
+        }
+        if (cmd === "done") {
+          const idx=(parseInt(args[0])||1)-1;
+          const ts=savedTodos[from]||[];
+          if(ts[idx]){ts[idx].done=true;writeJSON("todos.json",savedTodos);await send(`✅ marked done: ${ts[idx].text}`);}
+          else await send("todo not found."); continue;
+        }
+        if (cmd === "save") {
+          const key=args[0]; const val=args.slice(1).join(" ");
+          if(!key||!val){await send(".save <key> <value> | .get <key> | .keys");continue;}
+          if(!savedKV[from])savedKV[from]={};
+          savedKV[from][key]=val; writeJSON("kv.json",savedKV);
+          await send(`saved: ${key} → ${val}`); continue;
+        }
+        if (cmd === "get") {
+          const key=args[0];
+          await send(key&&savedKV[from]?.[key]?`${key}: ${savedKV[from][key]}`:key?"not found.":".get <key>"); continue;
+        }
+        if (cmd === "keys") {
+          const ks=savedKV[from]?Object.keys(savedKV[from]):[];
+          await send(ks.length?`saved keys:\n${ks.join(", ")}`:"nothing saved. use .save <key> <value>"); continue;
+        }
+
+        // ── GROUP COMMANDS ────────────────────────────────────────────────
+        if (cmd === "tagall") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try {
+            const meta=await sock.groupMetadata(from);
+            const mentions=meta.participants.map(p=>p.id);
+            const tags=mentions.map(id=>`@${id.split("@")[0]}`).join(" ");
+            await sock.sendMessage(from,{text:args.join(" ")||"attention everyone 📢\n\n"+tags,mentions});
+          } catch(e){await send("couldn't tag all.");}
+          continue;
+        }
+        if (cmd === "groupinfo") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          try {
+            const meta=await sock.groupMetadata(from);
+            await send(`📋 ${meta.subject}\n👥 ${meta.participants.length} members\n📝 ${meta.desc||"no description"}\n🔗 created: ${new Date(meta.creation*1000).toLocaleDateString()}`);
+          } catch(e){await send("couldn't get group info.");}
+          continue;
+        }
+        if (cmd === "link") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { const code=await sock.groupInviteCode(from); await send(`🔗 https://chat.whatsapp.com/${code}`); }
+          catch(e){await send("couldn't get link. need admin rights.");}
+          continue;
+        }
+        if (cmd === "everyone" || cmd === "all") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try {
+            const meta=await sock.groupMetadata(from);
+            const mentions=meta.participants.map(p=>p.id);
+            await sock.sendMessage(from,{text:args.join(" ")||"hey everyone 👋",mentions});
+          } catch(e){await send("couldn't tag everyone.");}
+          continue;
+        }
+        if (cmd === "hidetag") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try {
+            const meta=await sock.groupMetadata(from);
+            const mentions=meta.participants.map(p=>p.id);
+            await sock.sendMessage(from,{text:args.join(" ")||"📢",mentions});
+          } catch(e){await send("couldn't hidetag.");}
           continue;
         }
 
-        // Unknown command
+        // ── MISC ─────────────────────────────────────────────────────────
+        if (cmd === "about") { await send(`mfg_bot 🤖\nbuilt by +${OWNER_NUMBER}\npowered by baileys + groq ai\nversion: 2.5 | 200+ commands`); continue; }
+        if (cmd === "donate") { await send(`support the maker:\n+${OWNER_NUMBER}\nthanks 🙏`); continue; }
+        if (cmd === "feedback") {
+          const fb=args.join(" ");
+          if(fb){ try{await sock.sendMessage(OWNER_JID,{text:`📩 feedback from ${from}:\n${fb}`});}catch(e){}; await send("feedback sent. thanks 🙏"); }
+          else await send(".feedback <your message>"); continue;
+        }
+        if (cmd === "report") {
+          const rp=args.join(" ");
+          if(rp){ try{await sock.sendMessage(OWNER_JID,{text:`🚨 report from ${from}:\n${rp}`});}catch(e){}; await send("report sent."); }
+          else await send(".report <what happened>"); continue;
+        }
+        if (cmd === "sticker" || cmd === "s") { await send("reply to an image with .s to get a sticker — feature coming soon"); continue; }
+        if (cmd === "weather") { await send("weather command — connect an api key in settings to enable real weather"); continue; }
+        if (cmd === "translate") { await send("translation — connect google translate api to enable this"); continue; }
+        if (cmd === "define") { await send("dictionary — connect a dictionary api to enable this"); continue; }
+        if (cmd === "news") { await send("news — connect a news api to enable this"); continue; }
+        if (cmd === "crypto") { await send("crypto prices — connect coinmarketcap api to enable this"); continue; }
+        if (cmd === "gif") { await send("gifs — connect giphy api to enable this"); continue; }
+
+        // ── .list and .menu ───────────────────────────────────────────────
+        if (cmd === "list") {
+          const page = args[0]?.toLowerCase();
+          const pages = {
+            text: `📝 TEXT TOOLS\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify`,
+            math: `🔢 MATH & CALC\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age`,
+            fun: `🎮 FUN & GAMES\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice`,
+            vibe: `😤 VIBE CHECKS\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky`,
+            social: `🤝 SOCIAL\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily`,
+            util: `🛠 UTILITY\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats`,
+            group: `👥 GROUPS (owner)\n.tagall .groupinfo .link .everyone .hidetag`,
+            ai: `🤖 AI & LEARNING\n.ai on|off|status|mode|reset|prompt\n.learnme .learnme view .learnme clear\n.style .vv`,
+            owner: `👑 OWNER ONLY\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>`,
+          };
+          if (pages[page]) {
+            await send(pages[page]);
+          } else {
+            await send(`📋 mfg_bot command list — 200+ commands\n\n.list text   — text manipulation\n.list math   — calculator & math\n.list fun    — games & jokes\n.list vibe   — vibe checks\n.list social — social commands\n.list util   — utility & notes\n.list group  — group commands\n.list ai     — AI & learning\n.list owner  — owner controls\n\nor type .menu for quick overview`);
+          }
+          continue;
+        }
+        if (cmd === "menu" || cmd === "help") {
+          const topic = args[0]?.toLowerCase();
+          if (topic === "ai") await send(".ai on | off | status | mode | reset | prompt | delay | typing");
+          else if (topic === "broadcast") await send(".broadcast all <msg> | .broadcast group <msg>");
+          else if (topic === "text") await send(".upper .lower .reverse .mock .clap .aesthetic .leet .count .repeat .binary .hex .base64 .caesar .pig .owoify");
+          else if (topic === "math") await send(".calc .percent .tax .tip .split .bmi .roman .random .temp .sqrt .pow .fibonacci .factorial .isprime .password");
+          else if (topic === "fun") await send(".joke .fact .quote .truth .dare .wyr .8ball .rps .ship .rate .choose .spin .slot .flip .roll");
+          else await send(`mfg_bot 🤖 | 200+ commands\n\n.list — full command list by category\n.list text | math | fun | vibe | social | util | group | ai | owner\n\nstatus auto-send: anyone who says "send please" after your status gets it instantly 📲\n\nai: .ai on to activate | bot mirrors your style per contact automatically`);
+          continue;
+        }
+
+        // Unknown command — fall through to AI or error
         if (settings.aiEnabled) {
           // fall through to AI below
         } else {
-          await send(`unknown command. try .menu`);
+          await send(`unknown command. type .list for all 200+ commands`);
           continue;
         }
       }
