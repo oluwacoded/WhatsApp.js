@@ -1,87 +1,141 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const express = require('express');
-const cors = require('cors');
-const qrcode = require('qrcode-terminal');
+const {
+  default: makeWASocket,
+  DisconnectReason,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
+} = require("@whiskeysockets/baileys");
+const express = require("express");
+const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+const pino = require("pino");
 
 const app = express();
-const port = process.env.PORT || 3000;
-const host = '0.0.0.0'; // Essential for Railway to connect to the internet
-
-// Enable CORS so your Netlify site can talk to Railway
 app.use(cors());
 app.use(express.json());
 
-let lastQr = "";
-let isReady = false;
+const SETTINGS_FILE = path.join(__dirname, "settings.json");
 
-// Initialize the WhatsApp Client
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        handleSIGINT: false,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-        ],
-        // Points to the Chromium installed by your Dockerfile
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
     }
-});
+  } catch {}
+  return {
+    autoCallReject: false,
+    greeting: "Hello! I am MFG_bot. How can I help you today?",
+    systemPrompt: "You are MFG_bot, a helpful and friendly WhatsApp assistant. Answer questions clearly and concisely.",
+  };
+}
 
-// WhatsApp Events
-client.on('qr', (qr) => {
-    lastQr = qr;
-    console.log('QR RECEIVED. Scan this in your dashboard.');
-    qrcode.generate(qr, {small: true});
-});
+function saveSettings(data) {
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2)); } catch {}
+}
 
-client.on('ready', () => {
-    isReady = true;
-    lastQr = "";
-    console.log('WhatsApp Client is ready!');
-});
+let settings = loadSettings();
+let sock = null;
+let currentQr = null;
+let isConnected = false;
+let hasQr = false;
+let reconnectTimer = null;
 
-client.on('disconnected', (reason) => {
-    isReady = false;
-    console.log('Client was logged out', reason);
-    client.initialize();
-});
+async function connectToWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+  const { version } = await fetchLatestBaileysVersion();
+  const logger = pino({ level: "silent" });
 
-// API Endpoints for your Website
-app.get('/', (req, res) => {
-    res.send('Bot is running');
-});
+  sock = makeWASocket({
+    version, logger,
+    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+    printQRInTerminal: false,
+    generateHighQualityLinkPreview: true,
+  });
 
-app.get('/status', (req, res) => {
-    res.json({ 
-        connected: isReady,
-        hasQr: lastQr !== "" 
-    });
-});
-
-app.get('/qr', (req, res) => {
-    if (lastQr) {
-        res.json({ qr: lastQr });
-    } else {
-        res.json({ message: "No QR code available. Already logged in or initializing." });
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) { currentQr = qr; hasQr = true; isConnected = false; }
+    if (connection === "open") {
+      isConnected = true; hasQr = false; currentQr = null;
+      console.log("[MFG_bot] WhatsApp connected");
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     }
+    if (connection === "close") {
+      isConnected = false;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      if (code !== DisconnectReason.loggedOut) {
+        reconnectTimer = setTimeout(connectToWhatsApp, 5000);
+      } else { currentQr = null; hasQr = false; }
+    }
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+    for (const msg of messages) {
+      if (msg.key.fromMe || !msg.message) continue;
+      const from = msg.key.remoteJid;
+      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+      if (!text) continue;
+      if (process.env.OPENAI_API_KEY) {
+        try {
+          const res = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+            body: JSON.stringify({ model: "gpt-3.5-turbo", messages: [{ role: "system", content: settings.systemPrompt }, { role: "user", content: text }] }),
+          });
+          const data = await res.json();
+          const reply = data.choices?.[0]?.message?.content;
+          if (reply) await sock.sendMessage(from, { text: reply });
+        } catch (err) { console.error("[MFG_bot] OpenAI error:", err.message); }
+      }
+    }
+  });
+
+  sock.ev.on("call", async (calls) => {
+    if (!settings.autoCallReject) return;
+    for (const call of calls) {
+      if (call.status === "offer") await sock.rejectCall(call.id, call.from);
+    }
+  });
+}
+
+app.get("/", (req, res) => res.send("Bot is running"));
+app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr }));
+app.get("/qr", (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR available" }));
+
+app.post("/request-pairing-code", async (req, res) => {
+  try {
+    const cleaned = String(req.body.phoneNumber || "").replace(/[^0-9]/g, "");
+    if (!cleaned) return res.status(400).json({ error: "phoneNumber required" });
+    const code = await sock.requestPairingCode(cleaned);
+    res.json({ code });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/update-prompt', (req, res) => {
-    const { prompt } = req.body;
-    console.log("New Personality System Prompt received:", prompt);
-    res.json({ success: true, message: "Personality updated!" });
+app.get("/get-features", (req, res) => res.json({ autoCallReject: settings.autoCallReject }));
+app.post("/set-feature", (req, res) => {
+  if (req.body.feature === "autoCallReject") {
+    settings.autoCallReject = Boolean(req.body.enabled);
+    saveSettings(settings);
+    return res.json({ success: true });
+  }
+  res.status(400).json({ error: "Unknown feature" });
 });
 
-// Start the bot and the web server
-client.initialize();
-
-app.listen(port, host, () => {
-    console.log(`Server is live and listening at http://${host}:${port}`);
+app.get("/get-greeting", (req, res) => res.json({ message: settings.greeting }));
+app.post("/set-greeting", (req, res) => {
+  if (!req.body.message) return res.status(400).json({ error: "message required" });
+  settings.greeting = req.body.message; saveSettings(settings); res.json({ success: true });
 });
+
+app.get("/get-system-prompt", (req, res) => res.json({ prompt: settings.systemPrompt }));
+app.post("/set-system-prompt", (req, res) => {
+  if (!req.body.prompt) return res.status(400).json({ error: "prompt required" });
+  settings.systemPrompt = req.body.prompt; saveSettings(settings); res.json({ success: true });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => { console.log(`[MFG_bot] Server on port ${PORT}`); connectToWhatsApp(); });
