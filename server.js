@@ -42,7 +42,7 @@ let settings = readJSON("settings.json", {
   autoCallReject: false,
   callBlock: true,
   autoReadStatus: false,
-  aiEnabled: false,
+  aiEnabled: true,
   aiMode: "chill",
   aiDelay: 0,
   aiTyping: false,
