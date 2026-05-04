@@ -1,6 +1,7 @@
 FROM node:18-slim
 
 RUN apt-get update && apt-get install -y \
+    git \
     python3 \
     make \
     g++ \
@@ -9,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /usr/src/app
 
 COPY package*.json ./
-RUN npm install
+RUN npm install --no-audit --no-fund
 
 COPY . .
 
