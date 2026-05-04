@@ -57,9 +57,21 @@ function getAuthState() {
 async function connectToWhatsApp() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
+
+  // Clear empty auth folder — prevents Baileys confusion on reconnect
+  const authCheck = getAuthState();
+  if (authCheck.exists && authCheck.files.length === 0) {
+    console.log("[MFG_bot] Found empty auth folder — clearing it");
+    try { fs.rmdirSync(AUTH_DIR); } catch (e) {}
+  }
+
   try {
     console.log("[MFG_bot] Connecting... Auth:", JSON.stringify(getAuthState()));
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+
+    let baileysVer = "unknown";
+    try { baileysVer = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
+    console.log("[MFG_bot] Baileys version:", baileysVer);
 
     sock = makeWASocket({
       version: [2, 3000, 1023044367],
@@ -108,8 +120,9 @@ async function connectToWhatsApp() {
         isConnected = false;
         const code = lastDisconnect?.error?.output?.statusCode;
         const errMsg = lastDisconnect?.error?.message || "unknown";
+        const errOutput = JSON.stringify(lastDisconnect?.error?.output || {});
         console.log("[MFG_bot] Connection closed. Code:", code, "| Message:", errMsg);
-        console.log("[MFG_bot] Full error:", JSON.stringify(lastDisconnect?.error?.output || {}));
+        console.log("[MFG_bot] Full error:", errOutput);
         if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
         if (code === DisconnectReason.loggedOut) {
           console.log("[MFG_bot] Logged out — clearing credentials");
@@ -162,6 +175,8 @@ app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr }));
 app.get("/qr", (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR available" }));
 
 app.get("/debug", (req, res) => {
+  let baileysVersion = "unknown";
+  try { baileysVersion = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
   res.json({
     connected: isConnected,
     hasQr,
@@ -169,6 +184,7 @@ app.get("/debug", (req, res) => {
     auth: getAuthState(),
     hasSock: !!sock,
     hasReconnectTimer: !!reconnectTimer,
+    baileysVersion,
   });
 });
 
