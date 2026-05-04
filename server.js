@@ -1001,13 +1001,10 @@ async function connectToWhatsApp() {
         writeJSON("style_samples.json", styleSamples);
       }
 
-      // ── AI Reply — instant, no delay ────────────────────────────────
+      // ── AI Reply — instant, no delay, no cancel flicker ────────────
       if (settings.aiEnabled && text.length > 1 && !text.startsWith(pfx)) {
         try {
-          // Fire typing indicator without awaiting — don't let it slow down the response
-          if (settings.aiTyping) sock.sendPresenceUpdate("composing", from).catch(() => {});
           const reply = await askGroq(text, from);
-          if (settings.aiTyping) sock.sendPresenceUpdate("paused", from).catch(() => {});
           if (reply) await send(reply);
         } catch (err) { console.error("[MFG_bot] AI error:", err.message); }
       }
