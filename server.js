@@ -103,6 +103,7 @@ let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
 let allChats = [];
 let recentMsgLog = [];
+let lastGroqError = null;
 let commandStats = {};
 let messageCount = 0;
 let latestStatus = null;
@@ -183,23 +184,77 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
       })
     });
     const data = await resp.json();
-    if (!resp.ok) { console.error("[MFG_bot] Groq error:", JSON.stringify(data)); return null; }
-    const reply = data.choices?.[0]?.message?.content?.trim() || null;
+    if (!resp.ok) {
+      console.error("[MFG_bot] Groq error:", JSON.stringify(data).slice(0, 300));
+      lastGroqError = JSON.stringify(data).slice(0, 300);
+      return await fallbackReply(userText, jid);
+    }
+    const finishReason = data.choices?.[0]?.finish_reason || "?";
+    let reply = data.choices?.[0]?.message?.content?.trim() || null;
+    console.log(`[MFG_bot] Groq finish=${finishReason} replyLen=${reply?.length || 0}`);
 
-    // Save conversation history per contact
+    // If empty (content filter / refusal), retry with softer prompt
+    if (!reply) {
+      console.log(`[MFG_bot] Empty Groq reply (finish=${finishReason}) — retrying with soft prompt`);
+      lastGroqError = `empty reply, finish_reason=${finishReason}`;
+      reply = await retryWithSoftPrompt(userText, jid);
+    }
+    if (!reply) reply = await fallbackReply(userText, jid);
+
     if (reply) {
       if (!convHistory[jid]) convHistory[jid] = [];
       convHistory[jid].push({ role: "user", content: userText });
       convHistory[jid].push({ role: "assistant", content: reply });
       if (convHistory[jid].length > 20) convHistory[jid] = convHistory[jid].slice(-20);
-      // Save async — don't block the reply
       setImmediate(() => writeJSON("conv_history.json", convHistory));
     }
     return reply;
   } catch (err) {
     console.error("[MFG_bot] Groq fetch error:", err.message);
-    return null;
+    lastGroqError = "fetch err: " + err.message;
+    return await fallbackReply(userText, jid);
   }
+}
+
+// Soft retry — Groq sometimes refuses overly toxic prompts. Try a milder one.
+async function retryWithSoftPrompt(userText, jid) {
+  try {
+    const key = process.env.GROQ_API_KEY;
+    const samples = (userData[jid]?.ownerMessages || []).slice(-15);
+    const sys = `You are texting AS the owner. Reply in their style — short, casual, lowercase, Nigerian pidgin/English mix. Be playful and slightly cheeky but never refuse to reply. Always respond with at least one short word.${samples.length ? "\n\nExamples of how the owner texts:\n" + samples.map(m => `"${m}"`).join("\n") : ""}`;
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [{ role: "system", content: sys }, { role: "user", content: userText }],
+        max_tokens: 80, temperature: 0.85
+      })
+    });
+    const d = await resp.json();
+    const r = d.choices?.[0]?.message?.content?.trim();
+    console.log(`[MFG_bot] Soft retry replyLen=${r?.length || 0}`);
+    return r || null;
+  } catch (e) { console.error("[MFG_bot] Soft retry err:", e.message); return null; }
+}
+
+// Last resort — pick a contextual short reply so the bot is NEVER silent
+function fallbackReply(userText, jid) {
+  const t = (userText || "").toLowerCase().trim();
+  const banks = {
+    greeting: ["yo", "sup", "wetin happen", "hey", "wassup", "talk to me"],
+    question: ["lol wetin", "explain", "say wetin", "ehn?", "how?", "tell me"],
+    short: ["k", "ok", "noted", "lol", "mhm", "alright"],
+    media: ["seen", "lol", "nice", "ok", "🤣", "mad oh"],
+    default: ["lol", "wetin sef", "hmm", "okay", "talk", "say it"]
+  };
+  let bank;
+  if (/^(hi|hey|hello|yo|sup|wassup|hafa|how)/.test(t)) bank = banks.greeting;
+  else if (/\?$/.test(t)) bank = banks.question;
+  else if (t.length < 4) bank = banks.short;
+  else if (t.startsWith("[sent")) bank = banks.media;
+  else bank = banks.default;
+  return bank[Math.floor(Math.random() * bank.length)];
 }
 
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
@@ -1183,7 +1238,7 @@ app.get("/api/status", (req, res) => res.json({
 }));
 
 // Recent messages log for debugging
-app.get("/api/recent", (req, res) => res.json({ recent: recentMsgLog }));
+app.get("/api/recent", (req, res) => res.json({ recent: recentMsgLog, lastGroqError }));
 
 // Diagnostic — tests if Groq actually works on this backend
 app.get("/api/diag", async (req, res) => {
