@@ -115,16 +115,18 @@ async function connectToWhatsApp() {
 
   sock = makeWASocket({
     version, auth: state,
-    printQRInTerminal: !usingPairingCode,   // QR off when using phone pairing
+    printQRInTerminal: !usingPairingCode,
     logger: pino({ level: "silent" }),
-    browser: Browsers.ubuntu("Chrome"),
+    browser: Browsers.baileys("Desktop"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 10000,
+    keepAliveIntervalMs: 25000,
     retryRequestDelayMs: 2000,
     maxMsgRetryCount: 3,
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
+    markOnlineOnConnect: false,
+    getMessage: async () => ({ conversation: "" }),
   });
 
   // ─── Pairing Code Request ─────────────────────────────────────────────────
@@ -162,15 +164,19 @@ async function connectToWhatsApp() {
     }
     if (connection === "close") {
       isConnected = false;
-      const code = lastDisconnect?.error?.output?.statusCode;
+      const err = lastDisconnect?.error;
+      const code = err?.output?.statusCode;
+      const reason = err?.message || err?.toString() || "unknown";
       const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reconnect: ${shouldReconnect}`);
+      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reason: ${reason}. Reconnect: ${shouldReconnect}`);
       if (code === DisconnectReason.loggedOut) {
         fs.rmSync(path.join(__dirname, "auth_info_baileys"), { recursive: true, force: true });
       }
       if (shouldReconnect) {
         reconnectCount++;
-        setTimeout(connectToWhatsApp, Math.min(reconnectCount * 5000, 30000));
+        const delay = Math.min(reconnectCount * 8000, 60000);
+        console.log(`[MFG_bot] Reconnecting in ${delay/1000}s (attempt ${reconnectCount})...`);
+        setTimeout(connectToWhatsApp, delay);
       }
     }
   });
