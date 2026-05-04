@@ -2,6 +2,7 @@ const {
   default: makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
+  fetchLatestBaileysVersion,
 } = require("@whiskeysockets/baileys");
 const express = require("express");
 const cors = require("cors");
@@ -60,7 +61,14 @@ async function connectToWhatsApp() {
     console.log("[MFG_bot] Connecting... Auth:", JSON.stringify(getAuthState()));
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
 
+    const { version } = await fetchLatestBaileysVersion().catch(() => {
+      console.log("[MFG_bot] Could not fetch latest version, using fallback");
+      return { version: [2, 3000, 1015901307] };
+    });
+    console.log("[MFG_bot] Using WA version:", version.join("."));
+
     sock = makeWASocket({
+      version,
       auth: state,
       printQRInTerminal: true,
       logger: pino({ level: "silent" }),
