@@ -46,7 +46,7 @@ let settings = readJSON("settings.json", {
   aiDelay: 2,
   aiTyping: true,
   greeting: "yo. mfg_bot here.",
-  systemPrompt: "You are a 30-year-old Texas developer/entrepreneur. Owner of rentals and cars. Be short, direct, lowercase, no AI fluff.",
+  systemPrompt: "You are texting as the owner of this phone. Mirror their exact writing style from the examples given. Short replies. No caps unless they use caps. No punctuation unless they use it. Never say you're an AI or bot. Never say 'I understand', 'certainly', 'of course', 'as an AI'. Sound like a real human texting. If no style examples yet, be casual and brief.",
   prefix: ".",
   botName: "mfg_bot",
   owners: []
@@ -83,26 +83,45 @@ async function askGroq(userText, jid) {
   const key = process.env.GROQ_API_KEY;
   if (!key) return null;
   try {
-    const styleContext = styleSamples.length
-      ? `\n\nLearned user style samples:\n${styleSamples.slice(-5).join("\n")}`
-      : "";
-    const userStyle = userData[jid]?.style || "";
+    // Per-contact style: how owner talks to THIS specific person
+    const ownerToContact = userData[jid]?.ownerMessages || [];
+    // Global style samples (from .learnme or tagged messages)
+    const globalSamples = styleSamples.slice(-10);
+
+    let styleContext = "";
+    if (ownerToContact.length >= 3) {
+      styleContext = `\n\nHere is exactly how the owner talks to THIS person — copy this tone, vocabulary, punctuation and energy precisely:\n${ownerToContact.slice(-20).join("\n")}`;
+    } else if (globalSamples.length > 0) {
+      styleContext = `\n\nOwner's general writing style — mirror this:\n${globalSamples.join("\n")}`;
+    }
+
+    const systemMsg = `${settings.systemPrompt}${styleContext}
+
+Hard rules — never break these:
+- Never reveal you are a bot or AI under any circumstances
+- Never use the words: certainly, of course, I understand, as an AI, I'm an AI, I'm a bot
+- Do NOT use formal or professional language
+- Match the exact punctuation style of the examples (if they don't use commas, you don't either)
+- Match the exact capitalisation of the examples (if they use all lowercase, you do too)
+- Keep replies short — 1 to 3 sentences max unless the question needs more
+- If the conversation has no style examples yet, be very casual and brief`;
+
     const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
       body: JSON.stringify({
         model: "openai/gpt-oss-120b",
         messages: [
-          { role: "system", content: `${settings.systemPrompt}${styleContext}${userStyle ? "\n\nAdapt to this user's style: " + userStyle : ""}` },
+          { role: "system", content: systemMsg },
           { role: "user", content: userText }
         ],
-        max_tokens: 300,
-        temperature: 0.7
+        max_tokens: 200,
+        temperature: 0.85
       })
     });
     const data = await resp.json();
     if (!resp.ok) { console.error("[MFG_bot] Groq error:", data); return null; }
-    return data.choices?.[0]?.message?.content?.toLowerCase()?.trim() || null;
+    return data.choices?.[0]?.message?.content?.trim() || null;
   } catch (err) {
     console.error("[MFG_bot] Groq fetch error:", err.message);
     return null;
@@ -218,8 +237,20 @@ async function connectToWhatsApp() {
       // fromMe = sent from owner's linked device → always treat as owner
       const senderIsOwner = isFromMe || isOwner(from);
 
-      // Skip non-command fromMe messages (don't echo back AI replies to yourself)
-      if (isFromMe && !text.startsWith(pfx)) continue;
+      // ── Auto-learn from EVERY message the owner sends (silent, automatic) ──
+      if (isFromMe && !text.startsWith(pfx)) {
+        if (text.length > 1 && from !== "status@broadcast") {
+          if (!userData[from]) userData[from] = {};
+          if (!userData[from].ownerMessages) userData[from].ownerMessages = [];
+          userData[from].ownerMessages.push(text);
+          // Keep last 60 messages per contact — enough to build a solid style
+          if (userData[from].ownerMessages.length > 60) {
+            userData[from].ownerMessages = userData[from].ownerMessages.slice(-60);
+          }
+          writeJSON("users.json", userData);
+        }
+        continue;
+      }
 
       // Auto-read status
       if (settings.autoReadStatus && from.endsWith("@broadcast")) {
@@ -313,28 +344,51 @@ async function connectToWhatsApp() {
         }
 
         // .learnme — teach the bot your style
-        // .learnme <text>  → save a style sample
-        // .learnme view    → see saved samples
-        // .learnme clear   → wipe all samples
+        // Reply to any message + .learnme  → learns from that chat instantly
+        // .learnme view  → see what's been learned for this contact
+        // .learnme clear → wipe style memory for this contact
+        // .learnme reset → wipe ALL global style memory
         if (cmd === "learnme") {
           const sub = args[0]?.toLowerCase();
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          const quotedMsg = ctx?.quotedMessage;
+
           if (sub === "view") {
-            await send(styleSamples.length
-              ? `saved style samples (${styleSamples.length}):\n\n` + styleSamples.slice(-5).map((s, i) => `${i + 1}. ${s}`).join("\n")
-              : "no style samples saved yet. send: .learnme <any text to teach me>");
+            const contactMsgs = userData[from]?.ownerMessages || [];
+            const globalCount = styleSamples.length;
+            let reply = `style memory for this chat:\n`;
+            reply += contactMsgs.length
+              ? `${contactMsgs.length} of your messages saved\nlast 5:\n` + contactMsgs.slice(-5).map((s, i) => `${i + 1}. ${s}`).join("\n")
+              : "nothing saved for this chat yet — just keep chatting and i'll learn automatically";
+            reply += `\n\nglobal samples: ${globalCount}`;
+            await send(reply);
+
           } else if (sub === "clear") {
+            if (userData[from]) { delete userData[from].ownerMessages; writeJSON("users.json", userData); }
+            await send("style memory cleared for this chat.");
+
+          } else if (sub === "reset") {
             styleSamples = []; writeJSON("style_samples.json", styleSamples);
-            await send("all style samples cleared.");
-          } else {
-            const sample = args.join(" ").trim();
-            if (sample) {
-              styleSamples.push(sample);
+            await send("all global style samples wiped.");
+
+          } else if (quotedMsg) {
+            // Reply to ANY message (yours or theirs) with .learnme to capture it
+            const quotedText =
+              quotedMsg.conversation ||
+              quotedMsg.extendedTextMessage?.text ||
+              quotedMsg.imageMessage?.caption ||
+              quotedMsg.videoMessage?.caption || "";
+            if (quotedText.trim()) {
+              styleSamples.push(quotedText.trim());
               if (styleSamples.length > 100) styleSamples = styleSamples.slice(-100);
               writeJSON("style_samples.json", styleSamples);
-              await send(`got it. style sample saved (${styleSamples.length} total).\n\nuse .learnme view to see them, .learnme clear to reset.`);
+              await send(`captured. i'll mirror that style. (${styleSamples.length} samples total)\n\nbot learns your style automatically too — just keep chatting normally.`);
             } else {
-              await send("how to use .learnme:\n\n.learnme <text> — teach me your writing style\n.learnme view — see what you've taught me\n.learnme clear — forget everything");
+              await send("couldn't read text from that message.");
             }
+
+          } else {
+            await send("how to use .learnme:\n\nreply to any message + .learnme → i capture that style\n.learnme view → see what i know about this chat\n.learnme clear → forget this chat's style\n.learnme reset → wipe everything\n\nnote: i already learn automatically every time you send a message. you don't need to do anything.");
           }
           continue;
         }
