@@ -3,112 +3,78 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-const port = process.env.PORT || 8080;
-
-// --- GLOBAL STATE ---
-let lastQr = "";
-let isConnected = false;
-let systemPrompt = "You are a helpful assistant.";
+// --- BOT SETTINGS (These sync with Replit) ---
+let config = {
+    autoReject: false,
+    greeting: "Hello! I am MFG_bot. How can I help you today?",
+    systemPrompt: "You are a helpful assistant named MFG_bot."
+};
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            // ANTI-DETECTION: Masks the bot as a real MacBook Pro
-            '--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        ],
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
 
-// --- BOT EVENTS ---
-
-client.on('qr', (qr) => {
-    lastQr = qr;
-    console.log('NEW QR RECEIVED');
-});
-
-client.on('ready', () => {
-    isConnected = true;
-    lastQr = ""; 
-    console.log('BOT IS READY AND CONNECTED!');
-});
-
-client.on('disconnected', () => {
-    isConnected = false;
-    console.log('BOT DISCONNECTED');
-});
-
-// FEATURE: REJECT CALLS (DND MODE)
+// --- LOGIC: AUTO-REJECT CALLS ---
 client.on('call', async (call) => {
-    console.log('Incoming call detected, rejecting...');
-    await call.reject();
-    await client.sendMessage(call.from, "Automatic Message: I cannot accept WhatsApp calls right now. Please leave a text message.");
+    if (config.autoReject) {
+        console.log("Rejecting incoming call...");
+        await call.reject();
+    }
 });
 
-// FEATURE: AUTO-REPLY & GREETING
+// --- LOGIC: MESSAGE HANDLING ---
 client.on('message', async (msg) => {
-    const chat = await msg.getChat();
+    if (msg.fromMe) return;
+
+    const text = msg.body.toLowerCase();
     
-    // Initial Greeting for new conversations
-    if (msg.body.toLowerCase().includes('hello') || msg.body.toLowerCase().includes('hi')) {
-        await msg.reply("HI IM MFG_bot version 0.1\nMy creator is offline. I’ll handle the texts from now on.");
+    // Simple Keyword Greeting
+    if (text.includes('hi') || text.includes('hello')) {
+        await msg.reply(config.greeting);
     }
-
-    // Note: AI Training logic (reading previous chats) will be connected here via API in the next step.
-});
-
-// --- API ENDPOINTS FOR YOUR DASHBOARD ---
-
-// 1. Health Check
-app.get('/', (req, res) => {
-    res.send("Bot is running");
-});
-
-// 2. Dashboard Status Polling
-app.get('/status', (req, res) => {
-    res.json({ 
-        connected: isConnected, 
-        hasQr: lastQr !== "" 
-    });
-});
-
-// 3. QR Code Fetching
-app.get('/qr', (req, res) => {
-    res.send(lastQr);
-});
-
-// 4. BACKUP LINK METHOD: Pairing Code
-app.post('/request-pairing-code', async (req, res) => {
-    const { phoneNumber } = req.body; // Expects format like "2348012345678"
-    if (!phoneNumber) return res.status(400).json({ error: "Phone number is required" });
     
-    try {
-        console.log(`Requesting pairing code for: ${phoneNumber}`);
-        const code = await client.requestPairingCode(phoneNumber);
-        res.json({ pairingCode: code });
-    } catch (error) {
-        console.error("Pairing Error:", error);
-        res.status(500).json({ error: error.message });
-    }
+    // Future AI logic goes here
 });
 
-// 5. Update Bot Personality
-app.post('/update-prompt', (req, res) => {
-    systemPrompt = req.body.prompt;
-    console.log("New System Prompt Set: " + systemPrompt);
+// --- REPLIT ENDPOINTS (The "Bridges") ---
+
+// Status & QR
+app.get('/status', (req, res) => res.json({ connected: client.info ? true : false }));
+app.get('/qr', (req, res) => res.send("QR Logic active on backend"));
+
+// Feature Toggles
+app.get('/get-features', (req, res) => res.json({ autoReject: config.autoReject }));
+app.post('/set-feature', (req, res) => {
+    config.autoReject = req.body.enabled;
+    res.json({ success: true, autoReject: config.autoReject });
+});
+
+// Greeting Management
+app.get('/get-greeting', (req, res) => res.json({ greeting: config.greeting }));
+app.post('/set-greeting', (req, res) => {
+    config.greeting = req.body.greeting;
     res.json({ success: true });
 });
 
-// --- STARTUP ---
-
-app.listen(port, () => {
-    console.log(`Server is live on port ${port}`);
+// Prompt Management
+app.get('/get-system-prompt', (req, res) => res.json({ systemPrompt: config.systemPrompt }));
+app.post('/set-system-prompt', (req, res) => {
+    config.systemPrompt = req.body.systemPrompt;
+    res.json({ success: true });
 });
 
-client.initialize();
+// Root check
+app.get('/', (req, res) => res.send("MFG_bot Backend is Online"));
+
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+    client.initialize();
+});
