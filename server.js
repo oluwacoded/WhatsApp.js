@@ -3,6 +3,7 @@ const {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  Browsers,
 } = require("@whiskeysockets/baileys");
 const express = require("express");
 const cors = require("cors");
@@ -63,7 +64,7 @@ async function connectToWhatsApp() {
 
     const { version } = await fetchLatestBaileysVersion().catch(() => {
       console.log("[MFG_bot] Could not fetch latest version, using fallback");
-      return { version: [2, 3000, 1015901307] };
+      return { version: [2, 3000, 1023044367] };
     });
     console.log("[MFG_bot] Using WA version:", version.join("."));
 
@@ -72,9 +73,9 @@ async function connectToWhatsApp() {
       auth: state,
       printQRInTerminal: true,
       logger: pino({ level: "silent" }),
-      browser: ["MFG_bot", "Chrome", "120.0.0"],
-      connectTimeoutMs: 30000,
-      defaultQueryTimeoutMs: 30000,
+      browser: Browsers.ubuntu("Chrome"),
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 10000,
       markOnlineOnConnect: false,
       syncFullHistory: false,
