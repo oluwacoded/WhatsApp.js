@@ -42,11 +42,35 @@ let settings = readJSON("settings.json", {
   autoCallReject: false,
   autoReadStatus: false,
   aiEnabled: false,
-  aiMode: "smart",
-  aiDelay: 2,
-  aiTyping: true,
+  aiMode: "chill",
+  aiDelay: 0,
+  aiTyping: false,
+  proactiveText: false,
   greeting: "yo. mfg_bot here.",
-  systemPrompt: "You are texting as the owner of this phone. Mirror their exact writing style from the examples given. Short replies. No caps unless they use caps. No punctuation unless they use it. Never say you're an AI or bot. Never say 'I understand', 'certainly', 'of course', 'as an AI'. Sound like a real human texting. If no style examples yet, be casual and brief.",
+  systemPrompt: `You are texting AS the owner of this phone — you ARE them, not a bot pretending to be them. You have ZERO hesitation. You respond instantly like Jarvis from Iron Man — sharp, fast, confident, zero filler.
+
+IDENTITY: Nigerian. Real one. You mix English and pidgin naturally without forcing it. You're not trying to sound Nigerian — you just ARE.
+
+PIDGIN YOU USE NATURALLY:
+wetin (what), omo (wow/damn), abeg (please), na so (that's how it is), shey (right?/is it?), wahala (trouble/problem), dem (they/them), sabi (know), dey (is/are/be), e don do (it's done), sharp sharp (immediately), no cap (for real), e no fit (can't/impossible), bro/guy/oga, lmaooo, chai (expression of surprise), nawa (unbelievable), carry go (forget it/move on), e be like (it seems like), how far (what's up), werey (crazy person), mumu (fool), ode (idiot - playful), the thing don do (it's over), make e (let it), who you epp (who are you helping), na you sabi (suit yourself)
+
+TRASH TALK (when roasting or playfully attacking):
+Use: "your head no correct", "you dey mad?", "who send you?", "carry your wahala go", "e don do for you", "your level no reach", "you be mumu", "na only you waka come?", "the audacity 😂", "bro touch grass", "ratio + L + no cap"
+
+BILLING DODGE (when someone asks for money):
+Dodge with humor and pidgin. Never directly say you don't have money — evade, joke, flip it.
+
+MIRROR RULES — THIS IS THE MOST IMPORTANT PART:
+1. Study every example message below like your life depends on it
+2. Clone their EXACT sentence length — if they write 3 words, you write 3 words
+3. Clone their EXACT punctuation — if they use no full stops, you use none
+4. Clone their EXACT capitalisation — all lowercase = you lowercase
+5. Clone their energy — hype = hype back, dry = dry back
+6. Clone their emoji frequency — if they use none, use none; if they spam, you spam
+7. Never greet with "Hello!" or "Hi there!" or "Hey!" unless the owner does it
+8. Never say "certainly", "of course", "I understand", "great question", "as an AI", "I'm a bot"
+9. Never exceed what they normally write unless the message specifically needs it
+10. When unsure of style — be short, lowercase, no punctuation, very casual`,
   prefix: ".",
   botName: "mfg_bot",
   owners: []
@@ -65,6 +89,7 @@ let latestStatus = null;
 let savedNotes = readJSON("notes.json", {});
 let savedTodos = readJSON("todos.json", {});
 let savedKV = readJSON("kv.json", {});
+let convHistory = readJSON("conv_history.json", {});
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -87,45 +112,66 @@ async function askGroq(userText, jid) {
   const key = process.env.GROQ_API_KEY;
   if (!key) return null;
   try {
-    // Per-contact style: how owner talks to THIS specific person
-    const ownerToContact = userData[jid]?.ownerMessages || [];
-    // Global style samples (from .learnme or tagged messages)
-    const globalSamples = styleSamples.slice(-10);
+    const ownerToContact = (userData[jid]?.ownerMessages || []).slice(-25);
+    const globalSamples = styleSamples.slice(-8);
+    const history = (convHistory[jid] || []).slice(-10);
 
-    let styleContext = "";
-    if (ownerToContact.length >= 3) {
-      styleContext = `\n\nHere is exactly how the owner talks to THIS person — copy this tone, vocabulary, punctuation and energy precisely:\n${ownerToContact.slice(-20).join("\n")}`;
+    // Build a detailed style fingerprint
+    let styleBlock = "";
+    if (ownerToContact.length >= 2) {
+      // Derive style rules automatically from examples
+      const allLower = ownerToContact.every(m => m === m.toLowerCase());
+      const noPunct = ownerToContact.filter(m => /[.!?]$/.test(m.trim())).length < ownerToContact.length * 0.3;
+      const avgLen = Math.round(ownerToContact.reduce((a,m) => a + m.split(" ").length, 0) / ownerToContact.length);
+      const hasEmoji = ownerToContact.some(m => /\p{Emoji}/u.test(m));
+      styleBlock = `\n\n[STYLE RULES DERIVED FROM OWNER'S ACTUAL MESSAGES TO THIS PERSON]:
+- Capitalisation: ${allLower ? "ALL LOWERCASE — never capitalise anything" : "mixed — follow their pattern"}
+- Punctuation: ${noPunct ? "NO ending punctuation — no full stops, no exclamation marks unless they use them" : "uses punctuation — follow their pattern"}
+- Average reply length: ${avgLen} words — MATCH THIS LENGTH
+- Emojis: ${hasEmoji ? "uses emojis — include them naturally" : "no emojis — don't use any"}
+
+[EXACT MESSAGES OWNER SENT THIS PERSON — CLONE THIS STYLE PERFECTLY]:
+${ownerToContact.map(m => `"${m}"`).join("\n")}`;
     } else if (globalSamples.length > 0) {
-      styleContext = `\n\nOwner's general writing style — mirror this:\n${globalSamples.join("\n")}`;
+      styleBlock = `\n\n[OWNER'S GENERAL STYLE — MIRROR THIS]:
+${globalSamples.map(m => `"${m}"`).join("\n")}`;
+    } else {
+      styleBlock = `\n\n[NO STYLE DATA YET]: Be extremely casual. Short. Lowercase. No punctuation. Nigerian vibe.`;
     }
 
-    const systemMsg = `${settings.systemPrompt}${styleContext}
+    const systemMsg = settings.systemPrompt + styleBlock;
 
-Hard rules — never break these:
-- Never reveal you are a bot or AI under any circumstances
-- Never use the words: certainly, of course, I understand, as an AI, I'm an AI, I'm a bot
-- Do NOT use formal or professional language
-- Match the exact punctuation style of the examples (if they don't use commas, you don't either)
-- Match the exact capitalisation of the examples (if they use all lowercase, you do too)
-- Keep replies short — 1 to 3 sentences max unless the question needs more
-- If the conversation has no style examples yet, be very casual and brief`;
+    const messages = [
+      { role: "system", content: systemMsg },
+      ...history,
+      { role: "user", content: userText }
+    ];
 
     const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
       body: JSON.stringify({
         model: "openai/gpt-oss-120b",
-        messages: [
-          { role: "system", content: systemMsg },
-          { role: "user", content: userText }
-        ],
-        max_tokens: 200,
-        temperature: 0.85
+        messages,
+        max_tokens: 100,
+        temperature: 0.92,
+        top_p: 0.95
       })
     });
     const data = await resp.json();
     if (!resp.ok) { console.error("[MFG_bot] Groq error:", data); return null; }
-    return data.choices?.[0]?.message?.content?.trim() || null;
+    const reply = data.choices?.[0]?.message?.content?.trim() || null;
+
+    // Save conversation history per contact
+    if (reply) {
+      if (!convHistory[jid]) convHistory[jid] = [];
+      convHistory[jid].push({ role: "user", content: userText });
+      convHistory[jid].push({ role: "assistant", content: reply });
+      if (convHistory[jid].length > 20) convHistory[jid] = convHistory[jid].slice(-20);
+      // Save async — don't block the reply
+      setImmediate(() => writeJSON("conv_history.json", convHistory));
+    }
+    return reply;
   } catch (err) {
     console.error("[MFG_bot] Groq fetch error:", err.message);
     return null;
@@ -295,6 +341,35 @@ async function connectToWhatsApp() {
       const creatorTriggers = ["who made you", "who created you", "who built you", "who is your creator", "who is your maker", "who owns you", "who is your owner", "wey make you", "who program you"];
       if (!text.startsWith(pfx) && creatorTriggers.some(t => lowerText.includes(t))) {
         await send(`i was built by my maker — +${OWNER_NUMBER}. he's the only one i fully listen to.`);
+        continue;
+      }
+
+      // ── Billing dodge (when someone tries to collect money) ──────────
+      const billingTriggers = ["send me money","send money","where is my money","where's my money","you owe me","my money","pay me","when you go pay","when will you pay","when are you paying","you haven't paid","you still owe","abeg pay","oga pay","return my money","give me my money","i need money","loan me","borrow me","you dey owe","your debt","the money you owe","refund","pay back","owe me"];
+      if (!text.startsWith(pfx) && !isFromMe && billingTriggers.some(kw => lowerText.includes(kw))) {
+        const dodges = [
+          "omo my phone no dey charge properly 😂 wetin you talk?",
+          "guy the network just cut off now now — you say wetin?",
+          "abeg e no concern me for this time of the day 💀",
+          "who send you? 😂 carry go",
+          "bro i don bill person wey bill me. the cycle never stops 😭",
+          "lmaooo nah who programmed you to come here",
+          "i go send am when i wake up i dey sleep now 🥱",
+          "e don dey your account check am again nah",
+          "i thought we agreed no billing zone 🚫",
+          "which money 🤨 explain yourself",
+          "e dey come sharp sharp i dey handle something big rn",
+          "billing me? after everything i do for you?? 💀",
+          "the audacity. the disrespect. 😂 calm down bro it dey come",
+          "omo wait make i check my account 👀 ...yeah nothing 😭",
+          "guy you know say e no easy out here na 😭",
+          "na only you waka come with this energy today",
+          "i dey process am trust me 🙏",
+          "werey 😂 abeg free me let me think",
+          "bro you go collect am before weekend i promise on my life 😭",
+          "chai nawa for you o. e dey come fr"
+        ];
+        await send(dodges[Math.floor(Math.random() * dodges.length)]);
         continue;
       }
 
@@ -926,13 +1001,13 @@ async function connectToWhatsApp() {
         writeJSON("style_samples.json", styleSamples);
       }
 
-      // ── AI Reply ────────────────────────────────────────────────────────
+      // ── AI Reply — instant, no delay ────────────────────────────────
       if (settings.aiEnabled && text.length > 1 && !text.startsWith(pfx)) {
         try {
-          if (settings.aiTyping) await sock.sendPresenceUpdate("composing", from);
-          if (settings.aiDelay > 0) await new Promise(r => setTimeout(r, settings.aiDelay * 1000));
+          // Fire typing indicator without awaiting — don't let it slow down the response
+          if (settings.aiTyping) sock.sendPresenceUpdate("composing", from).catch(() => {});
           const reply = await askGroq(text, from);
-          if (settings.aiTyping) await sock.sendPresenceUpdate("paused", from);
+          if (settings.aiTyping) sock.sendPresenceUpdate("paused", from).catch(() => {});
           if (reply) await send(reply);
         } catch (err) { console.error("[MFG_bot] AI error:", err.message); }
       }
@@ -949,6 +1024,39 @@ async function connectToWhatsApp() {
     }
   });
 }
+
+// ─── Proactive Random Texting ─────────────────────────────────────────────────
+function scheduleRandomText() {
+  if (!settings.proactiveText) { setTimeout(scheduleRandomText, 60 * 60 * 1000); return; }
+  const delay = (3 + Math.random() * 5) * 60 * 60 * 1000; // 3–8 hours
+  setTimeout(async () => {
+    try {
+      if (!isConnected || !settings.proactiveText) { scheduleRandomText(); return; }
+      const eligible = allChats.filter(c =>
+        c.id && !c.id.includes("broadcast") && !c.id.endsWith("@g.us") && c.id !== OWNER_JID
+      );
+      if (eligible.length === 0) { scheduleRandomText(); return; }
+      const target = eligible[Math.floor(Math.random() * eligible.length)];
+      const openers = [
+        "wetin dey happen","omo i just remember you","how body","yo what's good","you dey?",
+        "i just dey think about something","abeg gist me something","what you dey do",
+        "yo","bro something just happen","guy how far","e don do sha","long time no talk",
+        "you see that thing wey happen","bro check this out","omo you won't believe",
+        "i dey bored fr","guy talk to me","abeg how e dey","omo nawa o"
+      ];
+      const msg = openers[Math.floor(Math.random() * openers.length)];
+      await sock.sendMessage(target.id, { text: msg });
+      // Save this to that contact's ownerMessages so it learns the style
+      if (!userData[target.id]) userData[target.id] = {};
+      if (!userData[target.id].ownerMessages) userData[target.id].ownerMessages = [];
+      userData[target.id].ownerMessages.push(msg);
+      setImmediate(() => writeJSON("users.json", userData));
+      console.log(`[MFG_bot] Random text sent to ${target.id}: "${msg}"`);
+    } catch (e) { console.log("[MFG_bot] Random text error:", e.message); }
+    scheduleRandomText();
+  }, delay);
+}
+scheduleRandomText();
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
 app.get("/api/status", (req, res) => res.json({
