@@ -2,6 +2,7 @@ const {
   default: makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
+  fetchLatestBaileysVersion,
   Browsers,
 } = require("@whiskeysockets/baileys");
 const express = require("express");
@@ -24,11 +25,13 @@ let settings = loadSettings();
 
 let sock = null;
 let currentQr = null;
+let currentPairingCode = null;
 let isConnected = false;
 let hasQr = false;
 let reconnectTimer = null;
 let qrTimeout = null;
 let startTime = Date.now();
+let pairedPhone = null;
 
 const AUTH_DIR = path.join(__dirname, "auth_info_baileys");
 
@@ -41,8 +44,6 @@ function clearAuthFolder() {
       }
       try { fs.rmdirSync(AUTH_DIR); } catch (e) {}
       console.log("[MFG_bot] Auth folder cleared");
-    } else {
-      console.log("[MFG_bot] Auth folder does not exist");
     }
   } catch (e) {
     console.error("[MFG_bot] Error clearing auth:", e.message);
@@ -54,14 +55,13 @@ function getAuthState() {
   try { return { exists: true, files: fs.readdirSync(AUTH_DIR) }; } catch (e) { return { exists: false, files: [] }; }
 }
 
-async function connectToWhatsApp() {
+async function connectToWhatsApp(phoneForPairing) {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
 
-  // Clear empty auth folder — prevents Baileys confusion on reconnect
   const authCheck = getAuthState();
   if (authCheck.exists && authCheck.files.length === 0) {
-    console.log("[MFG_bot] Found empty auth folder — clearing it");
+    console.log("[MFG_bot] Empty auth folder — clearing");
     try { fs.rmdirSync(AUTH_DIR); } catch (e) {}
   }
 
@@ -69,14 +69,17 @@ async function connectToWhatsApp() {
     console.log("[MFG_bot] Connecting... Auth:", JSON.stringify(getAuthState()));
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
 
-    let baileysVer = "unknown";
-    try { baileysVer = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
-    console.log("[MFG_bot] Baileys version:", baileysVer);
+    const { version } = await fetchLatestBaileysVersion().catch(() => {
+      return { version: [2, 3000, 1023044367] };
+    });
+    console.log("[MFG_bot] WA version:", version.join("."));
+
+    const usePairingCode = !!phoneForPairing;
 
     sock = makeWASocket({
-      version: [2, 3000, 1023044367],
+      version,
       auth: state,
-      printQRInTerminal: true,
+      printQRInTerminal: !usePairingCode,
       logger: pino({ level: "silent" }),
       browser: Browsers.macOS("Desktop"),
       connectTimeoutMs: 60000,
@@ -84,15 +87,26 @@ async function connectToWhatsApp() {
       keepAliveIntervalMs: 10000,
       markOnlineOnConnect: false,
       syncFullHistory: false,
-      retryRequestDelayMs: 2000,
     });
 
+    if (usePairingCode && !sock.authState.creds.registered) {
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const code = await sock.requestPairingCode(phoneForPairing);
+        currentPairingCode = code;
+        pairedPhone = phoneForPairing;
+        console.log("[MFG_bot] Pairing code:", code);
+      } catch (err) {
+        console.error("[MFG_bot] Pairing code error:", err.message);
+      }
+    }
+
     qrTimeout = setTimeout(() => {
-      if (!isConnected && !hasQr) {
-        console.log("[MFG_bot] No QR after 30s — clearing auth and retrying");
+      if (!isConnected && !hasQr && !currentPairingCode) {
+        console.log("[MFG_bot] No QR/code after 30s — retrying");
         if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} sock = null; }
         clearAuthFolder();
-        reconnectTimer = setTimeout(connectToWhatsApp, 3000);
+        reconnectTimer = setTimeout(() => connectToWhatsApp(), 3000);
       }
     }, 30000);
 
@@ -108,10 +122,11 @@ async function connectToWhatsApp() {
       }
 
       if (connection === "open") {
-        console.log("[MFG_bot] WhatsApp connected successfully!");
+        console.log("[MFG_bot] Connected successfully!");
         isConnected = true;
         hasQr = false;
         currentQr = null;
+        currentPairingCode = null;
         if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       }
@@ -119,18 +134,16 @@ async function connectToWhatsApp() {
       if (connection === "close") {
         isConnected = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        const errMsg = lastDisconnect?.error?.message || "unknown";
-        const errOutput = JSON.stringify(lastDisconnect?.error?.output || {});
-        console.log("[MFG_bot] Connection closed. Code:", code, "| Message:", errMsg);
-        console.log("[MFG_bot] Full error:", errOutput);
+        console.log("[MFG_bot] Closed. Code:", code, "Full:", JSON.stringify(lastDisconnect));
         if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
         if (code === DisconnectReason.loggedOut) {
           console.log("[MFG_bot] Logged out — clearing credentials");
           currentQr = null;
           hasQr = false;
+          currentPairingCode = null;
           clearAuthFolder();
         }
-        reconnectTimer = setTimeout(connectToWhatsApp, 5000);
+        reconnectTimer = setTimeout(() => connectToWhatsApp(), 5000);
       }
     });
 
@@ -164,32 +177,24 @@ async function connectToWhatsApp() {
     });
 
   } catch (err) {
-    console.error("[MFG_bot] Startup error:", err.message, err.stack);
+    console.error("[MFG_bot] Startup error:", err.message);
     if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
-    reconnectTimer = setTimeout(connectToWhatsApp, 8000);
+    reconnectTimer = setTimeout(() => connectToWhatsApp(), 8000);
   }
 }
 
 app.get("/", (req, res) => res.send("Bot is running"));
-app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr }));
+app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode }));
 app.get("/qr", (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR available" }));
+app.get("/pairing-code", (req, res) => currentPairingCode ? res.json({ code: currentPairingCode, phone: pairedPhone }) : res.status(404).json({ error: "No pairing code — call /request-pairing-code first" }));
 
 app.get("/debug", (req, res) => {
   let baileysVersion = "unknown";
   try { baileysVersion = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
-  res.json({
-    connected: isConnected,
-    hasQr,
-    uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
-    auth: getAuthState(),
-    hasSock: !!sock,
-    hasReconnectTimer: !!reconnectTimer,
-    baileysVersion,
-  });
+  res.json({ connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode, uptimeSeconds: Math.floor((Date.now() - startTime) / 1000), auth: getAuthState(), hasSock: !!sock, baileysVersion });
 });
 
 app.post("/logout", async (req, res) => {
-  console.log("[MFG_bot] Manual logout triggered");
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
   if (sock) {
@@ -197,21 +202,23 @@ app.post("/logout", async (req, res) => {
     try { await sock.logout(); } catch (e) {}
     sock = null;
   }
-  isConnected = false;
-  hasQr = false;
-  currentQr = null;
+  isConnected = false; hasQr = false; currentQr = null; currentPairingCode = null; pairedPhone = null;
   clearAuthFolder();
-  res.json({ success: true, authAfterClear: getAuthState() });
-  setTimeout(connectToWhatsApp, 2000);
+  res.json({ success: true });
+  setTimeout(() => connectToWhatsApp(), 2000);
 });
 
 app.post("/request-pairing-code", async (req, res) => {
   try {
     const cleaned = String(req.body.phoneNumber || "").replace(/[^0-9]/g, "");
-    if (!cleaned) return res.status(400).json({ error: "phoneNumber required" });
-    if (!sock) return res.status(503).json({ error: "Bot not ready" });
-    const code = await sock.requestPairingCode(cleaned);
-    res.json({ code });
+    if (!cleaned) return res.status(400).json({ error: "phoneNumber required (digits only, with country code)" });
+    if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} sock = null; }
+    clearAuthFolder();
+    await new Promise(r => setTimeout(r, 1000));
+    connectToWhatsApp(cleaned);
+    await new Promise(r => setTimeout(r, 6000));
+    if (currentPairingCode) return res.json({ code: currentPairingCode });
+    res.status(503).json({ error: "Could not get pairing code yet — try GET /pairing-code in a few seconds" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
