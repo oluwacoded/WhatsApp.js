@@ -1,14 +1,10 @@
-const { webcrypto } = require('node:crypto');
-if (!globalThis.crypto) globalThis.crypto = webcrypto;
-
 const {
   default: makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  Browsers,
-  downloadMediaMessage,
-} = require("@whiskeysockets/baileys");
+  Browsers
+} = require("baileys");
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -18,615 +14,516 @@ const pino = require("pino");
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "client/dist")));
 
-const SETTINGS_FILE   = path.join(__dirname, "settings.json");
-const SAVED_FILE      = path.join(__dirname, "saved_messages.json");
-const BROADCAST_FILE  = path.join(__dirname, "broadcast_contacts.json");
-const STYLE_FILE      = path.join(__dirname, "style_samples.json");
-const AUTH_DIR        = path.join(__dirname, "auth_info_baileys");
+// ─── Persistence ────────────────────────────────────────────────────────────
+const DATA_DIR = path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
-function readJson(file, def) {
-  try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) {}
+function readJSON(file, def) {
+  try {
+    const p = path.join(DATA_DIR, file);
+    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch (e) {}
   return def;
 }
-function writeJson(file, data) {
-  try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch (e) {}
+function writeJSON(file, data) {
+  try { fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2)); } catch (e) {}
 }
 
-function loadSettings() {
-  return readJson(SETTINGS_FILE, {
-    autoCallReject: false,
-    callRejectMessage: "⚠️ This user has not authorized WhatsApp calls. Please wait for them to call you back.",
-    greeting: "Hello! I am MFG_bot. How can I help you today?",
-    systemPrompt: "You are MFG_bot, a helpful WhatsApp assistant. Answer questions clearly and concisely.",
-  });
+let settings = readJSON("settings.json", {
+  autoCallReject: false,
+  autoReadStatus: false,
+  aiEnabled: false,
+  aiMode: "smart",
+  aiDelay: 2,
+  aiTyping: true,
+  greeting: "yo. mfg_bot here.",
+  systemPrompt: "You are a 30-year-old Texas developer/entrepreneur. Owner of rentals and cars. Be short, direct, lowercase, no AI fluff.",
+  prefix: ".",
+  botName: "mfg_bot",
+  owners: []
+});
+
+let styleSamples = readJSON("style_samples.json", []);
+let userData = readJSON("users.json", {});
+
+// ─── Bot State ───────────────────────────────────────────────────────────────
+let sock = null, currentQr = null, isConnected = false, hasQr = false;
+let reconnectCount = 0, startTime = Date.now();
+let allChats = [];
+let commandStats = {};
+let messageCount = 0;
+
+function trackCommand(cmd) {
+  commandStats[cmd] = (commandStats[cmd] || 0) + 1;
 }
-let settings = loadSettings();
-const saveSettings = () => writeJson(SETTINGS_FILE, settings);
 
-let sock               = null;
-let currentQr          = null;
-let currentPairingCode = null;
-let isConnected        = false;
-let hasQr              = false;
-let reconnectTimer     = null;
-let qrTimeout          = null;
-let startTime          = Date.now();
-let pairedPhone        = null;
-let botJid             = null;
+// ─── Owner Config ────────────────────────────────────────────────────────────
+const OWNER_NUMBER = "23409132883869";
+const OWNER_JID = `${OWNER_NUMBER}@s.whatsapp.net`;
 
-const aiDisabled          = new Set();
-const conversationHistory = new Map();
+function isOwner(jid) {
+  return jid === OWNER_JID || jid?.replace(/[^0-9]/g, "") === OWNER_NUMBER;
+}
 
-function clearAuthFolder() {
+// ─── Groq AI ─────────────────────────────────────────────────────────────────
+async function askGroq(userText, jid) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) return null;
   try {
-    if (fs.existsSync(AUTH_DIR)) {
-      fs.readdirSync(AUTH_DIR).forEach(f => { try { fs.unlinkSync(path.join(AUTH_DIR, f)); } catch (e) {} });
-      try { fs.rmdirSync(AUTH_DIR); } catch (e) {}
-      console.log("[MFG_bot] Auth folder cleared");
-    }
-  } catch (e) { console.error("[MFG_bot] Error clearing auth:", e.message); }
-}
-
-function getAuthState() {
-  if (!fs.existsSync(AUTH_DIR)) return { exists: false, files: [] };
-  try { return { exists: true, files: fs.readdirSync(AUTH_DIR) }; } catch (e) { return { exists: false, files: [] }; }
-}
-
-function formatUptime(ms) {
-  const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
-  if (d > 0) return `${d}d ${h % 24}h ${m % 60}m`;
-  if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
-  if (m > 0) return `${m}m ${s % 60}s`;
-  return `${s}s`;
-}
-
-function safeMath(expr) {
-  try {
-    const clean = expr.replace(/[^0-9+\-*/.()%\s]/g, "");
-    if (!clean) return null;
-    const result = Function('"use strict"; return (' + clean + ')')();
-    return (typeof result === "number" && isFinite(result)) ? result : null;
-  } catch (e) { return null; }
-}
-
-function normalizePhone(raw) { return raw.replace(/[^0-9]/g, ""); }
-
-const JOKES = [
-  "Why don't scientists trust atoms? Because they make up everything! 😄",
-  "I told my wife she was drawing her eyebrows too high. She looked surprised. 😂",
-  "Why did the scarecrow win an award? He was outstanding in his field! 🌾",
-  "What do you call a fake noodle? An impasta! 🍝",
-  "Why can't you give Elsa a balloon? She'll let it go! ❄️",
-  "I'm reading a book about anti-gravity. Impossible to put down! 📚",
-  "Why did the bicycle fall over? It was two-tired! 🚲",
-  "What do you call cheese that isn't yours? Nacho cheese! 🧀",
-  "Why don't eggs tell jokes? They'd crack each other up! 🥚",
-  "I asked my dog what 2 minus 2 is. He said nothing. 🐶",
-];
-
-const QUOTES = [
-  "The only way to do great work is to love what you do. — Steve Jobs",
-  "In the middle of every difficulty lies opportunity. — Albert Einstein",
-  "It does not matter how slowly you go as long as you do not stop. — Confucius",
-  "The future belongs to those who believe in the beauty of their dreams. — Eleanor Roosevelt",
-  "Success is not final, failure is not fatal: courage to continue is what counts. — Winston Churchill",
-  "You miss 100% of the shots you don't take. — Wayne Gretzky",
-  "Whether you think you can or you can't, you're right. — Henry Ford",
-  "The best time to plant a tree was 20 years ago. The second best is now. — Chinese Proverb",
-];
-
-function getStyleSamples() { return readJson(STYLE_FILE, []); }
-function addStyleSample(sample) {
-  const samples = getStyleSamples();
-  samples.push(sample);
-  if (samples.length > 50) samples.splice(0, samples.length - 50);
-  writeJson(STYLE_FILE, samples);
-}
-function buildSystemPrompt() {
-  const base = settings.systemPrompt;
-  const samples = getStyleSamples();
-  if (samples.length === 0) return base;
-  const exampleBlock = samples.map((s, i) => `${i + 1}. "${s}"`).join("\n");
-  return `${base}\n\nIMPORTANT — Mimic the owner's chat style. Here are real examples of how the owner texts:\n${exampleBlock}\nRespond in this same tone, vocabulary, and style.`;
-}
-
-function getHistory(jid) {
-  if (!conversationHistory.has(jid)) conversationHistory.set(jid, []);
-  return conversationHistory.get(jid);
-}
-function pushHistory(jid, role, content) {
-  const h = getHistory(jid);
-  h.push({ role, content });
-  if (h.length > 20) h.splice(0, h.length - 20);
-}
-function clearHistory(jid) { conversationHistory.delete(jid); }
-
-async function sendAIReply(from, text) {
-  if (!sock || !isConnected) return;
-  try {
-    const groqKey = process.env.GROQ_API_KEY;
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (groqKey || openaiKey) {
-      const apiUrl = groqKey ? "https://api.groq.com/openai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
-      const apiKey = groqKey || openaiKey;
-      const model  = groqKey ? "llama-3.3-70b-versatile" : "gpt-3.5-turbo";
-      pushHistory(from, "user", text);
-      const resp = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, messages: [{ role: "system", content: buildSystemPrompt() }, ...getHistory(from)] }),
-      });
-      const data  = await resp.json();
-      const reply = data.choices?.[0]?.message?.content;
-      if (reply) {
-        pushHistory(from, "assistant", reply);
-        await sock.sendMessage(from, { text: reply });
-        console.log("[MFG_bot] AI reply →", from, "via", groqKey ? "Groq" : "OpenAI");
-        return;
-      }
-      console.error("[MFG_bot] AI no reply:", JSON.stringify(data));
-    }
-    await sock.sendMessage(from, { text: settings.greeting });
-  } catch (err) {
-    console.error("[MFG_bot] Reply error:", err.message);
-    try { await sock.sendMessage(from, { text: settings.greeting }); } catch (e) {}
-  }
-}
-
-async function handleCommand(from, msg, text, isOwner) {
-  const parts = text.trim().split(/\s+/);
-  const cmd   = parts[0].toLowerCase();
-  const args  = parts.slice(1).join(" ");
-  const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-  const reply = async (t) => sock.sendMessage(from, { text: t }, { quoted: msg });
-
-  switch (cmd) {
-    case ".ping":
-      await reply("🏓 *Pong!* Bot is online and responding.");
-      return true;
-
-    case ".help":
-      await reply(
-        "*🤖 MFG_bot Commands*\n\n" +
-        "*General*\n" +
-        "*.ping* — Check if bot is alive\n" +
-        "*.help* — This list\n" +
-        "*.info* — Bot status & uptime\n" +
-        "*.time* — Current date & time\n" +
-        "*.joke* — Random joke\n" +
-        "*.quote* — Motivational quote\n" +
-        "*.echo <text>* — Bot repeats your text\n" +
-        "*.calc <expr>* — Calculator (e.g. .calc 5*8)\n" +
-        "*.ai* — Toggle AI replies on/off\n" +
-        "*.reset* — Clear conversation memory\n\n" +
-        "*Saving*\n" +
-        "*.save [text]* — Save a note or quoted message\n" +
-        "*.saved* — View saved notes\n" +
-        "*.del <#>* — Delete a saved note by number\n" +
-        "*.clear* — Clear all saved notes\n\n" +
-        "*Broadcast (owner only)*\n" +
-        "*.addbc <number>* — Add to broadcast list\n" +
-        "*.removebc <number>* — Remove from broadcast list\n" +
-        "*.listbc* — View broadcast list\n" +
-        "*.broadcast <message>* — Send to all broadcast contacts\n\n" +
-        "*Style Learning (owner only)*\n" +
-        "*.learnme <text>* — Teach bot how you talk\n" +
-        "*.mystyle* — Show style samples\n" +
-        "*.clearstyle* — Clear style samples\n\n" +
-        "*.greet* — Send greeting\n" +
-        "*.about* — About this bot"
-      );
-      return true;
-
-    case ".greet":
-      await reply(settings.greeting);
-      return true;
-
-    case ".info": {
-      const uptime = formatUptime(Date.now() - startTime);
-      let baileysVer = "unknown";
-      try { baileysVer = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
-      const aiEngine = process.env.GROQ_API_KEY ? "Groq (Llama 3)" : process.env.OPENAI_API_KEY ? "OpenAI (GPT-3.5)" : "None";
-      await reply(
-        "*🤖 MFG_bot Info*\n\n" +
-        `⏱ *Uptime:* ${uptime}\n` +
-        `🔗 *Status:* Connected\n` +
-        `🧠 *AI Engine:* ${aiEngine}\n` +
-        `📦 *Baileys:* v${baileysVer}\n` +
-        `📵 *Auto-reject calls:* ${settings.autoCallReject ? "On" : "Off"}\n` +
-        `📣 *Broadcast contacts:* ${readJson(BROADCAST_FILE, []).length}\n` +
-        `🎭 *Style samples:* ${getStyleSamples().length}\n` +
-        `💬 *Active conversations:* ${conversationHistory.size}`
-      );
-      return true;
-    }
-
-    case ".time": {
-      const now = new Date();
-      await reply(`🕐 *Current Time*\n\n${now.toLocaleString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZoneName: "short" })}`);
-      return true;
-    }
-
-    case ".joke":
-      await reply(`😂 *Random Joke*\n\n${JOKES[Math.floor(Math.random() * JOKES.length)]}`);
-      return true;
-
-    case ".quote":
-      await reply(`💡 *Quote*\n\n_${QUOTES[Math.floor(Math.random() * QUOTES.length)]}_`);
-      return true;
-
-    case ".echo":
-      if (!args) { await reply("Usage: *.echo <text>*"); return true; }
-      await reply(args);
-      return true;
-
-    case ".calc": {
-      if (!args) { await reply("Usage: *.calc <expression>*"); return true; }
-      const result = safeMath(args);
-      if (result === null) { await reply("❌ Invalid expression."); return true; }
-      await reply(`🧮 *Calculator*\n\n${args} = *${result}*`);
-      return true;
-    }
-
-    case ".ai": {
-      if (aiDisabled.has(from)) { aiDisabled.delete(from); await reply("🤖 AI replies turned *ON*."); }
-      else { aiDisabled.add(from); await reply("🔇 AI replies turned *OFF*. Send *.ai* again to re-enable."); }
-      return true;
-    }
-
-    case ".reset":
-      clearHistory(from);
-      await reply("🔄 Conversation memory cleared. Starting fresh!");
-      return true;
-
-    case ".save": {
-      const savedAll = readJson(SAVED_FILE, {});
-      const userSaved = savedAll[from] || [];
-      let textToSave = args;
-      if (!textToSave && quoted) textToSave = quoted.conversation || quoted.extendedTextMessage?.text || "";
-      if (!textToSave) { await reply("❌ Reply to a message with *.save* or type *.save <text>*."); return true; }
-      userSaved.push({ text: textToSave, savedAt: new Date().toLocaleString() });
-      savedAll[from] = userSaved;
-      writeJson(SAVED_FILE, savedAll);
-      await reply(`✅ *Saved!* (${userSaved.length} total)\n\n_"${textToSave}"_`);
-      return true;
-    }
-
-    case ".saved": {
-      const userSaved = (readJson(SAVED_FILE, {}))[from] || [];
-      if (userSaved.length === 0) { await reply("📭 No saved notes. Use *.save <text>* to add one."); return true; }
-      await reply(`📌 *Saved Notes* (${userSaved.length})\n\n${userSaved.map((e, i) => `*${i + 1}.* ${e.text}\n   _${e.savedAt}_`).join("\n\n")}`);
-      return true;
-    }
-
-    case ".del": {
-      const n = parseInt(args, 10);
-      const savedAll = readJson(SAVED_FILE, {});
-      const userSaved = savedAll[from] || [];
-      if (!n || n < 1 || n > userSaved.length) { await reply(`❌ Invalid number. You have ${userSaved.length} saved note(s).`); return true; }
-      const removed = userSaved.splice(n - 1, 1)[0];
-      savedAll[from] = userSaved;
-      writeJson(SAVED_FILE, savedAll);
-      await reply(`🗑 Deleted note ${n}:\n_"${removed.text}"_`);
-      return true;
-    }
-
-    case ".clear": {
-      const savedAll = readJson(SAVED_FILE, {});
-      const count = (savedAll[from] || []).length;
-      if (count === 0) { await reply("📭 No saved notes to clear."); return true; }
-      delete savedAll[from];
-      writeJson(SAVED_FILE, savedAll);
-      await reply(`🗑 Cleared *${count}* note${count !== 1 ? "s" : ""}.`);
-      return true;
-    }
-
-    case ".addbc": {
-      if (!isOwner) { await reply("❌ Only the bot owner can manage the broadcast list."); return true; }
-      const num = normalizePhone(args);
-      if (!num) { await reply("Usage: *.addbc <number with country code>*\nExample: .addbc 2349012345678"); return true; }
-      const list = readJson(BROADCAST_FILE, []);
-      const jid  = `${num}@s.whatsapp.net`;
-      if (list.includes(jid)) { await reply(`⚠️ *+${num}* is already in the broadcast list.`); return true; }
-      list.push(jid);
-      writeJson(BROADCAST_FILE, list);
-      await reply(`✅ *+${num}* added. (${list.length} total)`);
-      return true;
-    }
-
-    case ".removebc": {
-      if (!isOwner) { await reply("❌ Only the bot owner can manage the broadcast list."); return true; }
-      const num = normalizePhone(args);
-      if (!num) { await reply("Usage: *.removebc <number>*"); return true; }
-      let list = readJson(BROADCAST_FILE, []);
-      const jid = `${num}@s.whatsapp.net`;
-      const before = list.length;
-      list = list.filter(j => j !== jid);
-      if (list.length === before) { await reply(`⚠️ *+${num}* not found.`); return true; }
-      writeJson(BROADCAST_FILE, list);
-      await reply(`✅ *+${num}* removed. (${list.length} remaining)`);
-      return true;
-    }
-
-    case ".listbc": {
-      if (!isOwner) { await reply("❌ Only the bot owner can view the broadcast list."); return true; }
-      const list = readJson(BROADCAST_FILE, []);
-      if (list.length === 0) { await reply("📭 Broadcast list is empty. Use *.addbc <number>* to add contacts."); return true; }
-      await reply(`📣 *Broadcast List* (${list.length})\n\n${list.map((j, i) => `*${i + 1}.* +${j.replace("@s.whatsapp.net", "")}`).join("\n")}`);
-      return true;
-    }
-
-    case ".broadcast": {
-      if (!isOwner) { await reply("❌ Only the bot owner can send broadcasts."); return true; }
-      if (!args) { await reply("Usage: *.broadcast <your message>*"); return true; }
-      const list = readJson(BROADCAST_FILE, []);
-      if (list.length === 0) { await reply("❌ Broadcast list is empty. Use *.addbc <number>* first."); return true; }
-      await reply(`📣 Sending to *${list.length}* contact${list.length !== 1 ? "s" : ""}...`);
-      let sent = 0, failed = 0;
-      for (const jid of list) {
-        try { await sock.sendMessage(jid, { text: args }); sent++; await new Promise(r => setTimeout(r, 1000)); }
-        catch (e) { failed++; console.error("[MFG_bot] Broadcast failed for", jid, e.message); }
-      }
-      await reply(`✅ Done!\n📨 Sent: *${sent}*\n❌ Failed: *${failed}*`);
-      return true;
-    }
-
-    case ".learnme": {
-      if (!isOwner) { await reply("❌ Only the bot owner can train the style."); return true; }
-      let sample = args;
-      if (!sample && quoted) sample = quoted.conversation || quoted.extendedTextMessage?.text || "";
-      if (!sample) { await reply("Usage: *.learnme <example of how you text>*\nOr reply to one of your messages with *.learnme*"); return true; }
-      addStyleSample(sample);
-      await reply(`🎭 *Style sample saved!* (${getStyleSamples().length} total)\n\nAI will now talk more like you. Add more examples to improve it.`);
-      return true;
-    }
-
-    case ".mystyle": {
-      if (!isOwner) { await reply("❌ Only the bot owner can view style samples."); return true; }
-      const samples = getStyleSamples();
-      if (samples.length === 0) { await reply("🎭 No style samples yet. Use *.learnme <your message>* to teach the bot."); return true; }
-      await reply(`🎭 *Your Style Samples* (${samples.length})\n\n${samples.map((s, i) => `*${i + 1}.* "${s}"`).join("\n")}`);
-      return true;
-    }
-
-    case ".clearstyle": {
-      if (!isOwner) { await reply("❌ Only the bot owner can clear style samples."); return true; }
-      const count = getStyleSamples().length;
-      writeJson(STYLE_FILE, []);
-      await reply(`🗑 Cleared *${count}* style sample${count !== 1 ? "s" : ""}. AI will use default style.`);
-      return true;
-    }
-
-    case ".about":
-      await reply(
-        "*🤖 About MFG_bot*\n\n" +
-        "WhatsApp bot powered by Baileys + AI (Groq/OpenAI).\n\n" +
-        "✅ Stays online 24/7\n" +
-        "✅ Auto-views all statuses\n" +
-        "✅ AI replies to everyone\n" +
-        "✅ Learns your chat style\n" +
-        "✅ Remembers conversation context\n" +
-        "✅ Rejects calls with a message\n" +
-        "✅ Broadcast messaging\n" +
-        "✅ Notes/saving system\n\n" +
-        "Built with ❤️ on Railway + Replit."
-      );
-      return true;
-
-    default:
-      return false;
-  }
-}
-
-async function connectToWhatsApp(phoneForPairing) {
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  if (qrTimeout)      { clearTimeout(qrTimeout);      qrTimeout = null; }
-
-  try {
-    console.log("[MFG_bot] Connecting... Auth:", JSON.stringify(getAuthState()));
-    const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
-    const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1023044367] }));
-    console.log("[MFG_bot] WA version:", version.join("."));
-
-    const usePairingCode = !!phoneForPairing;
-
-    sock = makeWASocket({
-      version, auth: state,
-      printQRInTerminal: !usePairingCode,
-      logger: pino({ level: "silent" }),
-      browser: Browsers.macOS("Desktop"),
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 10000,
-      markOnlineOnConnect: true,
-      syncFullHistory: false,
+    const styleContext = styleSamples.length
+      ? `\n\nLearned user style samples:\n${styleSamples.slice(-5).join("\n")}`
+      : "";
+    const userStyle = userData[jid]?.style || "";
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-120b",
+        messages: [
+          { role: "system", content: `${settings.systemPrompt}${styleContext}${userStyle ? "\n\nAdapt to this user's style: " + userStyle : ""}` },
+          { role: "user", content: userText }
+        ],
+        max_tokens: 300,
+        temperature: 0.7
+      })
     });
+    const data = await resp.json();
+    if (!resp.ok) { console.error("[MFG_bot] Groq error:", data); return null; }
+    return data.choices?.[0]?.message?.content?.toLowerCase()?.trim() || null;
+  } catch (err) {
+    console.error("[MFG_bot] Groq fetch error:", err.message);
+    return null;
+  }
+}
 
-    if (usePairingCode && !sock.authState.creds.registered) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const code = await sock.requestPairingCode(phoneForPairing);
-        currentPairingCode = code; pairedPhone = phoneForPairing;
-        console.log("[MFG_bot] Pairing code:", code);
-      } catch (err) { console.error("[MFG_bot] Pairing code error:", err.message); }
+// ─── WhatsApp Connection ─────────────────────────────────────────────────────
+async function connectToWhatsApp() {
+  console.log("[MFG_bot] Attempting connection...");
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+  const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({
+    version: [2, 3000, 1015901307], isLatest: false
+  }));
+  console.log(`[MFG_bot] WA version: ${version.join(".")} (latest: ${isLatest})`);
+
+  sock = makeWASocket({
+    version, auth: state,
+    printQRInTerminal: true,
+    logger: pino({ level: "silent" }),
+    browser: Browsers.ubuntu("Chrome"),
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 10000,
+    retryRequestDelayMs: 2000,
+    maxMsgRetryCount: 3,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+  });
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) { currentQr = qr; hasQr = true; isConnected = false; console.log("[MFG_bot] QR Generated"); }
+    if (connection === "open") {
+      isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
+      console.log("[MFG_bot] Connected to WhatsApp");
+      // Greet the owner on every fresh connection
+      setTimeout(async () => {
+        try {
+          await sock.sendMessage(OWNER_JID, {
+            text: `mfg_bot online ✅\n\nyou're linked. i'm ready.\n\nmodel: openai/gpt-oss-120b via groq\nai: ${settings.aiEnabled ? "on" : "off"}\n\nyou're my maker. i listen to you first.`
+          });
+        } catch (e) { console.log("[MFG_bot] Could not message owner:", e.message); }
+      }, 3000);
     }
-
-    qrTimeout = setTimeout(() => {
-      if (!isConnected && !hasQr && !currentPairingCode) {
-        console.log("[MFG_bot] No QR/code after 30s — retrying");
-        if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} sock = null; }
-        clearAuthFolder();
-        reconnectTimer = setTimeout(() => connectToWhatsApp(), 3000);
+    if (connection === "close") {
+      isConnected = false;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reconnect: ${shouldReconnect}`);
+      if (code === DisconnectReason.loggedOut) {
+        fs.rmSync(path.join(__dirname, "auth_info_baileys"), { recursive: true, force: true });
       }
-    }, 30000);
+      if (shouldReconnect) {
+        reconnectCount++;
+        setTimeout(connectToWhatsApp, Math.min(reconnectCount * 5000, 30000));
+      }
+    }
+  });
 
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+  sock.ev.on("creds.update", saveCreds);
 
-      if (qr) {
-        console.log("[MFG_bot] QR code generated");
-        currentQr = qr; hasQr = true; isConnected = false;
-        if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
+  sock.ev.on("chats.set", ({ chats }) => { allChats = chats || []; });
+  sock.ev.on("chats.upsert", (newChats) => {
+    for (const c of newChats) {
+      const idx = allChats.findIndex(x => x.id === c.id);
+      if (idx >= 0) allChats[idx] = c; else allChats.push(c);
+    }
+  });
+
+  // ─── Message Handler ──────────────────────────────────────────────────────
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+    for (const msg of messages) {
+      if (msg.key.fromMe || !msg.message) continue;
+      messageCount++;
+      const from = msg.key.remoteJid;
+      const text = (
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption || ""
+      ).trim();
+      const pfx = settings.prefix || ".";
+
+      const send = (t) => sock.sendMessage(from, { text: t });
+      const senderIsOwner = isOwner(from);
+
+      // Auto-read status
+      if (settings.autoReadStatus && from.endsWith("@broadcast")) {
+        try { await sock.readMessages([msg.key]); } catch (e) {}
+        continue;
       }
 
-      if (connection === "open") {
-        console.log("[MFG_bot] Connected!");
-        isConnected = true; hasQr = false; currentQr = null; currentPairingCode = null;
-        botJid = sock.user?.id?.replace(/:.*@/, "@") || null;
-        if (qrTimeout)      { clearTimeout(qrTimeout);      qrTimeout = null; }
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (!text) continue;
 
-        // Stay online permanently
-        try { await sock.sendPresenceUpdate("available"); } catch (e) {}
-        setInterval(async () => {
-          if (isConnected && sock) {
-            try { await sock.sendPresenceUpdate("available"); } catch (e) {}
+      // ── Owner greeting when they message the bot ──────────────────────
+      if (senderIsOwner && !userData[from]?.greeted) {
+        if (!userData[from]) userData[from] = {};
+        userData[from].greeted = true;
+        writeJSON("users.json", userData);
+        await send(`sup maker 👋 i'm your bot. all commands unlocked. type .menu to see what i can do.`);
+      }
+
+      // ── Who-made-you detection (non-commands, natural language) ───────
+      const lowerText = text.toLowerCase();
+      const creatorTriggers = ["who made you", "who created you", "who built you", "who is your creator", "who is your maker", "who owns you", "who is your owner", "wey make you", "who program you"];
+      if (!text.startsWith(pfx) && creatorTriggers.some(t => lowerText.includes(t))) {
+        await send(`i was built by my maker — +${OWNER_NUMBER}. he's the only one i fully listen to.`);
+        continue;
+      }
+
+      // ── Commands ────────────────────────────────────────────────────────
+      if (text.startsWith(pfx)) {
+        const [rawCmd, ...args] = text.slice(pfx.length).trim().split(/\s+/);
+        const cmd = rawCmd.toLowerCase();
+        trackCommand(cmd);
+
+        // .vv — resend as view once
+        if (cmd === "vv") {
+          const content = args.join(" ");
+          await sock.sendMessage(from, { text: content || "view this once." }, { viewOnce: true });
+          continue;
+        }
+
+        // .site
+        if (cmd === "site") {
+          await send("check the portfolio: https://ash-cloth.ink");
+          continue;
+        }
+
+        // .ai on | off | status | mode | reset | prompt
+        if (cmd === "ai") {
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.aiEnabled = true; writeJSON("settings.json", settings); await send("ai on. 👀"); }
+          else if (sub === "off") { settings.aiEnabled = false; writeJSON("settings.json", settings); await send("ai off."); }
+          else if (sub === "status") { await send(`ai is ${settings.aiEnabled ? "on" : "off"} | mode: ${settings.aiMode}`); }
+          else if (sub === "mode") { settings.aiMode = args[1] || "smart"; writeJSON("settings.json", settings); await send(`mode set: ${settings.aiMode}`); }
+          else if (sub === "reset") { styleSamples = []; writeJSON("style_samples.json", styleSamples); await send("ai memory cleared."); }
+          else if (sub === "prompt") {
+            const view = args.slice(1).join(" ");
+            if (view) { settings.systemPrompt = view; writeJSON("settings.json", settings); await send("prompt updated."); }
+            else await send(settings.systemPrompt);
           }
-        }, 60000);
-      }
-
-      if (connection === "close") {
-        isConnected = false;
-        const code = lastDisconnect?.error?.output?.statusCode;
-        console.log("[MFG_bot] Closed. Code:", code, JSON.stringify(lastDisconnect));
-        if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
-        if (code === DisconnectReason.loggedOut) {
-          currentQr = null; hasQr = false; currentPairingCode = null;
-          clearAuthFolder();
-        }
-        reconnectTimer = setTimeout(() => connectToWhatsApp(), 5000);
-      }
-    });
-
-    sock.ev.on("creds.update", saveCreds);
-
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
-      for (const msg of messages) {
-        if (!msg.message) continue;
-        const from = msg.key.remoteJid;
-        if (!from) continue;
-
-        // Auto-view WhatsApp statuses
-        if (from === "status@broadcast") {
-          try { await sock.readMessages([msg.key]); console.log("[MFG_bot] Viewed status from", msg.key.participant); } catch (e) {}
+          else if (sub === "delay") { settings.aiDelay = parseInt(args[1]) || 2; writeJSON("settings.json", settings); await send(`delay: ${settings.aiDelay}s`); }
+          else if (sub === "typing") { settings.aiTyping = args[1] !== "off"; writeJSON("settings.json", settings); await send(`typing indicator: ${settings.aiTyping ? "on" : "off"}`); }
+          else await send(`ai is ${settings.aiEnabled ? "on ✅" : "off ❌"} | .ai on | .ai off | .ai mode smart/aggressive/chill`);
           continue;
         }
 
-        if (from.endsWith("@g.us"))      continue;  // skip groups
-        if (from.endsWith("@broadcast")) continue;  // skip other broadcasts
-
-        const isOwner = msg.key.fromMe;
-        const text =
-          msg.message.conversation                      ||
-          msg.message.extendedTextMessage?.text         ||
-          msg.message.imageMessage?.caption             ||
-          msg.message.videoMessage?.caption             ||
-          "";
-
-        // Owner's own device — only handle commands, don't AI-reply to yourself
-        if (isOwner) {
-          if (text.startsWith(".")) await handleCommand(from, msg, text, true);
+        // .learnme — store style samples
+        if (cmd === "learnme") {
+          const sub = args[0]?.toLowerCase();
+          if (sub === "add") {
+            const sample = args.slice(1).join(" ");
+            if (sample) { styleSamples.push(sample); writeJSON("style_samples.json", styleSamples); await send("style learned."); }
+          } else if (sub === "view") {
+            await send(styleSamples.length ? styleSamples.slice(-5).join("\n---\n") : "no samples yet.");
+          } else if (sub === "clear") {
+            styleSamples = []; writeJSON("style_samples.json", styleSamples); await send("style cleared.");
+          } else if (sub === "auto") {
+            if (!userData[from]) userData[from] = {};
+            userData[from].autoLearn = true; writeJSON("users.json", userData);
+            await send("auto-learn enabled for this chat.");
+          } else {
+            await send(".learnme add <text> | .learnme view | .learnme clear | .learnme auto");
+          }
           continue;
         }
 
-        console.log("[MFG_bot] Message from", from, ":", text || "(no text)");
-        if (!text) continue;
-
-        if (text.startsWith(".")) {
-          const handled = await handleCommand(from, msg, text, false);
-          if (handled) continue;
+        // .style
+        if (cmd === "style") {
+          const mode = args.join(" ");
+          if (!userData[from]) userData[from] = {};
+          userData[from].style = mode; writeJSON("users.json", userData);
+          await send(`style set: ${mode}`);
+          continue;
         }
 
-        if (aiDisabled.has(from)) continue;
-        await sendAIReply(from, text);
-      }
-    });
-
-    sock.ev.on("call", async (calls) => {
-      for (const call of calls) {
-        if (call.status !== "offer") continue;
-        if (settings.autoCallReject) {
-          try { await sock.rejectCall(call.id, call.from); console.log("[MFG_bot] Call rejected from", call.from); }
-          catch (e) { console.error("[MFG_bot] Call reject error:", e.message); }
+        // .broadcast — owner only guard FIRST
+        if (cmd === "broadcast") {
+          if (!senderIsOwner) { await send("nah. that's a maker-only command."); continue; }
+          const sub = args[0]?.toLowerCase();
+          const msgText = args.slice(1).join(" ");
+          if (sub === "all" || sub === "dm") {
+            const targets = allChats.filter(c => c.id.endsWith("@s.whatsapp.net"));
+            let sent = 0;
+            for (const chat of targets.slice(0, 50)) {
+              try { await sock.sendMessage(chat.id, { text: msgText }); sent++; } catch (e) {}
+            }
+            await send(`broadcast sent to ${sent} chats.`);
+          } else if (sub === "group") {
+            const targets = allChats.filter(c => c.id.endsWith("@g.us"));
+            let sent = 0;
+            for (const chat of targets.slice(0, 20)) {
+              try { await sock.sendMessage(chat.id, { text: msgText }); sent++; } catch (e) {}
+            }
+            await send(`broadcast sent to ${sent} groups.`);
+          } else if (sub === "status") {
+            await send(`chats available: ${allChats.length}`);
+          } else {
+            await send(".broadcast all <msg> | .broadcast group <msg> | .broadcast status");
+          }
+          continue;
         }
-        try { await sock.sendMessage(call.from, { text: settings.callRejectMessage }); }
-        catch (e) { console.error("[MFG_bot] Call message error:", e.message); }
-      }
-    });
 
-  } catch (err) {
-    console.error("[MFG_bot] Startup error:", err.message);
-    if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
-    reconnectTimer = setTimeout(() => connectToWhatsApp(), 8000);
-  }
+        // .owner — anyone can check
+        if (cmd === "owner") {
+          await send(`mfg_bot was built by its maker.\ncontact: +${OWNER_NUMBER}`);
+          continue;
+        }
+
+        // .bot
+        if (cmd === "bot") {
+          const sub = args[0]?.toLowerCase();
+          const uptime = Math.floor((Date.now() - startTime) / 1000);
+          if (sub === "status") await send(`mfg_bot online ✅\nuptime: ${uptime}s\nmessages: ${messageCount}\nai: ${settings.aiEnabled ? "on" : "off"}`);
+          else if (sub === "ping") await send(`pong 🏓 ${Date.now() - msg.messageTimestamp * 1000}ms`);
+          else if (sub === "uptime") await send(`uptime: ${uptime}s`);
+          else if (sub === "version") await send("mfg_bot v2.0 | baileys + groq");
+          else if (sub === "prefix") { settings.prefix = args[1] || "."; writeJSON("settings.json", settings); await send(`prefix set: ${settings.prefix}`); }
+          else await send(".bot status | .bot ping | .bot uptime | .bot version | .bot prefix <symbol>");
+          continue;
+        }
+
+        // .stats
+        if (cmd === "stats") {
+          const sub = args[0]?.toLowerCase();
+          if (sub === "commands") {
+            const top = Object.entries(commandStats).sort((a, b) => b[1] - a[1]).slice(0, 5);
+            await send("top commands:\n" + top.map(([k, v]) => `${k}: ${v}`).join("\n"));
+          } else if (sub === "memory") {
+            const mem = process.memoryUsage();
+            await send(`rss: ${Math.round(mem.rss / 1024 / 1024)}mb\nheap: ${Math.round(mem.heapUsed / 1024 / 1024)}mb`);
+          } else {
+            await send(`messages: ${messageCount}\nchats: ${allChats.length}\ncommands used:\n${Object.keys(commandStats).length} unique`);
+          }
+          continue;
+        }
+
+        // .send — owner only
+        if (cmd === "send") {
+          if (!senderIsOwner) { await send("only my maker can send messages to other numbers."); continue; }
+          const number = args[0]?.replace(/[^0-9]/g, "");
+          const msgContent = args.slice(1).join(" ");
+          if (number && msgContent) {
+            await sock.sendMessage(`${number}@s.whatsapp.net`, { text: msgContent });
+            await send(`sent to ${number}`);
+          } else await send(".send <number> <message>");
+          continue;
+        }
+
+        // .qr — show QR as text
+        if (cmd === "qr") {
+          const content = args.join(" ");
+          if (content) await sock.sendMessage(from, { text: content }); // simplified
+          else await send("use: .qr <text>");
+          continue;
+        }
+
+        // .define, .joke, .quote, .fact, .flip, .roll
+        if (cmd === "flip") { await send(Math.random() > 0.5 ? "heads 🪙" : "tails 🪙"); continue; }
+        if (cmd === "roll") { await send(`rolled: ${Math.floor(Math.random() * 6) + 1} 🎲`); continue; }
+        if (cmd === "ping") { await send("pong 🏓"); continue; }
+
+        // .menu / .help
+        if (cmd === "menu" || cmd === "help") {
+          const topic = args[0]?.toLowerCase();
+          if (topic === "ai") await send(".ai on | off | status | mode | reset | prompt | delay | typing");
+          else if (topic === "broadcast") await send(".broadcast all | group | dm | status");
+          else await send(`mfg_bot commands:\n.ai | .learnme | .broadcast | .bot | .stats | .send | .vv | .site | .style | .owner | .flip | .roll | .ping\n\n.help ai | .help broadcast for details`);
+          continue;
+        }
+
+        // Unknown command
+        if (settings.aiEnabled) {
+          // fall through to AI below
+        } else {
+          await send(`unknown command. try .menu`);
+          continue;
+        }
+      }
+
+      // ── Auto-Learn ──────────────────────────────────────────────────────
+      if (userData[from]?.autoLearn && text.length > 10 && !text.startsWith(pfx)) {
+        styleSamples.push(text);
+        if (styleSamples.length > 100) styleSamples = styleSamples.slice(-100);
+        writeJSON("style_samples.json", styleSamples);
+      }
+
+      // ── AI Reply ────────────────────────────────────────────────────────
+      if (settings.aiEnabled && text.length > 1 && !text.startsWith(pfx)) {
+        try {
+          if (settings.aiTyping) await sock.sendPresenceUpdate("composing", from);
+          if (settings.aiDelay > 0) await new Promise(r => setTimeout(r, settings.aiDelay * 1000));
+          const reply = await askGroq(text, from);
+          if (settings.aiTyping) await sock.sendPresenceUpdate("paused", from);
+          if (reply) await send(reply);
+        } catch (err) { console.error("[MFG_bot] AI error:", err.message); }
+      }
+    }
+  });
+
+  // ─── Call Rejection ───────────────────────────────────────────────────────
+  sock.ev.on("call", async (calls) => {
+    if (!settings.autoCallReject) return;
+    for (const call of calls) {
+      if (call.status === "offer") {
+        try { await sock.rejectCall(call.id, call.from); } catch (e) {}
+      }
+    }
+  });
 }
 
-app.get("/",             (req, res) => res.send("MFG_bot is running"));
-app.get("/status",       (req, res) => res.json({ connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode }));
-app.get("/qr",           (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR" }));
-app.get("/pairing-code", (req, res) => currentPairingCode ? res.json({ code: currentPairingCode, phone: pairedPhone }) : res.status(404).json({ error: "No pairing code" }));
+// ─── API Endpoints ────────────────────────────────────────────────────────────
+app.get("/api/status", (req, res) => res.json({
+  connected: isConnected,
+  hasQr,
+  uptime: Math.floor((Date.now() - startTime) / 1000),
+  messageCount,
+  chatCount: allChats.length,
+  aiEnabled: settings.aiEnabled
+}));
 
-app.get("/debug", (req, res) => {
-  let baileysVersion = "unknown";
-  try { baileysVersion = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
-  res.json({
-    connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode,
-    uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
-    auth: getAuthState(), hasSock: !!sock, baileysVersion,
-    hasGroq: !!process.env.GROQ_API_KEY, hasOpenAI: !!process.env.OPENAI_API_KEY,
-    autoCallReject: settings.autoCallReject,
-    broadcastCount: readJson(BROADCAST_FILE, []).length,
-    styleSamples: getStyleSamples().length,
-    activeConversations: conversationHistory.size,
-  });
-});
+app.get("/api/qr", (req, res) =>
+  currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "no qr available" })
+);
 
-app.post("/logout", async (req, res) => {
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  if (qrTimeout)      { clearTimeout(qrTimeout);      qrTimeout = null; }
-  if (sock) {
-    try { sock.ev.removeAllListeners(); } catch (e) {}
-    try { await sock.logout(); } catch (e) {}
-    sock = null;
-  }
-  isConnected = false; hasQr = false; currentQr = null; currentPairingCode = null; pairedPhone = null;
-  clearAuthFolder();
-  res.json({ success: true });
-  setTimeout(() => connectToWhatsApp(), 2000);
-});
-
-app.post("/request-pairing-code", async (req, res) => {
+// Pairing code — more reliable than QR on newer WhatsApp versions
+app.post("/api/pair", async (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ error: "missing phone number" });
+  if (!sock) return res.status(503).json({ error: "bot not initialised" });
+  if (isConnected) return res.status(400).json({ error: "already connected" });
   try {
-    const cleaned = String(req.body.phoneNumber || "").replace(/[^0-9]/g, "");
-    if (!cleaned) return res.status(400).json({ error: "phoneNumber required" });
-    if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} sock = null; }
-    clearAuthFolder(); currentPairingCode = null;
-    await new Promise(r => setTimeout(r, 1000));
-    connectToWhatsApp(cleaned);
-    await new Promise(r => setTimeout(r, 6000));
-    if (currentPairingCode) return res.json({ code: currentPairingCode });
-    res.status(503).json({ error: "Could not get pairing code yet — try GET /pairing-code in a few seconds" });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const clean = phone.replace(/[^0-9]/g, "");
+    const code = await sock.requestPairingCode(clean);
+    console.log(`[MFG_bot] Pairing code for ${clean}: ${code}`);
+    res.json({ success: true, code });
+  } catch (e) {
+    console.error("[MFG_bot] Pairing code error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get("/get-features",      (req, res) => res.json({ autoCallReject: settings.autoCallReject, callRejectMessage: settings.callRejectMessage }));
-app.post("/set-feature",      (req, res) => {
-  if (req.body.feature === "autoCallReject") { settings.autoCallReject = Boolean(req.body.enabled); saveSettings(); return res.json({ success: true }); }
-  if (req.body.feature === "callRejectMessage") { if (!req.body.value) return res.status(400).json({ error: "value required" }); settings.callRejectMessage = req.body.value; saveSettings(); return res.json({ success: true }); }
-  res.status(400).json({ error: "Unknown feature" });
+app.get("/api/settings", (req, res) => res.json(settings));
+app.post("/api/settings", (req, res) => {
+  settings = { ...settings, ...req.body };
+  writeJSON("settings.json", settings);
+  res.json({ success: true, settings });
 });
-app.get("/get-greeting",      (req, res) => res.json({ message: settings.greeting }));
-app.post("/set-greeting",     (req, res) => { if (!req.body.message) return res.status(400).json({ error: "required" }); settings.greeting = req.body.message; saveSettings(); res.json({ success: true }); });
-app.get("/get-system-prompt", (req, res) => res.json({ prompt: settings.systemPrompt }));
-app.post("/set-system-prompt",(req, res) => { if (!req.body.prompt) return res.status(400).json({ error: "required" }); settings.systemPrompt = req.body.prompt; saveSettings(); res.json({ success: true }); });
-app.get("/get-broadcast",     (req, res) => res.json({ contacts: readJson(BROADCAST_FILE, []) }));
-app.get("/get-style",         (req, res) => res.json({ samples: getStyleSamples() }));
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+app.post("/api/set-system-prompt", (req, res) => {
+  if (!req.body.prompt) return res.status(400).json({ error: "missing prompt" });
+  settings.systemPrompt = req.body.prompt;
+  writeJSON("settings.json", settings);
+  res.json({ success: true });
+});
+
+app.get("/api/style", (req, res) => res.json({ samples: styleSamples }));
+app.post("/api/style", (req, res) => {
+  const { sample } = req.body;
+  if (!sample) return res.status(400).json({ error: "missing sample" });
+  styleSamples.push(sample);
+  writeJSON("style_samples.json", styleSamples);
+  res.json({ success: true, count: styleSamples.length });
+});
+app.delete("/api/style", (req, res) => {
+  styleSamples = [];
+  writeJSON("style_samples.json", styleSamples);
+  res.json({ success: true });
+});
+
+app.get("/api/stats", (req, res) => res.json({
+  messageCount,
+  chatCount: allChats.length,
+  commandStats,
+  uptime: Math.floor((Date.now() - startTime) / 1000),
+  memory: process.memoryUsage()
+}));
+
+app.post("/api/broadcast", async (req, res) => {
+  const { message, type = "all" } = req.body;
+  if (!message) return res.status(400).json({ error: "missing message" });
+  if (!isConnected) return res.status(503).json({ error: "bot not connected" });
+  let targets = type === "group"
+    ? allChats.filter(c => c.id.endsWith("@g.us"))
+    : allChats.filter(c => c.id.endsWith("@s.whatsapp.net"));
+  targets = targets.slice(0, 50);
+  let sent = 0, failed = 0;
+  for (const chat of targets) {
+    try { await sock.sendMessage(chat.id, { text: message }); sent++; } catch (e) { failed++; }
+  }
+  res.json({ success: true, sent, failed, total: targets.length });
+});
+
+app.post("/api/logout", (req, res) => {
+  try {
+    fs.rmSync(path.join(__dirname, "auth_info_baileys"), { recursive: true, force: true });
+    isConnected = false; hasQr = false; currentQr = null;
+    if (sock) { try { sock.logout(); } catch (e) {} }
+    setTimeout(connectToWhatsApp, 2000);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Serve React for all non-API routes
+app.get("*", (req, res) => {
+  const indexPath = path.join(__dirname, "client/dist/index.html");
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.send("MFG_bot Hub — building frontend... restart after build completes.");
+  }
+});
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 5000;
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
-  startTime = Date.now();
   connectToWhatsApp();
+});
+
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.log(`[MFG_bot] Port ${PORT} busy, retrying in 3s...`);
+    setTimeout(() => {
+      server.close();
+      server.listen(PORT, "0.0.0.0");
+    }, 3000);
+  } else {
+    console.error("[MFG_bot] Server error:", err);
+  }
 });
