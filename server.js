@@ -21,7 +21,11 @@ app.use(express.json());
 const SETTINGS_FILE = path.join(__dirname, "settings.json");
 function loadSettings() {
   try { if (fs.existsSync(SETTINGS_FILE)) return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")); } catch (e) {}
-  return { autoCallReject: false, greeting: "Hello! I am MFG_bot. How can I help you today?", systemPrompt: "You are MFG_bot, a helpful WhatsApp assistant. Answer questions clearly and concisely." };
+  return {
+    autoCallReject: false,
+    greeting: "Hello! I am MFG_bot. How can I help you today?",
+    systemPrompt: "You are MFG_bot, a helpful WhatsApp assistant. Answer questions clearly and concisely.",
+  };
 }
 function saveSettings(data) { try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2)); } catch (e) {} }
 let settings = loadSettings();
@@ -42,15 +46,11 @@ function clearAuthFolder() {
   try {
     if (fs.existsSync(AUTH_DIR)) {
       const files = fs.readdirSync(AUTH_DIR);
-      for (const file of files) {
-        try { fs.unlinkSync(path.join(AUTH_DIR, file)); } catch (e) {}
-      }
+      for (const file of files) { try { fs.unlinkSync(path.join(AUTH_DIR, file)); } catch (e) {} }
       try { fs.rmdirSync(AUTH_DIR); } catch (e) {}
       console.log("[MFG_bot] Auth folder cleared");
     }
-  } catch (e) {
-    console.error("[MFG_bot] Error clearing auth:", e.message);
-  }
+  } catch (e) { console.error("[MFG_bot] Error clearing auth:", e.message); }
 }
 
 function getAuthState() {
@@ -58,15 +58,51 @@ function getAuthState() {
   try { return { exists: true, files: fs.readdirSync(AUTH_DIR) }; } catch (e) { return { exists: false, files: [] }; }
 }
 
+async function sendAIReply(from, text) {
+  if (!sock || !isConnected) return;
+  try {
+    const groqKey = process.env.GROQ_API_KEY;
+    const openaiKey = process.env.OPENAI_API_KEY;
+
+    if (groqKey || openaiKey) {
+      const apiUrl = groqKey
+        ? "https://api.groq.com/openai/v1/chat/completions"
+        : "https://api.openai.com/v1/chat/completions";
+      const apiKey = groqKey || openaiKey;
+      const model = groqKey ? "llama-3.3-70b-versatile" : "gpt-3.5-turbo";
+
+      const resp = await fetch(apiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: settings.systemPrompt },
+            { role: "user", content: text },
+          ],
+        }),
+      });
+      const data = await resp.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply) {
+        await sock.sendMessage(from, { text: reply });
+        console.log("[MFG_bot] AI reply sent to", from, "via", groqKey ? "Groq" : "OpenAI");
+        return;
+      }
+      console.error("[MFG_bot] AI returned no reply:", JSON.stringify(data));
+    }
+
+    await sock.sendMessage(from, { text: settings.greeting });
+    console.log("[MFG_bot] Greeting reply sent to", from, "(no AI key configured)");
+  } catch (err) {
+    console.error("[MFG_bot] Reply error:", err.message);
+    try { await sock.sendMessage(from, { text: settings.greeting }); } catch (e) {}
+  }
+}
+
 async function connectToWhatsApp(phoneForPairing) {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
-
-  const authCheck = getAuthState();
-  if (authCheck.exists && authCheck.files.length === 0) {
-    console.log("[MFG_bot] Empty auth folder — clearing");
-    try { fs.rmdirSync(AUTH_DIR); } catch (e) {}
-  }
 
   try {
     console.log("[MFG_bot] Connecting... Auth:", JSON.stringify(getAuthState()));
@@ -117,7 +153,7 @@ async function connectToWhatsApp(phoneForPairing) {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log("[MFG_bot] QR code generated!");
+        console.log("[MFG_bot] QR code generated");
         currentQr = qr;
         hasQr = true;
         isConnected = false;
@@ -157,25 +193,28 @@ async function connectToWhatsApp(phoneForPairing) {
       for (const msg of messages) {
         if (msg.key.fromMe || !msg.message) continue;
         const from = msg.key.remoteJid;
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-        if (!text || !process.env.OPENAI_API_KEY) continue;
-        try {
-          const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-            body: JSON.stringify({ model: "gpt-3.5-turbo", messages: [{ role: "system", content: settings.systemPrompt }, { role: "user", content: text }] }),
-          });
-          const data = await resp.json();
-          const reply = data.choices?.[0]?.message?.content;
-          if (reply) await sock.sendMessage(from, { text: reply });
-        } catch (err) { console.error("[MFG_bot] OpenAI error:", err.message); }
+        if (!from || from.endsWith("@g.us")) continue;
+        const text =
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          msg.message.imageMessage?.caption ||
+          msg.message.videoMessage?.caption ||
+          "";
+        console.log("[MFG_bot] Message from", from, ":", text || "(no text)");
+        if (!text) continue;
+        await sendAIReply(from, text);
       }
     });
 
     sock.ev.on("call", async (calls) => {
       if (!settings.autoCallReject) return;
       for (const call of calls) {
-        if (call.status === "offer") try { await sock.rejectCall(call.id, call.from); } catch (e) {}
+        if (call.status === "offer") {
+          try {
+            await sock.rejectCall(call.id, call.from);
+            console.log("[MFG_bot] Call rejected from", call.from);
+          } catch (e) { console.error("[MFG_bot] Call reject error:", e.message); }
+        }
       }
     });
 
@@ -186,7 +225,7 @@ async function connectToWhatsApp(phoneForPairing) {
   }
 }
 
-app.get("/", (req, res) => res.send("Bot is running"));
+app.get("/", (req, res) => res.send("MFG_bot is running"));
 app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode }));
 app.get("/qr", (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR available" }));
 app.get("/pairing-code", (req, res) => currentPairingCode ? res.json({ code: currentPairingCode, phone: pairedPhone }) : res.status(404).json({ error: "No pairing code" }));
@@ -194,7 +233,18 @@ app.get("/pairing-code", (req, res) => currentPairingCode ? res.json({ code: cur
 app.get("/debug", (req, res) => {
   let baileysVersion = "unknown";
   try { baileysVersion = require("@whiskeysockets/baileys/package.json").version; } catch (e) {}
-  res.json({ connected: isConnected, hasQr, hasPairingCode: !!currentPairingCode, uptimeSeconds: Math.floor((Date.now() - startTime) / 1000), auth: getAuthState(), hasSock: !!sock, baileysVersion });
+  res.json({
+    connected: isConnected,
+    hasQr,
+    hasPairingCode: !!currentPairingCode,
+    uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
+    auth: getAuthState(),
+    hasSock: !!sock,
+    baileysVersion,
+    hasGroq: !!process.env.GROQ_API_KEY,
+    hasOpenAI: !!process.env.OPENAI_API_KEY,
+    autoCallReject: settings.autoCallReject,
+  });
 });
 
 app.post("/logout", async (req, res) => {
@@ -228,13 +278,27 @@ app.post("/request-pairing-code", async (req, res) => {
 
 app.get("/get-features", (req, res) => res.json({ autoCallReject: settings.autoCallReject }));
 app.post("/set-feature", (req, res) => {
-  if (req.body.feature === "autoCallReject") { settings.autoCallReject = Boolean(req.body.enabled); saveSettings(settings); return res.json({ success: true }); }
+  if (req.body.feature === "autoCallReject") {
+    settings.autoCallReject = Boolean(req.body.enabled);
+    saveSettings(settings);
+    return res.json({ success: true });
+  }
   res.status(400).json({ error: "Unknown feature" });
 });
 app.get("/get-greeting", (req, res) => res.json({ message: settings.greeting }));
-app.post("/set-greeting", (req, res) => { if (!req.body.message) return res.status(400).json({ error: "required" }); settings.greeting = req.body.message; saveSettings(settings); res.json({ success: true }); });
+app.post("/set-greeting", (req, res) => {
+  if (!req.body.message) return res.status(400).json({ error: "required" });
+  settings.greeting = req.body.message;
+  saveSettings(settings);
+  res.json({ success: true });
+});
 app.get("/get-system-prompt", (req, res) => res.json({ prompt: settings.systemPrompt }));
-app.post("/set-system-prompt", (req, res) => { if (!req.body.prompt) return res.status(400).json({ error: "required" }); settings.systemPrompt = req.body.prompt; saveSettings(settings); res.json({ success: true }); });
+app.post("/set-system-prompt", (req, res) => {
+  if (!req.body.prompt) return res.status(400).json({ error: "required" });
+  settings.systemPrompt = req.body.prompt;
+  saveSettings(settings);
+  res.json({ success: true });
+});
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
