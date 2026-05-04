@@ -30,28 +30,49 @@ function clearAuthFolder() {
 
 async function connectToWhatsApp() {
   try {
-    console.log("[MFG_bot] Connecting...");
+    console.log("[MFG_bot] Initializing connection...");
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+    
     sock = makeWASocket({
       auth: state,
       printQRInTerminal: true,
       logger: pino({ level: "silent" }),
-      browser: ["MFG_bot", "Chrome", "1.0.0"],
+      // FIX: Identify as standard Chrome to stop the "undefined" loop
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
+      syncFullHistory: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 10000,
-      markOnlineOnConnect: false,
     });
 
     sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
-      if (qr) { console.log("[MFG_bot] QR ready"); currentQr = qr; hasQr = true; isConnected = false; }
-      if (connection === "open") { console.log("[MFG_bot] Connected!"); isConnected = true; hasQr = false; currentQr = null; if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } }
+      if (qr) { 
+        console.log("[MFG_bot] NEW QR READY"); 
+        currentQr = qr; 
+        hasQr = true; 
+        isConnected = false; 
+      }
+      
+      if (connection === "open") { 
+        console.log("[MFG_bot] Successfully Connected!"); 
+        isConnected = true; 
+        hasQr = false; 
+        currentQr = null; 
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } 
+      }
+      
       if (connection === "close") {
         isConnected = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        console.log(`[MFG_bot] Closed: ${code}`);
-        if (code === DisconnectReason.loggedOut) { clearAuthFolder(); }
-        reconnectTimer = setTimeout(connectToWhatsApp, 5000);
+        console.log(`[MFG_bot] Connection Closed. Reason Code: ${code}`);
+        
+        if (code === DisconnectReason.loggedOut) { 
+          clearAuthFolder(); 
+        }
+        
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(connectToWhatsApp, 5000);
+        }
       }
     });
 
@@ -63,43 +84,60 @@ async function connectToWhatsApp() {
         if (msg.key.fromMe || !msg.message) continue;
         const from = msg.key.remoteJid;
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        
         if (!text || !process.env.OPENAI_API_KEY) continue;
+        
         try {
-          const resp = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: JSON.stringify({ model: "gpt-3.5-turbo", messages: [{ role: "system", content: settings.systemPrompt }, { role: "user", content: text }] }) });
+          const resp = await fetch("https://api.openai.com/v1/chat/completions", { 
+            method: "POST", 
+            headers: { 
+              "Content-Type": "application/json", 
+              Authorization: `Bearer ${process.env.OPENAI_API_KEY}` 
+            }, 
+            body: JSON.stringify({ 
+              model: "gpt-3.5-turbo", 
+              messages: [
+                { role: "system", content: settings.systemPrompt }, 
+                { role: "user", content: text }
+              ] 
+            }) 
+          });
           const data = await resp.json();
           const reply = data.choices?.[0]?.message?.content;
           if (reply) await sock.sendMessage(from, { text: reply });
-        } catch (err) { console.error("[MFG_bot] OpenAI error:", err.message); }
+        } catch (err) { 
+          console.error("[MFG_bot] OpenAI error:", err.message); 
+        }
       }
     });
 
     sock.ev.on("call", async (calls) => {
       if (!settings.autoCallReject) return;
-      for (const call of calls) if (call.status === "offer") try { await sock.rejectCall(call.id, call.from); } catch (e) {}
+      for (const call of calls) {
+        if (call.status === "offer") {
+          try { await sock.rejectCall(call.id, call.from); } catch (e) {}
+        }
+      }
     });
 
   } catch (err) {
-    console.error("[MFG_bot] Startup error:", err.message);
-    reconnectTimer = setTimeout(connectToWhatsApp, 8000);
+    console.error("[MFG_bot] Startup Error:", err.message);
+    setTimeout(connectToWhatsApp, 10000);
   }
 }
 
-app.get("/", (req, res) => res.send("Bot is running"));
+app.get("/", (req, res) => res.send("MFG_bot Backend is Online"));
 app.get("/status", (req, res) => res.json({ connected: isConnected, hasQr }));
 app.get("/qr", (req, res) => currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "No QR available" }));
-
-app.post("/request-pairing-code", async (req, res) => {
-  try {
-    const cleaned = String(req.body.phoneNumber || "").replace(/[^0-9]/g, "");
-    if (!cleaned) return res.status(400).json({ error: "phoneNumber required" });
-    res.json({ code: await sock.requestPairingCode(cleaned) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
 
 app.post("/logout", async (req, res) => {
   try {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} try { await sock.logout(); } catch (e) {} sock = null; }
+    if (sock) { 
+      try { sock.ev.removeAllListeners(); } catch (e) {} 
+      try { await sock.logout(); } catch (e) {} 
+      sock = null; 
+    }
     isConnected = false; hasQr = false; currentQr = null;
     clearAuthFolder();
     res.json({ success: true });
@@ -107,15 +145,34 @@ app.post("/logout", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Settings Endpoints
 app.get("/get-features", (req, res) => res.json({ autoCallReject: settings.autoCallReject }));
 app.post("/set-feature", (req, res) => {
-  if (req.body.feature === "autoCallReject") { settings.autoCallReject = Boolean(req.body.enabled); saveSettings(settings); return res.json({ success: true }); }
+  if (req.body.feature === "autoCallReject") { 
+    settings.autoCallReject = Boolean(req.body.enabled); 
+    saveSettings(settings); 
+    return res.json({ success: true }); 
+  }
   res.status(400).json({ error: "Unknown feature" });
 });
 app.get("/get-greeting", (req, res) => res.json({ message: settings.greeting }));
-app.post("/set-greeting", (req, res) => { if (!req.body.message) return res.status(400).json({ error: "required" }); settings.greeting = req.body.message; saveSettings(settings); res.json({ success: true }); });
+app.post("/set-greeting", (req, res) => { 
+  if (!req.body.message) return res.status(400).json({ error: "required" }); 
+  settings.greeting = req.body.message; 
+  saveSettings(settings); 
+  res.json({ success: true }); 
+});
 app.get("/get-system-prompt", (req, res) => res.json({ prompt: settings.systemPrompt }));
-app.post("/set-system-prompt", (req, res) => { if (!req.body.prompt) return res.status(400).json({ error: "required" }); settings.systemPrompt = req.body.prompt; saveSettings(settings); res.json({ success: true }); });
+app.post("/set-system-prompt", (req, res) => { 
+  if (!req.body.prompt) return res.status(400).json({ error: "required" }); 
+  settings.systemPrompt = req.body.prompt; 
+  saveSettings(settings); 
+  res.json({ success: true }); 
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => { console.log(`[MFG_bot] Server on port ${PORT}`); connectToWhatsApp(); });
+// FIX: Set to port 8080 for Railway compatibility
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => { 
+  console.log(`[MFG_bot] Server active on port ${PORT}`); 
+  connectToWhatsApp(); 
+});
