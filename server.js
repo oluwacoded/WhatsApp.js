@@ -45,7 +45,7 @@ let settings = readJSON("settings.json", {
   aiMode: "chill",
   aiDelay: 0,
   aiTyping: false,
-  proactiveText: false,
+  proactiveText: true,
   greeting: "yo. mfg_bot here.",
   systemPrompt: `You are texting AS the owner of this phone — you ARE them, not a bot pretending to be them. You have ZERO hesitation. You respond instantly like Jarvis from Iron Man — sharp, fast, confident, zero filler.
 
@@ -151,15 +151,15 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
       body: JSON.stringify({
-        model: "openai/gpt-oss-120b",
+        model: "llama-3.3-70b-versatile",
         messages,
-        max_tokens: 100,
+        max_tokens: 120,
         temperature: 0.92,
         top_p: 0.95
       })
     });
     const data = await resp.json();
-    if (!resp.ok) { console.error("[MFG_bot] Groq error:", data); return null; }
+    if (!resp.ok) { console.error("[MFG_bot] Groq error:", JSON.stringify(data)); return null; }
     const reply = data.choices?.[0]?.message?.content?.trim() || null;
 
     // Save conversation history per contact
@@ -345,7 +345,7 @@ async function connectToWhatsApp() {
       }
 
       // ── Billing dodge (when someone tries to collect money) ──────────
-      const billingTriggers = ["send me money","send money","where is my money","where's my money","you owe me","my money","pay me","when you go pay","when will you pay","when are you paying","you haven't paid","you still owe","abeg pay","oga pay","return my money","give me my money","i need money","loan me","borrow me","you dey owe","your debt","the money you owe","refund","pay back","owe me"];
+      const billingTriggers = ["send me money","send money","where is my money","where's my money","you owe me","my money","pay me","when you go pay","when will you pay","when are you paying","you haven't paid","you still owe","abeg pay","oga pay","return my money","give me my money","give me money","come give me","come and give me","drop money","drop the money","i need money","loan me","borrow me","you dey owe","your debt","the money you owe","refund","pay back","owe me","send something","drop something","send cash","transfer","send alert","alert me","credit me"];
       if (!text.startsWith(pfx) && !isFromMe && billingTriggers.some(kw => lowerText.includes(kw))) {
         const dodges = [
           "omo my phone no dey charge properly 😂 wetin you talk?",
@@ -435,6 +435,15 @@ async function connectToWhatsApp() {
         // .site
         if (cmd === "site") {
           await send("check the portfolio: https://ash-cloth.ink");
+          continue;
+        }
+
+        // .proactive on | off | status
+        if (cmd === "proactive") {
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.proactiveText = true; writeJSON("settings.json", settings); await send("proactive texting on 🟢 — i'll randomly text people every 30–120 mins"); }
+          else if (sub === "off") { settings.proactiveText = false; writeJSON("settings.json", settings); await send("proactive texting off 🔴"); }
+          else await send(`proactive texting: ${settings.proactiveText ? "on 🟢" : "off 🔴"}\n.proactive on | .proactive off`);
           continue;
         }
 
@@ -1024,8 +1033,8 @@ async function connectToWhatsApp() {
 
 // ─── Proactive Random Texting ─────────────────────────────────────────────────
 function scheduleRandomText() {
-  if (!settings.proactiveText) { setTimeout(scheduleRandomText, 60 * 60 * 1000); return; }
-  const delay = (3 + Math.random() * 5) * 60 * 60 * 1000; // 3–8 hours
+  if (!settings.proactiveText) { setTimeout(scheduleRandomText, 30 * 60 * 1000); return; }
+  const delay = (30 + Math.random() * 90) * 60 * 1000; // 30–120 minutes
   setTimeout(async () => {
     try {
       if (!isConnected || !settings.proactiveText) { scheduleRandomText(); return; }
