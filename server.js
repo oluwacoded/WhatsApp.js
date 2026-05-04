@@ -2,7 +2,6 @@ const {
   default: makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
   Browsers,
 } = require("@whiskeysockets/baileys");
 const express = require("express");
@@ -62,33 +61,28 @@ async function connectToWhatsApp() {
     console.log("[MFG_bot] Connecting... Auth:", JSON.stringify(getAuthState()));
     const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
 
-    const { version } = await fetchLatestBaileysVersion().catch(() => {
-      console.log("[MFG_bot] Could not fetch latest version, using fallback");
-      return { version: [2, 3000, 1023044367] };
-    });
-    console.log("[MFG_bot] Using WA version:", version.join("."));
-
     sock = makeWASocket({
-      version,
+      version: [2, 3000, 1023044367],
       auth: state,
       printQRInTerminal: true,
       logger: pino({ level: "silent" }),
-      browser: Browsers.ubuntu("Chrome"),
+      browser: Browsers.macOS("Desktop"),
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 10000,
       markOnlineOnConnect: false,
       syncFullHistory: false,
+      retryRequestDelayMs: 2000,
     });
 
     qrTimeout = setTimeout(() => {
       if (!isConnected && !hasQr) {
-        console.log("[MFG_bot] No QR after 25s — clearing auth and retrying");
+        console.log("[MFG_bot] No QR after 30s — clearing auth and retrying");
         if (sock) { try { sock.ev.removeAllListeners(); } catch (e) {} sock = null; }
         clearAuthFolder();
-        reconnectTimer = setTimeout(connectToWhatsApp, 2000);
+        reconnectTimer = setTimeout(connectToWhatsApp, 3000);
       }
-    }, 25000);
+    }, 30000);
 
     sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -113,7 +107,9 @@ async function connectToWhatsApp() {
       if (connection === "close") {
         isConnected = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        console.log("[MFG_bot] Connection closed. Code:", code);
+        const errMsg = lastDisconnect?.error?.message || "unknown";
+        console.log("[MFG_bot] Connection closed. Code:", code, "| Message:", errMsg);
+        console.log("[MFG_bot] Full error:", JSON.stringify(lastDisconnect?.error?.output || {}));
         if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
         if (code === DisconnectReason.loggedOut) {
           console.log("[MFG_bot] Logged out — clearing credentials");
@@ -155,7 +151,7 @@ async function connectToWhatsApp() {
     });
 
   } catch (err) {
-    console.error("[MFG_bot] Startup error:", err.message);
+    console.error("[MFG_bot] Startup error:", err.message, err.stack);
     if (qrTimeout) { clearTimeout(qrTimeout); qrTimeout = null; }
     reconnectTimer = setTimeout(connectToWhatsApp, 8000);
   }
