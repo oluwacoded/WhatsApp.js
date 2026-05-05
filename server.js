@@ -248,7 +248,11 @@ function fallbackReply(userText, jid) {
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
 async function connectToWhatsApp() {
   console.log("[MFG_bot] Attempting connection...");
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+  // AUTH_PATH lets Railway mount a persistent volume (e.g. /data/auth_info_baileys)
+  // so WhatsApp session survives redeploys. Falls back to local dir for dev.
+  const authPath = process.env.AUTH_PATH || "auth_info_baileys";
+  console.log(`[MFG_bot] Using auth path: ${authPath}`);
+  const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({
     version: [2, 3000, 1015901307], isLatest: false
   }));
@@ -326,13 +330,18 @@ async function connectToWhatsApp() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("chats.set", ({ chats }) => { allChats = chats || []; });
+  sock.ev.on("chats.set", ({ chats }) => { allChats = chats || []; console.log(`[MFG_bot] chats.set → ${allChats.length} chats`); });
   sock.ev.on("chats.upsert", (newChats) => {
     for (const c of newChats) {
       const idx = allChats.findIndex(x => x.id === c.id);
       if (idx >= 0) allChats[idx] = c; else allChats.push(c);
     }
   });
+  // Auto-track chats from every message — Baileys 6.x rarely fires chats.set
+  function trackChat(jid) {
+    if (!jid || jid.includes("broadcast")) return;
+    if (!allChats.find(c => c.id === jid)) allChats.push({ id: jid, conversationTimestamp: Math.floor(Date.now()/1000) });
+  }
 
   // ─── Message Handler ──────────────────────────────────────────────────────
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
@@ -342,6 +351,7 @@ async function connectToWhatsApp() {
       const isFromMe = msg.key.fromMe;
       messageCount++;
       const from = msg.key.remoteJid;
+      trackChat(from);
       const text = (
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -1015,8 +1025,26 @@ async function connectToWhatsApp() {
             const meta=await sock.groupMetadata(from);
             const mentions=meta.participants.map(p=>p.id);
             const tags=mentions.map(id=>`@${id.split("@")[0]}`).join(" ");
-            await sock.sendMessage(from,{text:args.join(" ")||"attention everyone 📢\n\n"+tags,mentions});
-          } catch(e){await send("couldn't tag all.");}
+            const userMsg = args.join(" ").trim();
+            const header = userMsg || "attention everyone 📢";
+            // Tags MUST appear in text AND mentions array for WhatsApp to render highlight + notification
+            const fullText = `${header}\n\n${tags}`;
+            await sock.sendMessage(from, { text: fullText, mentions });
+            console.log(`[MFG_bot] tagall sent to ${from}: ${mentions.length} members`);
+          } catch(e){
+            console.error("[MFG_bot] tagall error:", e.message);
+            await send("couldn't tag all: " + e.message);
+          }
+          continue;
+        }
+        if (cmd === "hidetag") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try {
+            const meta=await sock.groupMetadata(from);
+            const mentions=meta.participants.map(p=>p.id);
+            await sock.sendMessage(from, { text: args.join(" ") || "📢", mentions });
+          } catch(e){await send("couldn't hidetag: " + e.message);}
           continue;
         }
         if (cmd === "groupinfo") {
@@ -1181,16 +1209,30 @@ async function connectToWhatsApp() {
 }
 
 // ─── Proactive Random Texting ─────────────────────────────────────────────────
+// Per-contact cooldown — never text the same person more than once per X minutes
+const lastProactiveTo = new Map(); // jid -> timestamp
+const PROACTIVE_COOLDOWN_MS = 30 * 60 * 1000; // 30 min between texts to same person
+let lastProactiveLog = "not yet started";
+
 function scheduleRandomText() {
-  if (!settings.proactiveText) { setTimeout(scheduleRandomText, 30 * 60 * 1000); return; }
-  const delay = 60 * 1000; // exactly 1 minute
+  // Check every 10 seconds as requested. Per-contact cooldown prevents spam.
+  const delay = 10 * 1000;
   setTimeout(async () => {
     try {
-      if (!isConnected || !settings.proactiveText) { scheduleRandomText(); return; }
+      if (!settings.proactiveText) { lastProactiveLog = "skip: proactive off"; scheduleRandomText(); return; }
+      if (!isConnected) { lastProactiveLog = "skip: not connected"; scheduleRandomText(); return; }
+      const now = Date.now();
       const eligible = allChats.filter(c =>
-        c.id && !c.id.includes("broadcast") && !c.id.endsWith("@g.us") && c.id !== OWNER_JID
+        c.id &&
+        c.id.endsWith("@s.whatsapp.net") && // private chats only — no groups, no broadcast
+        c.id !== OWNER_JID &&
+        (now - (lastProactiveTo.get(c.id) || 0)) > PROACTIVE_COOLDOWN_MS
       );
-      if (eligible.length === 0) { scheduleRandomText(); return; }
+      if (eligible.length === 0) {
+        lastProactiveLog = `skip: no eligible (total chats: ${allChats.length})`;
+        scheduleRandomText();
+        return;
+      }
       const target = eligible[Math.floor(Math.random() * eligible.length)];
       const openers = [
         "wetin dey happen","omo i just remember you","how body","yo what's good","you dey?",
@@ -1201,13 +1243,18 @@ function scheduleRandomText() {
       ];
       const msg = openers[Math.floor(Math.random() * openers.length)];
       await sock.sendMessage(target.id, { text: msg });
-      // Save this to that contact's ownerMessages so it learns the style
+      lastProactiveTo.set(target.id, now);
+      lastProactiveLog = `${new Date().toISOString().slice(11,19)} → ${target.id.slice(-15)}: "${msg}"`;
+      // Save to ownerMessages so AI learns the style
       if (!userData[target.id]) userData[target.id] = {};
       if (!userData[target.id].ownerMessages) userData[target.id].ownerMessages = [];
       userData[target.id].ownerMessages.push(msg);
       setImmediate(() => writeJSON("users.json", userData));
-      console.log(`[MFG_bot] Random text sent to ${target.id}: "${msg}"`);
-    } catch (e) { console.log("[MFG_bot] Random text error:", e.message); }
+      console.log(`[MFG_bot] Proactive → ${target.id}: "${msg}"`);
+    } catch (e) {
+      lastProactiveLog = "err: " + e.message;
+      console.log("[MFG_bot] Proactive error:", e.message);
+    }
     scheduleRandomText();
   }, delay);
 }
@@ -1226,7 +1273,11 @@ app.get("/api/status", (req, res) => res.json({
 }));
 
 // Recent messages log for debugging
-app.get("/api/recent", (req, res) => res.json({ recent: recentMsgLog, lastGroqError }));
+app.get("/api/recent", (req, res) => res.json({
+  recent: recentMsgLog,
+  lastGroqError,
+  proactive: { enabled: settings.proactiveText, lastRun: lastProactiveLog, cooldownMs: PROACTIVE_COOLDOWN_MS, totalChats: allChats.length, recentTargets: [...lastProactiveTo.keys()].slice(-10) }
+}));
 
 // Diagnostic — tests if Groq actually works on this backend
 app.get("/api/diag", async (req, res) => {
