@@ -11,7 +11,9 @@ const DEFAULT_BOTS = [
 
 // Bots permanently removed — purge from localStorage on load
 const REMOVED_IDS = new Set(['ladies'])
-const REMOVED_URLS = new Set(['https://whatsappjs-production-31c8.up.railway.app'])
+const REMOVED_URLS = new Set([
+  'https://whatsappjs-production-31c8.up.railway.app',
+])
 
 export default function App() {
   const [bots, setBots] = useState(() => {
