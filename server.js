@@ -1224,7 +1224,11 @@ function scheduleRandomText() {
       const now = Date.now();
       const eligible = allChats.filter(c =>
         c.id &&
-        c.id.endsWith("@s.whatsapp.net") && // private chats only — no groups, no broadcast
+        // private chats only — Baileys 6.x uses @s.whatsapp.net (saved contacts) AND @lid (non-contacts)
+        (c.id.endsWith("@s.whatsapp.net") || c.id.endsWith("@lid")) &&
+        !c.id.endsWith("@g.us") &&
+        !c.id.includes("broadcast") &&
+        !c.id.includes("status") &&
         c.id !== OWNER_JID &&
         (now - (lastProactiveTo.get(c.id) || 0)) > PROACTIVE_COOLDOWN_MS
       );
