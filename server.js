@@ -180,11 +180,14 @@ async function synthesizeVoice(text) {
 }
 
 // ─── Owner Config ────────────────────────────────────────────────────────────
-const OWNER_NUMBER = "23409132883869";
+const OWNER_NUMBER = "2349132883869";  // Fixed: was "23409132883869" (extra 0 broke owner detection)
 const OWNER_JID = `${OWNER_NUMBER}@s.whatsapp.net`;
 
 function isOwner(jid) {
-  return jid === OWNER_JID || jid?.replace(/[^0-9]/g, "") === OWNER_NUMBER;
+  if (!jid) return false;
+  const digits = jid.replace(/[^0-9]/g, "");
+  // Match owner with or without the extra "0" (some chats show 23409..., some 2349...)
+  return digits === OWNER_NUMBER || digits === "23409132883869" || jid === OWNER_JID;
 }
 
 // ─── Mood / Time Awareness ───────────────────────────────────────────────────
@@ -227,7 +230,7 @@ async function describeImage(buffer, caption) {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
       body: JSON.stringify({
-        model: "llama-3.2-11b-vision-preview",
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",  // Current Groq vision model (llama-3.2-vision deprecated)
         messages: [{
           role: "user",
           content: [
@@ -628,9 +631,12 @@ async function connectToWhatsApp() {
       let transcribedText = "";
       if (isAudio && settings.transcribeVoice && !isFromMe) {
         try {
+          console.log(`[MFG_bot] Voice note received from ${from.slice(-15)}, downloading...`);
           const buf = await downloadMediaMessage(msg, "buffer", {});
+          console.log(`[MFG_bot] Voice downloaded (${buf.length} bytes), transcribing via Whisper...`);
           transcribedText = await transcribeAudio(buf) || "";
-          if (transcribedText) console.log(`[MFG_bot] Transcribed voice (${transcribedText.length} chars): "${transcribedText.slice(0,80)}"`);
+          if (transcribedText) console.log(`[MFG_bot] ✅ Transcribed: "${transcribedText.slice(0,120)}"`);
+          else console.log(`[MFG_bot] ❌ Whisper returned empty`);
         } catch (e) { console.log("[MFG_bot] Voice download err:", e.message); }
       }
 
@@ -638,9 +644,12 @@ async function connectToWhatsApp() {
       let visionDescription = "";
       if (isImage && settings.visionEnabled && !isFromMe) {
         try {
+          console.log(`[MFG_bot] Image received from ${from.slice(-15)}, downloading...`);
           const buf = await downloadMediaMessage(msg, "buffer", {});
+          console.log(`[MFG_bot] Image downloaded (${buf.length} bytes), describing via vision...`);
           visionDescription = await describeImage(buf, text) || "";
-          if (visionDescription) console.log(`[MFG_bot] Vision: "${visionDescription.slice(0,80)}"`);
+          if (visionDescription) console.log(`[MFG_bot] ✅ Vision: "${visionDescription.slice(0,120)}"`);
+          else console.log(`[MFG_bot] ❌ Vision returned empty`);
         } catch (e) { console.log("[MFG_bot] Image download err:", e.message); }
       }
 
