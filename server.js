@@ -891,13 +891,37 @@ async function connectToWhatsApp() {
               message: voContent
             };
             const buffer = await downloadMediaMessage(fakeMsg, "buffer", {});
+            if (!buffer || buffer.length < 100) { await send("media buffer empty — view-once may have already been opened."); continue; }
+            console.log(`[MFG_bot] .vv revealed: ${imgMsg?"image":"video"}, ${buffer.length} bytes`);
             if (imgMsg) {
-              await sock.sendMessage(from, { image: buffer, caption: "👁 revealed" });
-            } else {
-              await sock.sendMessage(from, { video: buffer, caption: "👁 revealed" });
+              await sock.sendMessage(from, {
+                image: buffer,
+                caption: "👁 view-once revealed",
+                mimetype: imgMsg.mimetype || "image/jpeg"
+              });
+            } else if (vidMsg) {
+              // Video view-once: explicit mimetype + try video first, fall back to document if it fails
+              const mt = vidMsg.mimetype || "video/mp4";
+              try {
+                await sock.sendMessage(from, {
+                  video: buffer,
+                  caption: "👁 view-once video revealed",
+                  mimetype: mt,
+                  gifPlayback: false
+                });
+              } catch (vidErr) {
+                console.log(`[MFG_bot] .vv video send failed (${vidErr.message}), falling back to document`);
+                await sock.sendMessage(from, {
+                  document: buffer,
+                  mimetype: mt,
+                  fileName: "view-once-video.mp4",
+                  caption: "👁 view-once video (sent as file because direct video send failed)"
+                });
+              }
             }
           } catch (e) {
-            await send("couldn't restore that media. it may have expired.");
+            console.log(`[MFG_bot] .vv error: ${e.message}`);
+            await send("couldn't restore that media: " + e.message);
           }
           continue;
         }
@@ -1443,6 +1467,166 @@ async function connectToWhatsApp() {
           } catch(e){await send("couldn't tag everyone.");}
           continue;
         }
+
+        // ── More GROUP COMMANDS (require bot to be admin where noted) ─────
+        if (cmd === "kick" || cmd === "remove") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try {
+            const ctx = msg.message?.extendedTextMessage?.contextInfo;
+            const mentioned = ctx?.mentionedJid || [];
+            const quotedSender = ctx?.participant ? [ctx.participant] : [];
+            const targets = [...mentioned, ...quotedSender];
+            if (!targets.length) { await send(".kick @user (mention or reply to them)"); continue; }
+            await sock.groupParticipantsUpdate(from, targets, "remove");
+            await send(`👢 kicked ${targets.length} member(s)`);
+          } catch(e){await send("couldn't kick: " + e.message + " (bot needs admin)");}
+          continue;
+        }
+        if (cmd === "add") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          const num = (args[0]||"").replace(/\D/g,"");
+          if (!num) { await send(".add <number with country code>"); continue; }
+          try {
+            await sock.groupParticipantsUpdate(from, [`${num}@s.whatsapp.net`], "add");
+            await send(`✅ added +${num}`);
+          } catch(e){await send("couldn't add: " + e.message + " (bot needs admin / number may have privacy on)");}
+          continue;
+        }
+        if (cmd === "promote") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          const targets = [...(ctx?.mentionedJid || []), ...(ctx?.participant ? [ctx.participant] : [])];
+          if (!targets.length) { await send(".promote @user"); continue; }
+          try {
+            await sock.groupParticipantsUpdate(from, targets, "promote");
+            await send(`👑 promoted to admin`);
+          } catch(e){await send("couldn't promote: " + e.message);}
+          continue;
+        }
+        if (cmd === "demote") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          const targets = [...(ctx?.mentionedJid || []), ...(ctx?.participant ? [ctx.participant] : [])];
+          if (!targets.length) { await send(".demote @user"); continue; }
+          try {
+            await sock.groupParticipantsUpdate(from, targets, "demote");
+            await send(`⬇️ demoted from admin`);
+          } catch(e){await send("couldn't demote: " + e.message);}
+          continue;
+        }
+        if (cmd === "mute") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { await sock.groupSettingUpdate(from, "announcement"); await send("🔇 group muted — only admins can send messages now"); }
+          catch(e){await send("couldn't mute: " + e.message);}
+          continue;
+        }
+        if (cmd === "unmute") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { await sock.groupSettingUpdate(from, "not_announcement"); await send("🔊 group unmuted — everyone can chat"); }
+          catch(e){await send("couldn't unmute: " + e.message);}
+          continue;
+        }
+        if (cmd === "lock") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { await sock.groupSettingUpdate(from, "locked"); await send("🔒 group info locked — only admins can edit"); }
+          catch(e){await send("couldn't lock: " + e.message);}
+          continue;
+        }
+        if (cmd === "unlock") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { await sock.groupSettingUpdate(from, "unlocked"); await send("🔓 group info unlocked"); }
+          catch(e){await send("couldn't unlock: " + e.message);}
+          continue;
+        }
+        if (cmd === "setname" || cmd === "setsubject") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          const name = args.join(" ");
+          if (!name) { await send(".setname <new group name>"); continue; }
+          try { await sock.groupUpdateSubject(from, name); await send(`✏️ group renamed to "${name}"`); }
+          catch(e){await send("couldn't rename: " + e.message);}
+          continue;
+        }
+        if (cmd === "setdesc" || cmd === "setdescription") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          const desc = args.join(" ");
+          if (!desc) { await send(".setdesc <new description>"); continue; }
+          try { await sock.groupUpdateDescription(from, desc); await send(`📝 description updated`); }
+          catch(e){await send("couldn't update description: " + e.message);}
+          continue;
+        }
+        if (cmd === "leave" || cmd === "leavegroup") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { await send("👋 leaving — peace"); await sock.groupLeave(from); }
+          catch(e){await send("couldn't leave: " + e.message);}
+          continue;
+        }
+        if (cmd === "members" || cmd === "memberlist") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          try {
+            const meta = await sock.groupMetadata(from);
+            const list = meta.participants.map((p,i) => `${i+1}. +${p.id.split("@")[0]}${p.admin ? " 👑" : ""}`).join("\n");
+            await send(`👥 *${meta.subject}* — ${meta.participants.length} members\n\n${list.slice(0,3500)}`);
+          } catch(e){await send("couldn't list members: " + e.message);}
+          continue;
+        }
+        if (cmd === "admins" || cmd === "adminlist") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          try {
+            const meta = await sock.groupMetadata(from);
+            const adm = meta.participants.filter(p=>p.admin).map(p=>`👑 +${p.id.split("@")[0]} (${p.admin})`).join("\n");
+            await send(`👑 *Admins of ${meta.subject}*\n\n${adm || "no admins listed"}`);
+          } catch(e){await send("couldn't list admins: " + e.message);}
+          continue;
+        }
+        if (cmd === "revoke" || cmd === "revokelink") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          if(!senderIsOwner){await send("owner only.");continue;}
+          try { const code = await sock.groupRevokeInvite(from); await send(`🔄 invite link revoked. new link: https://chat.whatsapp.com/${code}`); }
+          catch(e){await send("couldn't revoke: " + e.message);}
+          continue;
+        }
+        if (cmd === "poll") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          const raw = args.join(" ");
+          const parts = raw.split("|").map(s=>s.trim()).filter(Boolean);
+          if (parts.length < 3) { await send(".poll question | option 1 | option 2 | option 3 (up to 12 options)"); continue; }
+          const [q, ...opts] = parts;
+          try { await sock.sendMessage(from, { poll: { name: q, values: opts.slice(0,12), selectableCount: 1 } }); }
+          catch(e){await send("couldn't create poll: " + e.message);}
+          continue;
+        }
+        if (cmd === "tagadmins") {
+          if(!from.endsWith("@g.us")){await send("groups only.");continue;}
+          try {
+            const meta = await sock.groupMetadata(from);
+            const admins = meta.participants.filter(p=>p.admin);
+            if (!admins.length) { await send("no admins in this group"); continue; }
+            const mentions = admins.map(a=>a.id);
+            const tags = mentions.map(id=>`@${id.split("@")[0]}`).join(" ");
+            await sock.sendMessage(from, { text: `${args.join(" ") || "👑 admins —"}\n\n${tags}`, mentions });
+          } catch(e){await send("couldn't tag admins: " + e.message);}
+          continue;
+        }
+        if (cmd === "del" || cmd === "delete") {
+          if(!from.endsWith("@g.us") && !senderIsOwner){await send("groups (or owner DM) only.");continue;}
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          if (!ctx?.stanzaId) { await send("reply to the message you want to delete with .del"); continue; }
+          try {
+            await sock.sendMessage(from, { delete: { remoteJid: from, id: ctx.stanzaId, participant: ctx.participant, fromMe: false } });
+          } catch(e){await send("couldn't delete (bot needs admin in groups): " + e.message);}
+          continue;
+        }
         if (cmd === "hidetag") {
           if(!from.endsWith("@g.us")){await send("groups only.");continue;}
           if(!senderIsOwner){await send("owner only.");continue;}
@@ -1710,7 +1894,7 @@ async function connectToWhatsApp() {
             vibe: `😤 VIBE CHECKS\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky`,
             social: `🤝 SOCIAL\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily`,
             util: `🛠 UTILITY\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.weather <city> .define <word>\n.shorten <url> .ip <addr>\n.song <name> .download <yt-link>\n.online (i cover for you) / .offline`,
-            group: `👥 GROUPS (owner)\n.tagall .groupinfo .link .everyone .hidetag`,
+            group: `👥 GROUPS\n*Tagging:*\n.tagall <msg> — tag everyone with notification\n.hidetag <msg> — silent tag (invisible mentions)\n.everyone | .all <msg>\n.tagadmins <msg>\n\n*Member control (bot needs admin):*\n.kick @user / reply with .kick\n.add <number>\n.promote @user / .demote @user\n\n*Group settings:*\n.mute (admins-only chat) / .unmute\n.lock (lock info edits) / .unlock\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave\n\n*Info:*\n.groupinfo .members .admins .link\n\n*Other:*\n.poll Q | opt1 | opt2 | opt3\n.del (reply to msg with .del)\n.vv (reply to view-once photo/video to reveal)`,
             ai: `🤖 AI & LEARNING\n.ai on|off|status|mode|reset|prompt\n.learnme .learnme view .learnme clear\n.style .vv\n.disclaimer .transcribe .vision .mood\n.takeover .scam .facts .aiat .birthdays\n.bigshot — show all features status`,
             owner: `👑 OWNER ONLY\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>`,
           };
