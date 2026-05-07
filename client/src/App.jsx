@@ -7,13 +7,12 @@ const DEFAULT_BOTS = [
   { id: 'local', name: 'Local Bot', url: '', isLocal: true },
   { id: 'railway1', name: 'Railway Bot 1', url: 'https://whatsappjs-production-6831.up.railway.app', isLocal: false },
   { id: 'railway2', name: 'Railway Bot 2', url: 'https://whatsappjs-production.up.railway.app', isLocal: false },
+  { id: 'railway3', name: 'Railway Bot 3', url: 'https://whatsappjs-production-31c8.up.railway.app', isLocal: false },
 ]
 
 // Bots permanently removed — purge from localStorage on load
 const REMOVED_IDS = new Set(['ladies'])
-const REMOVED_URLS = new Set([
-  'https://whatsappjs-production-31c8.up.railway.app',
-])
+const REMOVED_URLS = new Set([])
 
 export default function App() {
   const [bots, setBots] = useState(() => {
