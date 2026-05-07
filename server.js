@@ -562,21 +562,26 @@ async function connectToWhatsApp() {
   });
 
   // ─── Pairing Code Request ─────────────────────────────────────────────────
-  if (usingPairingCode) {
+  // Per Baileys docs: call requestPairingCode IMMEDIATELY after makeWASocket,
+  // NOT after a delay. A delay causes WA to generate a code that isn't properly
+  // registered on their servers — phone shows "Couldn't link device" on entry.
+  // Only request if creds are not already registered.
+  if (usingPairingCode && !sock.authState.creds.registered) {
     const phone = pendingPairPhone;
     pendingPairPhone = null;
-    // Give the socket ~2 s to connect to WA servers before requesting code
-    setTimeout(async () => {
-      try {
-        console.log(`[MFG_bot] Requesting pairing code for ${phone}...`);
-        const code = await sock.requestPairingCode(phone);
-        console.log(`[MFG_bot] Pairing code generated: ${code}`);
-        if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
-      } catch (e) {
-        console.error("[MFG_bot] Pairing code error:", e.message);
-        if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
-      }
-    }, 2000);
+    try {
+      console.log(`[MFG_bot] Requesting pairing code for ${phone} (immediate)...`);
+      const code = await sock.requestPairingCode(phone);
+      console.log(`[MFG_bot] Pairing code generated: ${code}`);
+      if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
+    } catch (e) {
+      console.error("[MFG_bot] Pairing code error:", e.message);
+      if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
+    }
+  } else if (usingPairingCode) {
+    pendingPairPhone = null;
+    console.log(`[MFG_bot] Skipping pair request — creds already registered`);
+    if (pairCodeResolve) { pairCodeResolve({ success: false, error: "already registered — logout first" }); pairCodeResolve = null; }
   }
 
   sock.ev.on("connection.update", (update) => {
