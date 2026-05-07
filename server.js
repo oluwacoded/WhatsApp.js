@@ -1884,35 +1884,15 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // ── .list and .menu ───────────────────────────────────────────────
-        if (cmd === "list") {
-          const page = args[0]?.toLowerCase();
-          const pages = {
-            text: `📝 TEXT TOOLS\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify`,
-            math: `🔢 MATH & CALC\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age`,
-            fun: `🎮 FUN & GAMES\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice`,
-            vibe: `😤 VIBE CHECKS\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky`,
-            social: `🤝 SOCIAL\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily`,
-            util: `🛠 UTILITY\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.weather <city> .define <word>\n.shorten <url> .ip <addr>\n.song <name> .download <yt-link>\n.online (i cover for you) / .offline`,
-            group: `👥 GROUPS\n*Tagging:*\n.tagall <msg> — tag everyone with notification\n.hidetag <msg> — silent tag (invisible mentions)\n.everyone | .all <msg>\n.tagadmins <msg>\n\n*Member control (bot needs admin):*\n.kick @user / reply with .kick\n.add <number>\n.promote @user / .demote @user\n\n*Group settings:*\n.mute (admins-only chat) / .unmute\n.lock (lock info edits) / .unlock\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave\n\n*Info:*\n.groupinfo .members .admins .link\n\n*Other:*\n.poll Q | opt1 | opt2 | opt3\n.del (reply to msg with .del)\n.vv (reply to view-once photo/video to reveal)`,
-            ai: `🤖 AI & LEARNING\n.ai on|off|status|mode|reset|prompt\n.learnme .learnme view .learnme clear\n.style .vv\n.disclaimer .transcribe .vision .mood\n.takeover .scam .facts .aiat .birthdays\n.bigshot — show all features status`,
-            owner: `👑 OWNER ONLY\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>`,
-          };
-          if (pages[page]) {
-            await send(pages[page]);
-          } else {
-            await send(`📋 mfg_bot command list — 200+ commands\n\n.list text   — text manipulation\n.list math   — calculator & math\n.list fun    — games & jokes\n.list vibe   — vibe checks\n.list social — social commands\n.list util   — utility & notes\n.list group  — group commands\n.list ai     — AI & learning\n.list owner  — owner controls\n\nor type .menu for quick overview`);
-          }
-          continue;
-        }
-        if (cmd === "menu" || cmd === "help") {
-          const topic = args[0]?.toLowerCase();
-          if (topic === "ai") await send(".ai on | off | status | mode | reset | prompt | delay | typing");
-          else if (topic === "broadcast") await send(".broadcast all <msg> | .broadcast group <msg>");
-          else if (topic === "text") await send(".upper .lower .reverse .mock .clap .aesthetic .leet .count .repeat .binary .hex .base64 .caesar .pig .owoify");
-          else if (topic === "math") await send(".calc .percent .tax .tip .split .bmi .roman .random .temp .sqrt .pow .fibonacci .factorial .isprime .password");
-          else if (topic === "fun") await send(".joke .fact .quote .truth .dare .wyr .8ball .rps .ship .rate .choose .spin .slot .flip .roll");
-          else await send(`mfg_bot 🤖 | 200+ commands\n\n*MOST USEFUL:*\n.listall — full personalized welcome\n.online / .offline — i cover for you when your data is off\n.song <name> — find & download song as MP3\n.download <yt-link> — direct YouTube download\n.weather <city> — current weather\n.define <word> — dictionary\n.shorten <url> — shrink a link\n.ip <ip-address> — geo-locate ip\n\n.list — full command list by category\n.list text | math | fun | vibe | social | util | group | ai | owner\n\nai: .ai on to activate | bot mirrors your style per contact automatically`);
+        // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
+        if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
+          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
+
+          const part2 = `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n😤 *VIBE CHECKS*\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio link\n.call on/off — block calls\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n_total: 200+ commands • type any command to use it_`;
+
+          await send(part1);
+          await new Promise(r => setTimeout(r, 600));
+          await send(part2);
           continue;
         }
 
