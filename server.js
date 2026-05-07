@@ -109,6 +109,7 @@ let userData = readJSON("users.json", {});
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
+let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
 let allChats = [];
 let recentMsgLog = [];
 let lastGroqError = null;
@@ -544,7 +545,7 @@ async function connectToWhatsApp() {
 
   sock = makeWASocket({
     version, auth: state,
-    printQRInTerminal: !usingPairingCode,
+    // printQRInTerminal removed (deprecated in baileys 6.7.21+); we render QR via qr event instead
     logger: pino({ level: "silent" }),
     // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
     // Browsers.baileys() and macOS variants are rejected by WA pairing flow.
@@ -605,7 +606,7 @@ async function connectToWhatsApp() {
     if (qr) { currentQr = qr; hasQr = true; isConnected = false; console.log("[MFG_bot] QR Generated"); }
     if (connection === "open") {
       isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
-      hasEverConnected = true;
+      hasEverConnected = true; consecutive401s = 0;
       console.log("[MFG_bot] Connected to WhatsApp");
       // Greet the owner on every fresh connection
       setTimeout(async () => {
@@ -622,20 +623,26 @@ async function connectToWhatsApp() {
       const code = err?.output?.statusCode;
       const reason = err?.message || err?.toString() || "unknown";
 
-      // CRITICAL: Baileys 6.7.x sends 401/loggedOut AS PART OF the pair-success
-      // handshake (right after the pairing code is accepted). If we treat that
-      // as a real logout and wipe creds, the just-paired session is destroyed
-      // and the bot bounces back to QR mode. Only treat as real logout if we've
-      // ever actually been "open" before.
-      const isPostPairRestart = !hasEverConnected;
-      const isRealLogout = code === DisconnectReason.loggedOut && hasEverConnected;
-      const shouldReconnect = code !== DisconnectReason.loggedOut || isPostPairRestart;
+      // Track consecutive 401s — if we keep getting them without ever reaching
+      // "open", the saved creds are dead (half-paired or revoked by WA).
+      // Wipe after 3 failures to break the loop and fall back to QR mode.
+      if (code === 401 || code === DisconnectReason.loggedOut) consecutive401s++;
+      else consecutive401s = 0;
+      const credsAreDead = consecutive401s >= 3;
+
+      // Baileys sends 401/loggedOut as part of the pair-success handshake (once).
+      // Don't wipe on the FIRST such event if never connected — but DO wipe after
+      // repeated failures even if never connected (= broken/half-paired creds).
+      const isPostPairRestart = !hasEverConnected && !credsAreDead;
+      const isRealLogout = (code === DisconnectReason.loggedOut && hasEverConnected) || credsAreDead;
+      const shouldReconnect = (code !== DisconnectReason.loggedOut || isPostPairRestart || credsAreDead);
       console.log(`[MFG_bot] Disconnected. Code: ${code}. Reason: ${reason}. Reconnect: ${shouldReconnect}. PostPairRestart: ${isPostPairRestart}`);
 
       if (isRealLogout) {
         const wipePath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
-        try { fs.rmSync(wipePath, { recursive: true, force: true }); console.log(`[MFG_bot] Real logout — wiped ${wipePath}`); }
+        try { fs.rmSync(wipePath, { recursive: true, force: true }); console.log(`[MFG_bot] Real logout (credsAreDead=${credsAreDead}) — wiped ${wipePath}`); }
         catch (e) { console.log(`[MFG_bot] auth wipe warn: ${e.message}`); }
+        consecutive401s = 0; reconnectCount = 0; pendingPairPhone = null;
       }
       if (shouldReconnect) {
         reconnectCount++;
