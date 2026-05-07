@@ -218,8 +218,11 @@ async function transcribeAudio(buffer, mimetype) {
     const blob = new Blob([buffer], { type: ct });
     const form = new FormData();
     form.append("file", blob, "audio." + ext);
-    form.append("model", "whisper-large-v3-turbo");
+    form.append("model", "whisper-large-v3"); // full model — more accurate than turbo for accents
     form.append("response_format", "json");
+    form.append("language", "en"); // hint: speaker is English (Nigerian) — prevents random language guess
+    form.append("prompt", "Nigerian English with pidgin. Common words: wetin, abeg, oga, dey, sabi, na, abi, sef, biko, comot, chai, omo, ehen, wahala, baba."); // accent prime
+    form.append("temperature", "0");
     const resp = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
       headers: { "Authorization": `Bearer ${key}` }, // DO NOT set Content-Type — fetch sets boundary itself
