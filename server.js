@@ -546,8 +546,9 @@ async function connectToWhatsApp() {
     printQRInTerminal: !usingPairingCode,
     logger: pino({ level: "silent" }),
     // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
-    // Browsers.baileys() is rejected by WA when pairing — use macOS Safari instead.
-    browser: usingPairingCode ? Browsers.macOS("Safari") : Browsers.macOS("Desktop"),
+    // Browsers.baileys() and macOS variants are rejected by WA pairing flow.
+    // Ubuntu Chrome is the confirmed-working fingerprint across Baileys 6.7.x.
+    browser: usingPairingCode ? Browsers.ubuntu("Chrome") : Browsers.macOS("Desktop"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
@@ -2161,6 +2162,16 @@ async function handlePair(req, res) {
   const clean = String(raw).replace(/[^0-9]/g, "");
   if (!clean || clean.length < 10) return res.status(400).json({ error: "send your number with country code, digits only (e.g. 2349132883869)" });
   if (isConnected) return res.status(400).json({ error: "already connected — logout first to re-pair" });
+
+  // CRITICAL: WhatsApp rejects pairing codes if the auth folder has stale creds
+  // from a previous (failed/expired) session. Wipe it so the new pairing is fresh.
+  try {
+    const authPath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
+    if (fs.existsSync(authPath)) {
+      fs.rmSync(authPath, { recursive: true, force: true });
+      console.log(`[MFG_bot] /api/pair — wiped stale auth at ${authPath}`);
+    }
+  } catch (e) { console.log(`[MFG_bot] /api/pair — auth wipe warn: ${e.message}`); }
 
   // Store the phone so the next connectToWhatsApp() uses pairing mode
   pendingPairPhone = clean;
