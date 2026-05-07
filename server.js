@@ -633,6 +633,9 @@ async function connectToWhatsApp() {
       messageCount++;
       const from = msg.key.remoteJid;
       trackChat(from);
+      // In groups, the actual sender is in msg.key.participant (or participantPn for @lid format)
+      // We track it for accurate owner detection regardless of @s.whatsapp.net vs @lid JIDs
+      const participantJid = msg.key.participant || msg.key.participantPn || from;
       const text = (
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -653,8 +656,23 @@ async function connectToWhatsApp() {
       const pfx = settings.prefix || ".";
 
       const send = (t) => sock.sendMessage(from, { text: t });
-      // fromMe = sent from owner's linked device → always treat as owner
-      const senderIsOwner = isFromMe || isOwner(from);
+      // Owner detection — works in DMs AND groups regardless of @s.whatsapp.net vs @lid JID format
+      // 1) fromMe — owner's linked device (most reliable in DMs)
+      // 2) isOwner(from) — DM from owner's number
+      // 3) isOwner(participantJid) — group message where owner is the actual sender
+      // 4) sock.user.id matches participant — handles @lid case where participant is bot's own lid
+      const myLid = sock?.user?.lid?.split(":")[0]?.split("@")[0];
+      const myId  = sock?.user?.id?.split(":")[0]?.split("@")[0];
+      const partDigits = (participantJid || "").replace(/[^0-9]/g, "");
+      const senderIsOwner = isFromMe
+        || isOwner(from)
+        || isOwner(participantJid)
+        || (myLid && participantJid?.startsWith(myLid))
+        || (myId  && partDigits === myId);
+      // Debug: log every group command so we can see why it might fail
+      if (text?.startsWith(pfx) && from?.endsWith("@g.us")) {
+        console.log(`[MFG_bot] GROUP CMD "${text.slice(0,30)}" from=${from.slice(-20)} participant=${participantJid?.slice(-25)} fromMe=${isFromMe} senderIsOwner=${senderIsOwner} myLid=${myLid} myId=${myId}`);
+      }
 
       // ── AUTO-TAKEOVER: when owner texts in a chat, pause AI there for X min ──
       // This makes the bot listen even when owner is online — owner stays in control
