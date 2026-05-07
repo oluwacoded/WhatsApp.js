@@ -562,22 +562,38 @@ async function connectToWhatsApp() {
   });
 
   // ─── Pairing Code Request ─────────────────────────────────────────────────
-  // Per Baileys docs: call requestPairingCode IMMEDIATELY after makeWASocket,
-  // NOT after a delay. A delay causes WA to generate a code that isn't properly
-  // registered on their servers — phone shows "Couldn't link device" on entry.
-  // Only request if creds are not already registered.
+  // Calling requestPairingCode immediately throws "Connection Closed" (socket
+  // hasn't finished noise handshake). Calling after a setTimeout produces a
+  // code WA hasn't registered ("Couldn't link device"). The correct moment is
+  // when the socket emits its FIRST connection.update event (state becomes
+  // "connecting"), which means the handshake is done but creds aren't yet.
   if (usingPairingCode && !sock.authState.creds.registered) {
     const phone = pendingPairPhone;
     pendingPairPhone = null;
-    try {
-      console.log(`[MFG_bot] Requesting pairing code for ${phone} (immediate)...`);
-      const code = await sock.requestPairingCode(phone);
-      console.log(`[MFG_bot] Pairing code generated: ${code}`);
-      if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
-    } catch (e) {
-      console.error("[MFG_bot] Pairing code error:", e.message);
-      if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
-    }
+    let pairRequested = false;
+    const tryRequest = async (trigger) => {
+      if (pairRequested) return;
+      pairRequested = true;
+      try {
+        console.log(`[MFG_bot] Requesting pairing code for ${phone} (trigger=${trigger})...`);
+        const code = await sock.requestPairingCode(phone);
+        console.log(`[MFG_bot] Pairing code generated: ${code}`);
+        if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
+      } catch (e) {
+        console.error(`[MFG_bot] Pairing code error (trigger=${trigger}):`, e.message);
+        if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
+      }
+    };
+    // Listen for the first non-null connection state — that's the cue
+    const pairListener = ({ connection }) => {
+      if (connection && !pairRequested) {
+        sock.ev.off("connection.update", pairListener);
+        tryRequest(connection);
+      }
+    };
+    sock.ev.on("connection.update", pairListener);
+    // Safety fallback: if no event fires within 8s, try anyway
+    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 8000);
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
