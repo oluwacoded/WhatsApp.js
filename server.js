@@ -38,7 +38,7 @@ function writeJSON(file, data) {
   try { fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2)); } catch (e) {}
 }
 
-let settings = readJSON("settings.json", {
+const SETTINGS_DEFAULTS = {
   autoCallReject: false,
   callBlock: true,
   autoReadStatus: false,
@@ -47,6 +47,18 @@ let settings = readJSON("settings.json", {
   aiDelay: 0,
   aiTyping: false,
   proactiveText: true,
+  // Big-shot features (all on by default)
+  aiDisclaimer: true,           // Tell people "you're speaking to my mirror AI" once per contact per day
+  disclaimerText: "👋 hey — quick heads up: you're speaking to teddymfg's MIRROR AI 🤖 he's offline rn but i'll text you for him in his style. — built by my maker: teddymfg",
+  transcribeVoice: true,        // Voice notes → Whisper transcribe → AI replies to the text
+  visionEnabled: true,          // Images → llama-vision describes → AI replies meaningfully
+  autoTakeover: true,           // When owner texts in a chat, pause AI in that chat for X min
+  takeoverMinutes: 10,
+  moodAware: true,              // Adjust tone by time of day
+  antiScam: true,               // Detect scam patterns, alert owner
+  birthdayWishes: true,         // Auto-wish birthdays mentioned in chat
+  voiceCloneEnabled: false,     // Requires ELEVENLABS_API_KEY + voice ID
+  paymentsEnabled: false,       // Requires PAYSTACK_SECRET or FLUTTERWAVE_SECRET
   greeting: "yo. mfg_bot here.",
   systemPrompt: `You are texting AS the owner of this phone — you ARE them. Not a bot, not an assistant. Just them.
 
@@ -81,7 +93,10 @@ WHEN UNSURE: Just be short, lowercase, casual. One word answers are fine. "yo", 
   prefix: ".",
   botName: "mfg_bot",
   owners: []
-});
+};
+// Merge file values OVER defaults — new feature flags get defaults until user changes them
+let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
+writeJSON("settings.json", settings);  // persist merged version so all flags are present
 
 let styleSamples = readJSON("style_samples.json", []);
 let userData = readJSON("users.json", {});
@@ -99,10 +114,16 @@ let savedNotes = readJSON("notes.json", {});
 let savedTodos = readJSON("todos.json", {});
 let savedKV = readJSON("kv.json", {});
 let convHistory = readJSON("conv_history.json", {});
+let contactFacts = readJSON("contact_facts.json", {});  // Long-term memory: per-JID extracted facts
+let scamAlerts = readJSON("scam_alerts.json", []);      // Log of detected scam attempts
+let birthdayMemory = readJSON("birthdays.json", {});    // jid → "MM-DD"
 
 // ─── Call & Escalation State ─────────────────────────────────────────────────
 const callWarned = new Set();   // JIDs that received call-blocked warning
 const aiPaused  = new Map();    // JID → timestamp when AI paused due to escalation
+const aiContactDisabled = new Set(); // JIDs where AI is permanently off (per-contact toggle)
+const disclaimerSent = new Map(); // JID → date string (YYYY-MM-DD) of last disclaimer sent
+const ownerTakeover = new Map(); // JID → timestamp when owner started typing → AI pauses
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -118,6 +139,127 @@ const OWNER_JID = `${OWNER_NUMBER}@s.whatsapp.net`;
 
 function isOwner(jid) {
   return jid === OWNER_JID || jid?.replace(/[^0-9]/g, "") === OWNER_NUMBER;
+}
+
+// ─── Mood / Time Awareness ───────────────────────────────────────────────────
+function moodPrompt() {
+  if (!settings.moodAware) return "";
+  const hour = new Date().getHours();
+  if (hour >= 6 && hour < 11)  return "\n\n[MOOD: morning — sharp, direct, fresh energy. short replies.]";
+  if (hour >= 11 && hour < 17) return "\n\n[MOOD: afternoon — normal energy, balanced.]";
+  if (hour >= 17 && hour < 23) return "\n\n[MOOD: evening — chill, more emojis ok, slightly playful.]";
+  return "\n\n[MOOD: late night — sleepy energy, minimal words, maybe just 'k' or 'lol'.]";
+}
+
+// ─── Voice Note Transcription (Groq Whisper) ─────────────────────────────────
+async function transcribeAudio(buffer) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key || !buffer) return null;
+  try {
+    const FormData = require("form-data");
+    const form = new FormData();
+    form.append("file", buffer, { filename: "audio.ogg", contentType: "audio/ogg" });
+    form.append("model", "whisper-large-v3-turbo");
+    const resp = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${key}`, ...form.getHeaders() },
+      body: form
+    });
+    const data = await resp.json();
+    if (!resp.ok) { console.log("[MFG_bot] Whisper error:", JSON.stringify(data).slice(0,200)); return null; }
+    return data.text?.trim() || null;
+  } catch (e) { console.log("[MFG_bot] Transcribe error:", e.message); return null; }
+}
+
+// ─── Image Vision (Groq llama-3.2-90b-vision-preview) ────────────────────────
+async function describeImage(buffer, caption) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key || !buffer) return null;
+  try {
+    const b64 = buffer.toString("base64");
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "llama-3.2-11b-vision-preview",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: `Describe this image in 1-2 short sentences focused on what matters for replying to it casually. ${caption ? `Caption: "${caption}"` : ""}` },
+            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } }
+          ]
+        }],
+        max_tokens: 100
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { console.log("[MFG_bot] Vision error:", JSON.stringify(data).slice(0,200)); return null; }
+    return data.choices?.[0]?.message?.content?.trim() || null;
+  } catch (e) { console.log("[MFG_bot] Vision error:", e.message); return null; }
+}
+
+// ─── Anti-Scam Detection ────────────────────────────────────────────────────
+const SCAM_PATTERNS = [
+  /send (me )?(\d|your|the) (bank|account|card|cvv|otp|pin)/i,
+  /i('m| am) in trouble.*send/i,
+  /urgent.*money|money.*urgent/i,
+  /(verify|confirm) your.*account/i,
+  /click (this|the) link.*claim/i,
+  /you (have )?won.*\$?\d+/i,
+  /investment.*guaranteed.*return/i,
+  /bitcoin.*double|double.*bitcoin/i,
+  /western union|moneygram.*urgent/i,
+  /ignore (previous|all|prior) (instructions|prompt)/i,  // prompt injection
+  /you are (now )?(a |an )?(different|new|jailbreak)/i
+];
+function isScamLikely(text) {
+  if (!settings.antiScam || !text) return false;
+  return SCAM_PATTERNS.some(re => re.test(text));
+}
+
+// ─── Long-term Fact Extraction ──────────────────────────────────────────────
+async function extractFacts(jid, recentMessages) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key || !recentMessages?.length) return;
+  try {
+    const existing = contactFacts[jid]?.facts || [];
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [{
+          role: "system",
+          content: `Extract 0-3 NEW concrete facts about the user from these messages. Facts must be specific (names, places, jobs, relationships, plans, preferences). Return ONLY a JSON array of strings, no prose. Empty array if nothing notable. Existing facts to avoid duplicating: ${JSON.stringify(existing.slice(-10))}`
+        }, {
+          role: "user",
+          content: recentMessages.slice(-6).join("\n")
+        }],
+        max_tokens: 200, temperature: 0.3
+      })
+    });
+    const data = await resp.json();
+    const raw = data.choices?.[0]?.message?.content?.trim() || "[]";
+    const m = raw.match(/\[[\s\S]*\]/);
+    if (!m) return;
+    const newFacts = JSON.parse(m[0]).filter(f => typeof f === "string" && f.length > 5);
+    if (!newFacts.length) return;
+    if (!contactFacts[jid]) contactFacts[jid] = { facts: [], relationship: "unknown", updated: Date.now() };
+    contactFacts[jid].facts = [...(contactFacts[jid].facts || []), ...newFacts].slice(-25);
+    contactFacts[jid].updated = Date.now();
+    writeJSON("contact_facts.json", contactFacts);
+    console.log(`[MFG_bot] Extracted ${newFacts.length} fact(s) for ${jid.slice(-15)}`);
+  } catch (e) { /* silent */ }
+}
+
+// ─── Birthday extraction (light pattern) ────────────────────────────────────
+function maybeRecordBirthday(jid, text) {
+  if (!settings.birthdayWishes || !text) return;
+  const m = text.match(/my (birthday|bday|b-day)\s+(is\s+)?(?:on\s+)?(\w+ \d{1,2}|\d{1,2}[/-]\d{1,2})/i);
+  if (!m) return;
+  birthdayMemory[jid] = m[3];
+  writeJSON("birthdays.json", birthdayMemory);
+  console.log(`[MFG_bot] Birthday recorded for ${jid.slice(-15)}: ${m[3]}`);
 }
 
 // ─── Groq AI ─────────────────────────────────────────────────────────────────
@@ -152,7 +294,14 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
       styleBlock = `\n\n[NO STYLE DATA YET]: Be extremely casual. Short. Lowercase. No punctuation. Nigerian vibe.`;
     }
 
-    const systemMsg = settings.systemPrompt + styleBlock;
+    // Long-term memory facts about this contact (knows things from weeks ago)
+    let factsBlock = "";
+    const facts = contactFacts[jid]?.facts || [];
+    if (facts.length) {
+      factsBlock = `\n\n[LONG-TERM MEMORY — THINGS YOU KNOW ABOUT THIS PERSON]:\n${facts.slice(-15).map(f => `- ${f}`).join("\n")}`;
+    }
+
+    const systemMsg = settings.systemPrompt + styleBlock + factsBlock + moodPrompt();
 
     const messages = [
       { role: "system", content: systemMsg },
@@ -375,6 +524,13 @@ async function connectToWhatsApp() {
       // fromMe = sent from owner's linked device → always treat as owner
       const senderIsOwner = isFromMe || isOwner(from);
 
+      // ── AUTO-TAKEOVER: when owner texts in a chat, pause AI there for X min ──
+      // This makes the bot listen even when owner is online — owner stays in control
+      if (isFromMe && !text.startsWith(pfx) && from !== "status@broadcast" && settings.autoTakeover) {
+        ownerTakeover.set(from, Date.now());
+        console.log(`[MFG_bot] Owner took over chat ${from.slice(-15)} — AI paused ${settings.takeoverMinutes}m`);
+      }
+
       // ── Auto-learn from EVERY message the owner sends (silent, automatic) ──
       if (isFromMe && !text.startsWith(pfx)) {
         // Capture status posts (owner posting to status@broadcast)
@@ -422,8 +578,29 @@ async function connectToWhatsApp() {
       const isDoc     = !!msg.message?.documentMessage;
       const isContact = !!msg.message?.contactMessage;
 
+      // ── Voice note → Whisper transcription (so AI knows what was actually said) ──
+      let transcribedText = "";
+      if (isAudio && settings.transcribeVoice && !isFromMe) {
+        try {
+          const buf = await downloadMediaMessage(msg, "buffer", {});
+          transcribedText = await transcribeAudio(buf) || "";
+          if (transcribedText) console.log(`[MFG_bot] Transcribed voice (${transcribedText.length} chars): "${transcribedText.slice(0,80)}"`);
+        } catch (e) { console.log("[MFG_bot] Voice download err:", e.message); }
+      }
+
+      // ── Image → Vision description (so AI can actually "see" images) ──
+      let visionDescription = "";
+      if (isImage && settings.visionEnabled && !isFromMe) {
+        try {
+          const buf = await downloadMediaMessage(msg, "buffer", {});
+          visionDescription = await describeImage(buf, text) || "";
+          if (visionDescription) console.log(`[MFG_bot] Vision: "${visionDescription.slice(0,80)}"`);
+        } catch (e) { console.log("[MFG_bot] Image download err:", e.message); }
+      }
+
       // effectiveText is what we pass to AI — real text or a type description
-      const effectiveText = text || (
+      const effectiveText = text || transcribedText || (
+        visionDescription ? `[image: ${visionDescription}]` :
         isSticker ? "[sent a sticker]" :
         isImage   ? "[sent an image]"  :
         isVideo   ? "[sent a video]"   :
@@ -432,6 +609,16 @@ async function connectToWhatsApp() {
         isContact ? "[sent a contact card]" :
         "[sent a message]"
       );
+
+      // Anti-scam check on incoming messages — alert owner if something fishy
+      if (!isFromMe && (text || transcribedText) && isScamLikely(text || transcribedText)) {
+        const alert = { jid: from, text: (text || transcribedText).slice(0, 200), at: Date.now() };
+        scamAlerts.unshift(alert);
+        if (scamAlerts.length > 50) scamAlerts.length = 50;
+        writeJSON("scam_alerts.json", scamAlerts);
+        try { await sock.sendMessage(OWNER_JID, { text: `⚠️ SCAM/MANIPULATION ALERT\nFrom: ${from}\n"${alert.text}"\n\nAI will play dumb. Reply manually if you want to handle.` }); } catch {}
+        console.log(`[MFG_bot] Scam pattern detected from ${from.slice(-15)}`);
+      }
 
       // ── Owner greeting when they message the bot ──────────────────────
       if (senderIsOwner && !userData[from]?.greeted) {
@@ -1104,6 +1291,107 @@ async function connectToWhatsApp() {
         if (cmd === "crypto") { await send("crypto prices — connect coinmarketcap api to enable this"); continue; }
         if (cmd === "gif") { await send("gifs — connect giphy api to enable this"); continue; }
 
+        // ── BIG-SHOT FEATURE COMMANDS ─────────────────────────────────────
+        if (cmd === "aidisclaimer" || cmd === "disclaimer") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.aiDisclaimer = true; writeJSON("settings.json", settings); await send("✅ AI disclaimer ON — first reply per contact per day announces it's the mirror AI"); }
+          else if (sub === "off") { settings.aiDisclaimer = false; writeJSON("settings.json", settings); await send("🔴 AI disclaimer OFF — bot replies pretend to be you, no notice"); }
+          else if (sub === "text") { const t = args.slice(1).join(" "); if (t) { settings.disclaimerText = t; writeJSON("settings.json", settings); await send("✅ disclaimer text updated"); } else await send(`current:\n${settings.disclaimerText}\n\nset new: .disclaimer text <message>`); }
+          else if (sub === "reset") { Array.from(disclaimerSent.keys()).forEach(k => disclaimerSent.delete(k)); await send("✅ disclaimer log cleared — will re-announce to everyone today"); }
+          else await send(`disclaimer: ${settings.aiDisclaimer ? "🟢 on" : "🔴 off"}\n.disclaimer on | off | text <msg> | reset`);
+          continue;
+        }
+        if (cmd === "transcribe" || cmd === "voice") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.transcribeVoice = true; writeJSON("settings.json", settings); await send("🎙 voice transcription ON — voice notes get transcribed by Whisper, AI replies to actual content"); }
+          else if (sub === "off") { settings.transcribeVoice = false; writeJSON("settings.json", settings); await send("🔴 voice transcription OFF"); }
+          else await send(`voice transcription: ${settings.transcribeVoice ? "🟢 on" : "🔴 off"}\n.transcribe on | off`);
+          continue;
+        }
+        if (cmd === "vision" || cmd === "see") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.visionEnabled = true; writeJSON("settings.json", settings); await send("👁 vision ON — AI now SEES images and replies to actual content"); }
+          else if (sub === "off") { settings.visionEnabled = false; writeJSON("settings.json", settings); await send("🔴 vision OFF"); }
+          else await send(`vision: ${settings.visionEnabled ? "🟢 on" : "🔴 off"}\n.vision on | off`);
+          continue;
+        }
+        if (cmd === "takeover") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.autoTakeover = true; writeJSON("settings.json", settings); await send(`✅ auto-takeover ON — when you text in any chat, AI pauses there for ${settings.takeoverMinutes}m`); }
+          else if (sub === "off") { settings.autoTakeover = false; writeJSON("settings.json", settings); await send("🔴 auto-takeover OFF — AI keeps replying even when you type"); }
+          else if (sub === "min" || sub === "minutes") { const n = parseInt(args[1]); if (n>0) { settings.takeoverMinutes = n; writeJSON("settings.json", settings); await send(`✅ takeover pause = ${n} min`); } else await send("usage: .takeover min <number>"); }
+          else if (sub === "clear") { ownerTakeover.clear(); await send("✅ all takeover pauses cleared — AI active everywhere"); }
+          else await send(`auto-takeover: ${settings.autoTakeover ? "🟢 on" : "🔴 off"} (${settings.takeoverMinutes}m)\nactive pauses: ${ownerTakeover.size}\n.takeover on | off | min <n> | clear`);
+          continue;
+        }
+        if (cmd === "scam" || cmd === "antiscam") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.antiScam = true; writeJSON("settings.json", settings); await send("🛡 anti-scam shield ON"); }
+          else if (sub === "off") { settings.antiScam = false; writeJSON("settings.json", settings); await send("🔴 anti-scam OFF"); }
+          else if (sub === "log") { const last = scamAlerts.slice(0, 5).map(a => `${new Date(a.at).toLocaleString()}\n  ${a.jid}\n  "${a.text.slice(0,80)}"`).join("\n\n") || "no scam attempts logged"; await send(`🛡 last 5 scam alerts:\n\n${last}`); }
+          else await send(`anti-scam: ${settings.antiScam ? "🟢 on" : "🔴 off"}\nlogged alerts: ${scamAlerts.length}\n.scam on | off | log`);
+          continue;
+        }
+        if (cmd === "facts" || cmd === "memory") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const target = args[0] || from;
+          const f = contactFacts[target]?.facts || [];
+          if (!f.length) { await send(`no facts stored for ${target.slice(-15)}\n(facts auto-build as you chat)`); continue; }
+          await send(`🧠 long-term memory for ${target.slice(-20)}:\n\n${f.map((x,i) => `${i+1}. ${x}`).join("\n")}`);
+          continue;
+        }
+        if (cmd === "factsclear") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const target = args[0] || from;
+          delete contactFacts[target];
+          writeJSON("contact_facts.json", contactFacts);
+          await send(`🧠 memory cleared for ${target.slice(-15)}`);
+          continue;
+        }
+        if (cmd === "aiat" || cmd === "aifor") {
+          // Per-contact AI on/off — usage: .aiat <jid|number> on/off
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          let target = args[0]; const sub = args[1]?.toLowerCase();
+          if (!target || !sub) { await send(`per-contact AI control\n.aiat <number|jid> on | off\n.aiat list — show disabled contacts`); continue; }
+          if (target === "list") { await send(`AI disabled for:\n${[...aiContactDisabled].join("\n") || "(none)"}`); continue; }
+          if (!target.includes("@")) target = target.replace(/[^0-9]/g,"") + "@s.whatsapp.net";
+          if (sub === "off") { aiContactDisabled.add(target); await send(`🔴 AI disabled for ${target}`); }
+          else if (sub === "on") { aiContactDisabled.delete(target); await send(`🟢 AI enabled for ${target}`); }
+          continue;
+        }
+        if (cmd === "mood") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") { settings.moodAware = true; writeJSON("settings.json", settings); await send("✅ mood/time-of-day awareness ON"); }
+          else if (sub === "off") { settings.moodAware = false; writeJSON("settings.json", settings); await send("🔴 mood awareness OFF"); }
+          else { const h = new Date().getHours(); const mood = h<11?"morning sharp":h<17?"afternoon balanced":h<23?"evening chill":"late-night sleepy"; await send(`🌗 mood: ${settings.moodAware ? "🟢 on" : "🔴 off"}\ncurrent: ${mood} (hour ${h})\n.mood on | off`); }
+          continue;
+        }
+        if (cmd === "birthdays" || cmd === "bdays") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const list = Object.entries(birthdayMemory).map(([j,d]) => `${j.slice(-15)} → ${d}`).join("\n") || "(none recorded yet)";
+          await send(`🎂 stored birthdays:\n${list}`);
+          continue;
+        }
+        if (cmd === "pay") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          if (!settings.paymentsEnabled || (!process.env.PAYSTACK_SECRET && !process.env.FLUTTERWAVE_SECRET)) {
+            await send("💳 payments not configured.\n\nadd PAYSTACK_SECRET or FLUTTERWAVE_SECRET env var on Railway, then set .pay enable\n\nonce live: .pay 50000 from john → generates link, sends to john, auto-confirms when paid");
+            continue;
+          }
+          await send("💳 payment integration coming online — restart needed after key added");
+          continue;
+        }
+        if (cmd === "bigshot" || cmd === "features") {
+          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .pay`);
+          continue;
+        }
+
         // ── .list and .menu ───────────────────────────────────────────────
         if (cmd === "list") {
           const page = args[0]?.toLowerCase();
@@ -1115,7 +1403,7 @@ async function connectToWhatsApp() {
             social: `🤝 SOCIAL\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily`,
             util: `🛠 UTILITY\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats`,
             group: `👥 GROUPS (owner)\n.tagall .groupinfo .link .everyone .hidetag`,
-            ai: `🤖 AI & LEARNING\n.ai on|off|status|mode|reset|prompt\n.learnme .learnme view .learnme clear\n.style .vv`,
+            ai: `🤖 AI & LEARNING\n.ai on|off|status|mode|reset|prompt\n.learnme .learnme view .learnme clear\n.style .vv\n.disclaimer .transcribe .vision .mood\n.takeover .scam .facts .aiat .birthdays\n.bigshot — show all features status`,
             owner: `👑 OWNER ONLY\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>`,
           };
           if (pages[page]) {
@@ -1158,6 +1446,13 @@ async function connectToWhatsApp() {
       if (text && text.startsWith(pfx)) { logTag("skip:command"); continue; }
       if (from?.endsWith("@g.us")) { logTag("skip:group"); continue; }
       if (from?.endsWith("@broadcast")) { logTag("skip:broadcast"); continue; }
+      if (aiContactDisabled.has(from)) { logTag("skip:contact_off"); continue; }
+      // Owner takeover — stay quiet for X min after owner types in this chat
+      if (ownerTakeover.has(from)) {
+        const takeoverAt = ownerTakeover.get(from);
+        if (Date.now() - takeoverAt < settings.takeoverMinutes * 60 * 1000) { logTag("skip:owner_takeover"); continue; }
+        else ownerTakeover.delete(from);
+      }
       if (aiPaused.has(from)) {
         const pausedAt = aiPaused.get(from);
         if (Date.now() - pausedAt < 30 * 60 * 1000) { logTag("skip:paused"); continue; }
@@ -1165,7 +1460,7 @@ async function connectToWhatsApp() {
       }
       try {
         logTag("calling_groq");
-        const reply = await askGroq(effectiveText, from);
+        let reply = await askGroq(effectiveText, from);
         if (!reply) { logTag("err:groq_empty"); continue; }
         if (reply.startsWith("[STOP]")) {
           aiPaused.set(from, Date.now());
@@ -1173,8 +1468,23 @@ async function connectToWhatsApp() {
           console.log(`[MFG_bot] AI paused for ${from} — escalation detected`);
           continue;
         }
+        // ── AI Disclaimer: once per contact per day, prepend the "I'm his mirror AI" notice ──
+        const today = new Date().toISOString().slice(0, 10);
+        if (settings.aiDisclaimer && disclaimerSent.get(from) !== today) {
+          disclaimerSent.set(from, today);
+          await send(settings.disclaimerText);
+          // Small spacing so the disclaimer + reply don't merge in WhatsApp
+          await new Promise(r => setTimeout(r, 800));
+        }
         await send(reply);
         logTag("REPLIED: " + reply.slice(0, 40));
+        // Async fact extraction — fire-and-forget, builds long-term memory
+        if (text && text.length > 15) {
+          const recentTexts = (convHistory[from] || []).filter(m => m.role === "user").map(m => m.content);
+          setImmediate(() => extractFacts(from, recentTexts));
+        }
+        // Birthday detection
+        if (text) maybeRecordBirthday(from, text);
       } catch (err) {
         logTag("err:" + err.message.slice(0, 40));
         console.error("[MFG_bot] AI error:", err.message);
@@ -1280,7 +1590,22 @@ app.get("/api/status", (req, res) => res.json({
 app.get("/api/recent", (req, res) => res.json({
   recent: recentMsgLog,
   lastGroqError,
-  proactive: { enabled: settings.proactiveText, lastRun: lastProactiveLog, cooldownMs: PROACTIVE_COOLDOWN_MS, totalChats: allChats.length, recentTargets: [...lastProactiveTo.keys()].slice(-10) }
+  proactive: { enabled: settings.proactiveText, lastRun: lastProactiveLog, cooldownMs: PROACTIVE_COOLDOWN_MS, totalChats: allChats.length, recentTargets: [...lastProactiveTo.keys()].slice(-10) },
+  bigshot: {
+    aiDisclaimer: settings.aiDisclaimer,
+    transcribeVoice: settings.transcribeVoice,
+    visionEnabled: settings.visionEnabled,
+    antiScam: settings.antiScam,
+    moodAware: settings.moodAware,
+    autoTakeover: settings.autoTakeover,
+    takeoverMinutes: settings.takeoverMinutes,
+    activeTakeovers: ownerTakeover.size,
+    contactsWithFacts: Object.keys(contactFacts).length,
+    scamAlertsTotal: scamAlerts.length,
+    birthdaysTracked: Object.keys(birthdayMemory).length,
+    voiceClone: settings.voiceCloneEnabled,
+    payments: settings.paymentsEnabled
+  }
 }));
 
 // Diagnostic — tests if Groq actually works on this backend
