@@ -46,7 +46,8 @@ const SETTINGS_DEFAULTS = {
   aiMode: "chill",
   aiDelay: 0,
   aiTyping: false,
-  proactiveText: true,
+  proactiveText: false,        // OFF by default — only kicks in when owner runs .online
+  onlineMode: false,           // .online turns this on: keeps WhatsApp presence "available" + enables proactive texting
   // Big-shot features (all on by default)
   aiDisclaimer: true,           // Tell people "you're speaking to my mirror AI" once per contact per day
   disclaimerText: "👋 hey — quick heads up: you're speaking to teddymfg's MIRROR AI 🤖 he's offline rn but i'll text you for him in his style. — built by my maker: teddymfg",
@@ -127,6 +128,7 @@ const aiPaused  = new Map();    // JID → timestamp when AI paused due to escal
 const aiContactDisabled = new Set(); // JIDs where AI is permanently off (per-contact toggle)
 const disclaimerSent = new Map(); // JID → date string (YYYY-MM-DD) of last disclaimer sent
 const ownerTakeover = new Map(); // JID → timestamp when owner started typing → AI pauses
+const pendingDownload = new Map(); // JID → timestamp; awaits next msg as song name/url for .download
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -198,6 +200,42 @@ function moodPrompt() {
   if (hour >= 11 && hour < 17) return "\n\n[MOOD: afternoon — normal energy, balanced.]";
   if (hour >= 17 && hour < 23) return "\n\n[MOOD: evening — chill, more emojis ok, slightly playful.]";
   return "\n\n[MOOD: late night — sleepy energy, minimal words, maybe just 'k' or 'lol'.]";
+}
+
+// ─── YouTube search + audio download (no API key needed) ─────────────────────
+async function searchYoutube(query) {
+  try {
+    // Use YouTube's public search HTML — extract first videoId
+    const r = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
+      headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en" }
+    });
+    const html = await r.text();
+    const m = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+    if (!m) return null;
+    return `https://www.youtube.com/watch?v=${m[1]}`;
+  } catch (e) { console.log("[MFG_bot] yt search err:", e.message); return null; }
+}
+
+async function downloadYoutubeAudio(url) {
+  // Try cobalt.tools API (free, no key, reliable)
+  try {
+    const r = await fetch("https://api.cobalt.tools/api/json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ url, isAudioOnly: true, aFormat: "mp3" })
+    });
+    const j = await r.json();
+    if (j.status === "stream" || j.status === "redirect" || j.status === "tunnel") {
+      const audio = await fetch(j.url);
+      if (!audio.ok) return null;
+      const ab = await audio.arrayBuffer();
+      const buf = Buffer.from(ab);
+      if (buf.length > 16 * 1024 * 1024) { console.log("[MFG_bot] dl too large:", buf.length); return null; } // WhatsApp 16MB cap
+      return buf;
+    }
+    console.log("[MFG_bot] cobalt status:", j.status, j.text || "");
+    return null;
+  } catch (e) { console.log("[MFG_bot] dl err:", e.message); return null; }
 }
 
 // ─── Diagnostic logs (exposed via /api/recent for live debugging) ────────────
@@ -802,6 +840,26 @@ async function connectToWhatsApp() {
         continue;
       }
 
+      // ── Pending .download follow-up — user said .download, now sending the song ──
+      if (!isFromMe && text && !text.startsWith(pfx) && pendingDownload.has(from)) {
+        const startedAt = pendingDownload.get(from);
+        if (Date.now() - startedAt < 60000) {
+          pendingDownload.delete(from);
+          const isUrl = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|music\.youtube\.com)/i.test(text);
+          await send(isUrl ? "⏬ got the link, downloading..." : `🔍 searching for "${text}"...`);
+          const ytUrl = isUrl ? text.match(/https?:\S+/)[0] : await searchYoutube(text);
+          if (!ytUrl) { await send("❌ couldn't find that song. try again with .song <name>"); continue; }
+          if (!isUrl) await send("⏬ found it — downloading...");
+          const audioBuf = await downloadYoutubeAudio(ytUrl);
+          if (!audioBuf) { await send(`❌ download failed. try the link: ${ytUrl}`); continue; }
+          try {
+            await sock.sendMessage(from, { audio: audioBuf, mimetype: "audio/mp4", fileName: `${text.slice(0,30)}.mp3` });
+            await send("✅ enjoy 🎧");
+          } catch (e) { await send("❌ send failed: " + e.message); }
+          continue;
+        } else { pendingDownload.delete(from); }
+      }
+
       // ── Commands ────────────────────────────────────────────────────────
       if (text.startsWith(pfx)) {
         const [rawCmd, ...args] = text.slice(pfx.length).trim().split(/\s+/);
@@ -859,12 +917,28 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // .proactive on | off | status
+        // .online — i cover for you when your data is off
+        if (cmd === "online") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          settings.onlineMode = true;
+          settings.proactiveText = true;
+          writeJSON("settings.json", settings);
+          await send(`🟢 ONLINE MODE ACTIVE\n• your WhatsApp will show as online even if your data is off\n• i'll be randomly texting your contacts (10s check, 30 min cooldown each)\n• AI replies as you to all incoming messages\n• run .offline to stop\n\nyou can switch off your phone now — i got you 💪`);
+          try { await sock.sendPresenceUpdate("available"); } catch {}
+          continue;
+        }
+        if (cmd === "offline") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          settings.onlineMode = false;
+          settings.proactiveText = false;
+          writeJSON("settings.json", settings);
+          await send(`🔴 OFFLINE MODE — stopped covering for you.\nyour WhatsApp will show your real status.\nproactive texting stopped.`);
+          try { await sock.sendPresenceUpdate("unavailable"); } catch {}
+          continue;
+        }
+        // legacy alias
         if (cmd === "proactive") {
-          const sub = args[0]?.toLowerCase();
-          if (sub === "on") { settings.proactiveText = true; writeJSON("settings.json", settings); await send("proactive texting on 🟢 — i'll randomly text people every 30–120 mins"); }
-          else if (sub === "off") { settings.proactiveText = false; writeJSON("settings.json", settings); await send("proactive texting off 🔴"); }
-          else await send(`proactive texting: ${settings.proactiveText ? "on 🟢" : "off 🔴"}\n.proactive on | .proactive off`);
+          await send("`.proactive` was replaced — use `.online` (i cover for you) or `.offline` (stop)");
           continue;
         }
 
@@ -1520,6 +1594,112 @@ async function connectToWhatsApp() {
           continue;
         }
 
+        // ── .listall — personalized welcome with the user's WhatsApp display name ──
+        if (cmd === "listall" || cmd === "welcome" || cmd === "intro") {
+          const userName = msg.pushName || "there";
+          const ownerDisplay = "+2349132883869";
+          await send(`🌟 hello *${userName}* — welcome to *TEDDY MFG WHATSAPP BOT* 🤖\n\n` +
+            `you're chatting with the AI mirror of teddymfg.\n` +
+            `my creator's number is *${ownerDisplay}* — kindly send him a message for:\n` +
+            `  • feature suggestions\n` +
+            `  • bug reports\n` +
+            `  • or if you wish to become an admin of this bot 👑\n\n` +
+            `here are the most useful things i can do for you:\n\n` +
+            `🎵 *.song <name>* — find & download any song as MP3\n` +
+            `📥 *.download <YouTube link>* — download any YouTube audio\n` +
+            `🤖 *.ai* — chat with me, i reply to anything\n` +
+            `🎙 voice notes — i transcribe & reply\n` +
+            `🖼 images — i can see them & reply\n` +
+            `🌦 *.weather <city>* — current weather\n` +
+            `📖 *.define <word>* — dictionary lookup\n` +
+            `🎲 *.joke .fact .quote .truth .dare .8ball*\n` +
+            `🧮 *.calc .tip .bmi .password .uuid*\n` +
+            `📝 *.note .todo .save* — personal notes\n` +
+            `👋 *.gm .gn .hbd* — greetings\n\n` +
+            `type *.list* to see all 200+ commands by category\n` +
+            `type *.menu* for a quick overview\n\n` +
+            `_built with love by teddymfg_ ❤️`);
+          continue;
+        }
+
+        // ── .download — download YouTube audio as MP3 (uses cobalt.tools) ─────
+        if (cmd === "download" || cmd === "dl" || cmd === "mp3") {
+          const url = args[0];
+          if (!url) {
+            // Save state — wait for next message to be the song name/url
+            pendingDownload.set(from, Date.now());
+            await send("🎵 wetin you wan download?\nsend me the *YouTube link* OR *song name* in your next message.\n(i'll auto-cancel in 60s if no reply)");
+            continue;
+          }
+          await send("⏬ downloading... give me a few seconds");
+          const audioBuf = await downloadYoutubeAudio(url);
+          if (!audioBuf) { await send("❌ couldn't download that. make sure it's a valid YouTube/SoundCloud link or try .song <name> instead"); continue; }
+          try {
+            await sock.sendMessage(from, { audio: audioBuf, mimetype: "audio/mp4", fileName: "song.mp3" });
+            await send("✅ enjoy 🎧");
+          } catch (e) { await send("❌ send failed: " + e.message); }
+          continue;
+        }
+        if (cmd === "song" || cmd === "play") {
+          const query = args.join(" ");
+          if (!query) { await send(".song <song name> — i'll find it on YouTube and send the MP3"); continue; }
+          await send(`🔍 searching for "${query}"...`);
+          const ytUrl = await searchYoutube(query);
+          if (!ytUrl) { await send("❌ couldn't find that song. try a different name or paste a YouTube link with .download <link>"); continue; }
+          await send("⏬ found it — downloading...");
+          const audioBuf = await downloadYoutubeAudio(ytUrl);
+          if (!audioBuf) { await send(`❌ download failed. try the link directly: ${ytUrl}`); continue; }
+          try {
+            await sock.sendMessage(from, { audio: audioBuf, mimetype: "audio/mp4", fileName: `${query.slice(0,30)}.mp3` });
+            await send("✅ enjoy 🎧");
+          } catch (e) { await send("❌ send failed: " + e.message); }
+          continue;
+        }
+
+        // ── More powerful commands ─────────────────────────────────────────
+        if (cmd === "weather") {
+          const city = args.join(" ") || "Lagos";
+          try {
+            const r = await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=%l:+%C+%t+feels+like+%f+humidity+%h+wind+%w`);
+            const t = await r.text();
+            await send(`🌦 ${t}`);
+          } catch (e) { await send("couldn't fetch weather rn"); }
+          continue;
+        }
+        if (cmd === "define" || cmd === "dictionary") {
+          const w = args[0];
+          if (!w) { await send(".define <word>"); continue; }
+          try {
+            const r = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(w)}`);
+            const j = await r.json();
+            if (!Array.isArray(j) || !j[0]) { await send(`📖 no definition for "${w}"`); continue; }
+            const m = j[0].meanings?.[0];
+            const def = m?.definitions?.[0];
+            await send(`📖 *${j[0].word}* (${m?.partOfSpeech || "?"})\n${def?.definition || "no definition"}${def?.example ? `\n\n_e.g._ ${def.example}` : ""}`);
+          } catch (e) { await send("dictionary lookup failed"); }
+          continue;
+        }
+        if (cmd === "shorten" || cmd === "short") {
+          const u = args[0];
+          if (!u) { await send(".shorten <url>"); continue; }
+          try {
+            const r = await fetch(`https://is.gd/create.php?format=simple&url=${encodeURIComponent(u)}`);
+            const t = await r.text();
+            await send(t.startsWith("http") ? `🔗 ${t}` : "couldn't shorten that url");
+          } catch (e) { await send("shorten failed"); }
+          continue;
+        }
+        if (cmd === "ip") {
+          const ip = args[0];
+          if (!ip) { await send(".ip <ip-address>"); continue; }
+          try {
+            const r = await fetch(`https://ipapi.co/${encodeURIComponent(ip)}/json/`);
+            const j = await r.json();
+            await send(`🌐 *${ip}*\n📍 ${j.city}, ${j.region}, ${j.country_name}\n🏢 ${j.org || "?"}\n📡 ${j.timezone || "?"}`);
+          } catch (e) { await send("ip lookup failed"); }
+          continue;
+        }
+
         // ── .list and .menu ───────────────────────────────────────────────
         if (cmd === "list") {
           const page = args[0]?.toLowerCase();
@@ -1529,7 +1709,7 @@ async function connectToWhatsApp() {
             fun: `🎮 FUN & GAMES\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice`,
             vibe: `😤 VIBE CHECKS\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky`,
             social: `🤝 SOCIAL\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily`,
-            util: `🛠 UTILITY\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats`,
+            util: `🛠 UTILITY\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.weather <city> .define <word>\n.shorten <url> .ip <addr>\n.song <name> .download <yt-link>\n.online (i cover for you) / .offline`,
             group: `👥 GROUPS (owner)\n.tagall .groupinfo .link .everyone .hidetag`,
             ai: `🤖 AI & LEARNING\n.ai on|off|status|mode|reset|prompt\n.learnme .learnme view .learnme clear\n.style .vv\n.disclaimer .transcribe .vision .mood\n.takeover .scam .facts .aiat .birthdays\n.bigshot — show all features status`,
             owner: `👑 OWNER ONLY\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>`,
@@ -1548,7 +1728,7 @@ async function connectToWhatsApp() {
           else if (topic === "text") await send(".upper .lower .reverse .mock .clap .aesthetic .leet .count .repeat .binary .hex .base64 .caesar .pig .owoify");
           else if (topic === "math") await send(".calc .percent .tax .tip .split .bmi .roman .random .temp .sqrt .pow .fibonacci .factorial .isprime .password");
           else if (topic === "fun") await send(".joke .fact .quote .truth .dare .wyr .8ball .rps .ship .rate .choose .spin .slot .flip .roll");
-          else await send(`mfg_bot 🤖 | 200+ commands\n\n.list — full command list by category\n.list text | math | fun | vibe | social | util | group | ai | owner\n\nstatus auto-send: anyone who says "send please" after your status gets it instantly 📲\n\nai: .ai on to activate | bot mirrors your style per contact automatically`);
+          else await send(`mfg_bot 🤖 | 200+ commands\n\n*MOST USEFUL:*\n.listall — full personalized welcome\n.online / .offline — i cover for you when your data is off\n.song <name> — find & download song as MP3\n.download <yt-link> — direct YouTube download\n.weather <city> — current weather\n.define <word> — dictionary\n.shorten <url> — shrink a link\n.ip <ip-address> — geo-locate ip\n\n.list — full command list by category\n.list text | math | fun | vibe | social | util | group | ai | owner\n\nai: .ai on to activate | bot mirrors your style per contact automatically`);
           continue;
         }
 
@@ -1671,7 +1851,7 @@ function scheduleRandomText() {
   const delay = 10 * 1000;
   setTimeout(async () => {
     try {
-      if (!settings.proactiveText) { lastProactiveLog = "skip: proactive off"; scheduleRandomText(); return; }
+      if (!settings.proactiveText || !settings.onlineMode) { lastProactiveLog = "skip: not in .online mode"; scheduleRandomText(); return; }
       if (!isConnected) { lastProactiveLog = "skip: not connected"; scheduleRandomText(); return; }
       const now = Date.now();
       const eligible = allChats.filter(c =>
@@ -1716,7 +1896,25 @@ function scheduleRandomText() {
 }
 scheduleRandomText();
 
+// ─── Presence Heartbeat — keep WhatsApp showing "online" when .online mode is on ──
+setInterval(async () => {
+  if (!isConnected || !sock || !settings.onlineMode) return;
+  try { await sock.sendPresenceUpdate("available"); } catch {}
+}, 25 * 1000);
+
 // ─── API Endpoints ────────────────────────────────────────────────────────────
+// Pairing code endpoint — easier than QR for users who can't scan
+app.get("/api/pair", async (req, res) => {
+  const phone = String(req.query.number || "").replace(/\D/g, "");
+  if (!phone || phone.length < 10) return res.status(400).json({ error: "send ?number=2349132883869 (digits only, country code first)" });
+  if (isConnected) return res.status(400).json({ error: "already connected — disconnect first" });
+  if (!sock) return res.status(503).json({ error: "socket not ready, try again in a few seconds" });
+  try {
+    const code = await sock.requestPairingCode(phone);
+    res.json({ ok: true, phone, code, instructions: "open WhatsApp → Linked Devices → Link with phone number → enter this code" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/status", (req, res) => res.json({
   connected: isConnected,
   hasQr,
