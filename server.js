@@ -211,17 +211,18 @@ async function transcribeAudio(buffer, mimetype) {
   if (!key) { lastWhisperResult.error = "no GROQ_API_KEY"; return null; }
   if (!buffer || buffer.length < 100) { lastWhisperResult.error = "buffer too small: " + (buffer?.length || 0); return null; }
   try {
-    const FormData = require("form-data");
+    // Use NATIVE FormData + Blob (Node 18+) — the npm `form-data` pkg is incompatible
+    // with Node's native fetch and produces "multipart: NextPart: EOF" errors on Groq.
+    const ext = mimetype?.includes("mp4") ? "m4a" : mimetype?.includes("mpeg") ? "mp3" : mimetype?.includes("wav") ? "wav" : "ogg";
+    const ct = mimetype?.includes("mp4") ? "audio/mp4" : mimetype?.includes("mpeg") ? "audio/mpeg" : mimetype?.includes("wav") ? "audio/wav" : "audio/ogg";
+    const blob = new Blob([buffer], { type: ct });
     const form = new FormData();
-    // WhatsApp voice notes are usually .ogg/opus. Try .ogg first; if mimetype hints otherwise, use it.
-    const ext = mimetype?.includes("mp4") ? "m4a" : mimetype?.includes("mpeg") ? "mp3" : "ogg";
-    const ct = mimetype?.includes("mp4") ? "audio/mp4" : mimetype?.includes("mpeg") ? "audio/mpeg" : "audio/ogg";
-    form.append("file", buffer, { filename: "audio." + ext, contentType: ct });
+    form.append("file", blob, "audio." + ext);
     form.append("model", "whisper-large-v3-turbo");
     form.append("response_format", "json");
     const resp = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
-      headers: { "Authorization": `Bearer ${key}`, ...form.getHeaders() },
+      headers: { "Authorization": `Bearer ${key}` }, // DO NOT set Content-Type — fetch sets boundary itself
       body: form
     });
     const data = await resp.json();
