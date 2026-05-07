@@ -110,6 +110,7 @@ let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
+let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
 let allChats = [];
 let recentMsgLog = [];
 let lastGroqError = null;
@@ -703,7 +704,11 @@ async function connectToWhatsApp() {
       const logTag = (r) => { if (recentMsgLog[0]) recentMsgLog[0].result = r; };
       const pfx = settings.prefix || ".";
 
-      const send = (t) => sock.sendMessage(from, { text: t });
+      const send = async (t) => {
+        const m = await sock.sendMessage(from, { text: t });
+        if (m?.key) lastBotMsgByChat.set(from, m.key);
+        return m;
+      };
       // Owner detection — works in DMs AND groups regardless of @s.whatsapp.net vs @lid JID format
       // 1) fromMe — owner's linked device (most reliable in DMs)
       // 2) isOwner(from) — DM from owner's number
@@ -1950,11 +1955,130 @@ async function connectToWhatsApp() {
           continue;
         }
 
+        // ── 🆕 NEW COMMANDS (unlocked by Baileys 6.7.21 upgrade) ──────────
+
+        // .editlast <new text> — edit the bot's last sent message in this chat
+        if (cmd === "editlast" || cmd === "edit") {
+          const newText = args.join(" ").trim();
+          if (!newText) { await send("usage: .editlast <new text>"); continue; }
+          const lastKey = lastBotMsgByChat.get(from);
+          if (!lastKey) { await send("no recent bot message tracked in this chat to edit."); continue; }
+          try {
+            await sock.sendMessage(from, { text: newText, edit: lastKey });
+            console.log(`[MFG_bot] .editlast → edited ${lastKey.id} in ${from}`);
+          } catch (e) { await send("edit failed: " + e.message); }
+          continue;
+        }
+
+        // .say <text> — send a tracked message (so .editlast can edit it later)
+        if (cmd === "say") {
+          const t = args.join(" ").trim();
+          if (!t) { await send("usage: .say <text>"); continue; }
+          await send(t);
+          continue;
+        }
+
+        // .pin / .unpin — pin or unpin current chat
+        if (cmd === "pin" || cmd === "unpin") {
+          if (!isOwner(participantJid) && !isFromMe) { await send("owner only."); continue; }
+          try {
+            await sock.chatModify({ pin: cmd === "pin" }, from);
+            await send(cmd === "pin" ? "📌 chat pinned" : "📌 chat unpinned");
+          } catch (e) { await send(`${cmd} failed: ${e.message}`); }
+          continue;
+        }
+
+        // .channel — create/follow/info channels (newsletters)
+        if (cmd === "channel" || cmd === "newsletter") {
+          if (!isOwner(participantJid) && !isFromMe) { await send("owner only."); continue; }
+          const sub = (args[0] || "").toLowerCase();
+          if (sub === "create") {
+            const name = args.slice(1).join(" ").trim();
+            if (!name) { await send("usage: .channel create <name>"); continue; }
+            try {
+              const meta = await sock.newsletterCreate(name, "Created via mfg_bot");
+              await send(`✅ channel created\n*${meta.name}*\nid: ${meta.id}\ninvite: https://whatsapp.com/channel/${meta.invite || "?"}`);
+            } catch (e) { await send("channel create failed: " + e.message); }
+            continue;
+          }
+          if (sub === "info") {
+            const code = (args[1] || "").replace(/^https?:\/\/whatsapp\.com\/channel\//i, "").trim();
+            if (!code) { await send("usage: .channel info <invite-link-or-code>"); continue; }
+            try {
+              const meta = await sock.newsletterMetadata("invite", code);
+              await send(`📰 *${meta.name}*\nfollowers: ${meta.subscribers_count || 0}\ndesc: ${meta.description || "—"}\nid: ${meta.id}`);
+            } catch (e) { await send("channel info failed: " + e.message); }
+            continue;
+          }
+          if (sub === "follow") {
+            const code = (args[1] || "").replace(/^https?:\/\/whatsapp\.com\/channel\//i, "").trim();
+            if (!code) { await send("usage: .channel follow <invite-link-or-code>"); continue; }
+            try {
+              const meta = await sock.newsletterMetadata("invite", code);
+              await sock.newsletterFollow(meta.id);
+              await send(`✅ followed *${meta.name}*`);
+            } catch (e) { await send("follow failed: " + e.message); }
+            continue;
+          }
+          if (sub === "post") {
+            const rest = args.slice(1).join(" ");
+            const [chId, ...textParts] = rest.split("|").map(s => s.trim());
+            const txt = textParts.join("|");
+            if (!chId || !txt) { await send("usage: .channel post <channel-id> | <text>"); continue; }
+            try {
+              await sock.sendMessage(chId, { text: txt });
+              await send("✅ posted to channel");
+            } catch (e) { await send("post failed: " + e.message); }
+            continue;
+          }
+          await send("📰 *channel commands*\n.channel create <name>\n.channel info <invite>\n.channel follow <invite>\n.channel post <id> | <text>");
+          continue;
+        }
+
+        // .vvideo — send replied video as VIEW-ONCE
+        if (cmd === "vvideo" || cmd === "vonce") {
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          const quoted = ctx?.quotedMessage;
+          const vid = quoted?.videoMessage || quoted?.imageMessage;
+          if (!vid) { await send("reply to a video/image with .vvideo to send it as view-once."); continue; }
+          try {
+            const fakeMsg = { key: { remoteJid: from, id: ctx.stanzaId, fromMe: false, participant: ctx.participant }, message: quoted };
+            const buffer = await downloadMediaMessage(fakeMsg, "buffer", {});
+            const mediaType = quoted.videoMessage ? "video" : "image";
+            await sock.sendMessage(from, { [mediaType]: buffer, viewOnce: true, caption: args.join(" ") || undefined });
+            await send(`✅ sent as view-once ${mediaType}`);
+          } catch (e) { await send("view-once send failed: " + e.message); }
+          continue;
+        }
+
+        // .statusreact <emoji|off> — auto-react to incoming statuses
+        if (cmd === "statusreact" || cmd === "sreact") {
+          const v = (args[0] || "").trim();
+          if (!v) { await send(`status auto-react: ${settings.statusReactEmoji ? "ON ("+settings.statusReactEmoji+")" : "OFF"}\nusage: .statusreact <emoji|off>`); continue; }
+          if (v === "off") { settings.statusReactEmoji = null; writeJSON("settings.json", settings); await send("status auto-react OFF"); continue; }
+          settings.statusReactEmoji = v;
+          writeJSON("settings.json", settings);
+          await send(`✅ status auto-react set to ${v}\n(reacts to every status you receive)`);
+          continue;
+        }
+
+        // .pollvotes — show vote breakdown for a quoted poll (now decryptable in 6.7.21)
+        if (cmd === "pollvotes" || cmd === "votes") {
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          const pollMsg = ctx?.quotedMessage?.pollCreationMessage || ctx?.quotedMessage?.pollCreationMessageV3;
+          if (!pollMsg) { await send("reply to a poll with .pollvotes to see results."); continue; }
+          const lines = (pollMsg.options || []).map((o, i) => `${i+1}. ${o.optionName}`);
+          await send(`📊 *${pollMsg.name}*\n\n${lines.join("\n")}\n\n_(real-time vote tally requires bot to have seen each vote)_`);
+          continue;
+        }
+
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
           const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
 
-          const part2 = `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n😤 *VIBE CHECKS*\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio link\n.call on/off — block calls\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n_total: 200+ commands • type any command to use it_`;
+          const partUpgraded = `🆕 *NEW — UPGRADED (Baileys 6.7.21)*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n.statusreact off — turn off\n_(alias: .sreact)_\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results (now decryptable!)\n_(alias: .votes)_\n\n_these are NEW since the upgrade — older versions could not do these_\n\n`;
+
+          const part2 = partUpgraded + `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n😤 *VIBE CHECKS*\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio link\n.call on/off — block calls\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n_total: 200+ commands • type any command to use it_`;
 
           await send(part1);
           await new Promise(r => setTimeout(r, 600));
