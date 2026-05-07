@@ -200,51 +200,92 @@ function moodPrompt() {
   return "\n\n[MOOD: late night — sleepy energy, minimal words, maybe just 'k' or 'lol'.]";
 }
 
+// ─── Diagnostic logs (exposed via /api/recent for live debugging) ────────────
+let lastWhisperResult = { at: null, ok: null, bytes: 0, text: "", error: "" };
+let lastVisionResult = { at: null, ok: null, bytes: 0, text: "", error: "" };
+
 // ─── Voice Note Transcription (Groq Whisper) ─────────────────────────────────
-async function transcribeAudio(buffer) {
+async function transcribeAudio(buffer, mimetype) {
   const key = process.env.GROQ_API_KEY;
-  if (!key || !buffer) return null;
+  lastWhisperResult = { at: new Date().toISOString(), ok: null, bytes: buffer?.length || 0, text: "", error: "" };
+  if (!key) { lastWhisperResult.error = "no GROQ_API_KEY"; return null; }
+  if (!buffer || buffer.length < 100) { lastWhisperResult.error = "buffer too small: " + (buffer?.length || 0); return null; }
   try {
     const FormData = require("form-data");
     const form = new FormData();
-    form.append("file", buffer, { filename: "audio.ogg", contentType: "audio/ogg" });
+    // WhatsApp voice notes are usually .ogg/opus. Try .ogg first; if mimetype hints otherwise, use it.
+    const ext = mimetype?.includes("mp4") ? "m4a" : mimetype?.includes("mpeg") ? "mp3" : "ogg";
+    const ct = mimetype?.includes("mp4") ? "audio/mp4" : mimetype?.includes("mpeg") ? "audio/mpeg" : "audio/ogg";
+    form.append("file", buffer, { filename: "audio." + ext, contentType: ct });
     form.append("model", "whisper-large-v3-turbo");
+    form.append("response_format", "json");
     const resp = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
       headers: { "Authorization": `Bearer ${key}`, ...form.getHeaders() },
       body: form
     });
     const data = await resp.json();
-    if (!resp.ok) { console.log("[MFG_bot] Whisper error:", JSON.stringify(data).slice(0,200)); return null; }
-    return data.text?.trim() || null;
-  } catch (e) { console.log("[MFG_bot] Transcribe error:", e.message); return null; }
+    if (!resp.ok) {
+      lastWhisperResult.ok = false;
+      lastWhisperResult.error = `HTTP ${resp.status}: ` + JSON.stringify(data).slice(0,300);
+      console.log("[MFG_bot] Whisper error:", lastWhisperResult.error);
+      return null;
+    }
+    const text = data.text?.trim() || "";
+    lastWhisperResult.ok = true;
+    lastWhisperResult.text = text;
+    return text || null;
+  } catch (e) {
+    lastWhisperResult.ok = false;
+    lastWhisperResult.error = e.message;
+    console.log("[MFG_bot] Transcribe error:", e.message);
+    return null;
+  }
 }
 
-// ─── Image Vision (Groq llama-3.2-90b-vision-preview) ────────────────────────
-async function describeImage(buffer, caption) {
+// ─── Image Vision (Groq Llama-4 Scout) ───────────────────────────────────────
+async function describeImage(buffer, caption, mimetype) {
   const key = process.env.GROQ_API_KEY;
-  if (!key || !buffer) return null;
+  lastVisionResult = { at: new Date().toISOString(), ok: null, bytes: buffer?.length || 0, text: "", error: "" };
+  if (!key) { lastVisionResult.error = "no GROQ_API_KEY"; return null; }
+  if (!buffer || buffer.length < 100) { lastVisionResult.error = "buffer too small: " + (buffer?.length || 0); return null; }
+  // Groq vision has 4MB limit on base64 — downscale check
+  if (buffer.length > 3500000) { lastVisionResult.error = `image too big (${buffer.length} bytes, max ~3.5MB)`; console.log("[MFG_bot] " + lastVisionResult.error); return null; }
   try {
     const b64 = buffer.toString("base64");
+    const mt = mimetype && mimetype.startsWith("image/") ? mimetype : "image/jpeg";
     const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
       body: JSON.stringify({
-        model: "meta-llama/llama-4-scout-17b-16e-instruct",  // Current Groq vision model (llama-3.2-vision deprecated)
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: [{
           role: "user",
           content: [
             { type: "text", text: `Describe this image in 1-2 short sentences focused on what matters for replying to it casually. ${caption ? `Caption: "${caption}"` : ""}` },
-            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } }
+            { type: "image_url", image_url: { url: `data:${mt};base64,${b64}` } }
           ]
         }],
-        max_tokens: 100
+        max_tokens: 120
       })
     });
     const data = await resp.json();
-    if (!resp.ok) { console.log("[MFG_bot] Vision error:", JSON.stringify(data).slice(0,200)); return null; }
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  } catch (e) { console.log("[MFG_bot] Vision error:", e.message); return null; }
+    if (!resp.ok) {
+      lastVisionResult.ok = false;
+      lastVisionResult.error = `HTTP ${resp.status}: ` + JSON.stringify(data).slice(0,300);
+      console.log("[MFG_bot] Vision error:", lastVisionResult.error);
+      return null;
+    }
+    const text = data.choices?.[0]?.message?.content?.trim() || "";
+    lastVisionResult.ok = true;
+    lastVisionResult.text = text;
+    return text || null;
+  } catch (e) {
+    lastVisionResult.ok = false;
+    lastVisionResult.error = e.message;
+    console.log("[MFG_bot] Vision error:", e.message);
+    return null;
+  }
 }
 
 // ─── Anti-Scam Detection ────────────────────────────────────────────────────
@@ -631,26 +672,36 @@ async function connectToWhatsApp() {
       let transcribedText = "";
       if (isAudio && settings.transcribeVoice && !isFromMe) {
         try {
-          console.log(`[MFG_bot] Voice note received from ${from.slice(-15)}, downloading...`);
+          const audMsg = msg.message?.audioMessage || msg.message?.pttMessage;
+          const audMime = audMsg?.mimetype || "audio/ogg";
+          console.log(`[MFG_bot] Voice received from ${from.slice(-15)}, mime=${audMime}, downloading...`);
           const buf = await downloadMediaMessage(msg, "buffer", {});
-          console.log(`[MFG_bot] Voice downloaded (${buf.length} bytes), transcribing via Whisper...`);
-          transcribedText = await transcribeAudio(buf) || "";
+          console.log(`[MFG_bot] Voice downloaded (${buf?.length||0} bytes), calling Whisper...`);
+          transcribedText = await transcribeAudio(buf, audMime) || "";
           if (transcribedText) console.log(`[MFG_bot] ✅ Transcribed: "${transcribedText.slice(0,120)}"`);
-          else console.log(`[MFG_bot] ❌ Whisper returned empty`);
-        } catch (e) { console.log("[MFG_bot] Voice download err:", e.message); }
+          else console.log(`[MFG_bot] ❌ Whisper failed: ${lastWhisperResult.error}`);
+        } catch (e) {
+          lastWhisperResult = { at: new Date().toISOString(), ok: false, bytes: 0, text: "", error: "download_err: " + e.message };
+          console.log("[MFG_bot] Voice download err:", e.message);
+        }
       }
 
       // ── Image → Vision description (so AI can actually "see" images) ──
       let visionDescription = "";
       if (isImage && settings.visionEnabled && !isFromMe) {
         try {
-          console.log(`[MFG_bot] Image received from ${from.slice(-15)}, downloading...`);
+          const imgMsg = msg.message?.imageMessage;
+          const imgMime = imgMsg?.mimetype || "image/jpeg";
+          console.log(`[MFG_bot] Image received from ${from.slice(-15)}, mime=${imgMime}, downloading...`);
           const buf = await downloadMediaMessage(msg, "buffer", {});
-          console.log(`[MFG_bot] Image downloaded (${buf.length} bytes), describing via vision...`);
-          visionDescription = await describeImage(buf, text) || "";
+          console.log(`[MFG_bot] Image downloaded (${buf?.length||0} bytes), calling vision...`);
+          visionDescription = await describeImage(buf, text, imgMime) || "";
           if (visionDescription) console.log(`[MFG_bot] ✅ Vision: "${visionDescription.slice(0,120)}"`);
-          else console.log(`[MFG_bot] ❌ Vision returned empty`);
-        } catch (e) { console.log("[MFG_bot] Image download err:", e.message); }
+          else console.log(`[MFG_bot] ❌ Vision failed: ${lastVisionResult.error}`);
+        } catch (e) {
+          lastVisionResult = { at: new Date().toISOString(), ok: false, bytes: 0, text: "", error: "download_err: " + e.message };
+          console.log("[MFG_bot] Image download err:", e.message);
+        }
       }
 
       // effectiveText is what we pass to AI — real text or a type description
@@ -1678,6 +1729,8 @@ app.get("/api/recent", (req, res) => res.json({
   recent: recentMsgLog,
   lastGroqError,
   proactive: { enabled: settings.proactiveText, lastRun: lastProactiveLog, cooldownMs: PROACTIVE_COOLDOWN_MS, totalChats: allChats.length, recentTargets: [...lastProactiveTo.keys()].slice(-10) },
+  lastVision: lastVisionResult,
+  lastWhisper: lastWhisperResult,
   bigshot: {
     aiDisclaimer: settings.aiDisclaimer,
     transcribeVoice: settings.transcribeVoice,
