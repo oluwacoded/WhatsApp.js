@@ -2086,16 +2086,28 @@ setInterval(async () => {
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
 // Pairing code endpoint — easier than QR for users who can't scan
-app.get("/api/pair", async (req, res) => {
-  const phone = String(req.query.number || "").replace(/\D/g, "");
-  if (!phone || phone.length < 10) return res.status(400).json({ error: "send ?number=2349132883869 (digits only, country code first)" });
-  if (isConnected) return res.status(400).json({ error: "already connected — disconnect first" });
-  if (!sock) return res.status(503).json({ error: "socket not ready, try again in a few seconds" });
+// Accepts BOTH: GET ?number=... (URL bar)  AND  POST {phone:"..."} (dashboard UI)
+async function handlePair(req, res) {
+  const raw = req.body?.phone || req.body?.number || req.query?.number || req.query?.phone || "";
+  const phone = String(raw).replace(/\D/g, "");
+  if (!phone || phone.length < 10) return res.status(400).json({ error: "send your number with country code, digits only (e.g. 2349132883869)" });
+  if (isConnected) return res.status(400).json({ error: "already connected — go to dashboard and Logout first if you want to re-pair" });
+  if (!sock) return res.status(503).json({ error: "socket not ready, wait 10 seconds and try again" });
   try {
+    // Tiny delay so Baileys is fully initialized
+    await new Promise(r => setTimeout(r, 500));
     const code = await sock.requestPairingCode(phone);
-    res.json({ ok: true, phone, code, instructions: "open WhatsApp → Linked Devices → Link with phone number → enter this code" });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+    // Format as XXXX-XXXX for readability if it's 8 chars
+    const pretty = code && code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
+    console.log(`[MFG_bot] Pairing code generated for ${phone}: ${pretty}`);
+    res.json({ ok: true, phone, code: pretty, raw: code, instructions: "open WhatsApp → Settings → Linked Devices → Link a device → Link with phone number → enter this code" });
+  } catch (e) {
+    console.log(`[MFG_bot] Pair code failed for ${phone}: ${e.message}`);
+    res.status(500).json({ error: e.message + " — try again in a few seconds, the bot may still be starting" });
+  }
+}
+app.get("/api/pair", handlePair);
+app.post("/api/pair", handlePair);
 
 app.get("/api/status", (req, res) => res.json({
   connected: isConnected,
