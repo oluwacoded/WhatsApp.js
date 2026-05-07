@@ -58,6 +58,7 @@ const SETTINGS_DEFAULTS = {
   antiScam: true,               // Detect scam patterns, alert owner
   birthdayWishes: true,         // Auto-wish birthdays mentioned in chat
   voiceCloneEnabled: false,     // Requires ELEVENLABS_API_KEY + voice ID
+  voiceReplyMode: "off",        // "off" | "auto" (every reply) | "owner" (only when owner asks .voice me)
   paymentsEnabled: false,       // Requires PAYSTACK_SECRET or FLUTTERWAVE_SECRET
   greeting: "yo. mfg_bot here.",
   systemPrompt: `You are texting AS the owner of this phone — you ARE them. Not a bot, not an assistant. Just them.
@@ -96,6 +97,8 @@ WHEN UNSURE: Just be short, lowercase, casual. One word answers are fine. "yo", 
 };
 // Merge file values OVER defaults — new feature flags get defaults until user changes them
 let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
+// Auto-flip voiceClone on if both ElevenLabs env vars are present
+if (process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID) settings.voiceCloneEnabled = true;
 writeJSON("settings.json", settings);  // persist merged version so all flags are present
 
 let styleSamples = readJSON("style_samples.json", []);
@@ -131,6 +134,49 @@ let pairCodeResolve = null;    // Promise resolver waiting for the code
 
 function trackCommand(cmd) {
   commandStats[cmd] = (commandStats[cmd] || 0) + 1;
+}
+
+// ─── ElevenLabs Voice Synthesis ──────────────────────────────────────────────
+// Auto-enables when both ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID env vars are set
+async function synthesizeVoice(text) {
+  if (!process.env.ELEVENLABS_API_KEY || !process.env.ELEVENLABS_VOICE_ID) return null;
+  if (!text || text.length > 500) return null; // keep voice notes short
+  try {
+    const https = require("https");
+    const body = JSON.stringify({
+      text,
+      model_id: "eleven_turbo_v2_5",
+      voice_settings: { stability: 0.45, similarity_boost: 0.75, style: 0.30, use_speaker_boost: true }
+    });
+    const audio = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: "api.elevenlabs.io",
+        path: `/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128`,
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+          "Accept": "audio/mpeg",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          let err = ""; res.on("data", c => err += c); res.on("end", () => reject(new Error(`ElevenLabs ${res.statusCode}: ${err.slice(0,200)}`)));
+          return;
+        }
+        const chunks = [];
+        res.on("data", c => chunks.push(c));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+      req.write(body); req.end();
+    });
+    return audio;
+  } catch (e) {
+    console.log("[MFG_bot] ElevenLabs error:", e.message);
+    return null;
+  }
 }
 
 // ─── Owner Config ────────────────────────────────────────────────────────────
@@ -1378,6 +1424,24 @@ async function connectToWhatsApp() {
           await send(`🎂 stored birthdays:\n${list}`);
           continue;
         }
+        if (cmd === "voice" || cmd === "voicereply") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (!process.env.ELEVENLABS_API_KEY) { await send("⚠️ ELEVENLABS_API_KEY env var not set on this backend.\nAdd it on Railway: Settings → Variables → ELEVENLABS_API_KEY"); continue; }
+          if (!process.env.ELEVENLABS_VOICE_ID) { await send("⚠️ ELEVENLABS_VOICE_ID env var not set.\n1. Clone your voice on elevenlabs.io (Voice Lab → Instant Voice Clone)\n2. Copy the Voice ID from the voice you created\n3. Add ELEVENLABS_VOICE_ID env var on Railway"); continue; }
+          if (sub === "on" || sub === "auto") { settings.voiceReplyMode = "auto"; settings.voiceCloneEnabled = true; writeJSON("settings.json", settings); await send("🎤 voice replies ON — every AI reply (≤300 chars) will be sent as a voice note in your cloned voice"); }
+          else if (sub === "off") { settings.voiceReplyMode = "off"; writeJSON("settings.json", settings); await send("🔴 voice replies OFF — back to text"); }
+          else if (sub === "test") {
+            const testText = args.slice(1).join(" ") || "yo this is teddy, voice clone working sharp sharp";
+            await send("🎤 testing voice synth...");
+            const audio = await synthesizeVoice(testText);
+            if (!audio) { await send("❌ ElevenLabs synth failed — check key/voice ID/quota"); continue; }
+            try { await sock.sendMessage(from, { audio, mimetype: "audio/mpeg", ptt: true }); }
+            catch (e) { await send("❌ send failed: " + e.message); }
+          }
+          else await send(`🎤 voice clone (ElevenLabs)\nstatus: ${settings.voiceReplyMode === "auto" ? "🟢 auto (every reply as voice)" : "🔴 off"}\nkey: ${process.env.ELEVENLABS_API_KEY?"✅":"❌"} | voice id: ${process.env.ELEVENLABS_VOICE_ID?"✅":"❌"}\n\n.voice on    — every AI reply becomes a voice note\n.voice off   — back to text\n.voice test [text] — test the clone now`);
+          continue;
+        }
         if (cmd === "pay") {
           if (!senderIsOwner) { await send("owner only."); continue; }
           if (!settings.paymentsEnabled || (!process.env.PAYSTACK_SECRET && !process.env.FLUTTERWAVE_SECRET)) {
@@ -1388,7 +1452,7 @@ async function connectToWhatsApp() {
           continue;
         }
         if (cmd === "bigshot" || cmd === "features") {
-          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .pay`);
+          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .pay`);
           continue;
         }
 
@@ -1476,8 +1540,22 @@ async function connectToWhatsApp() {
           // Small spacing so the disclaimer + reply don't merge in WhatsApp
           await new Promise(r => setTimeout(r, 800));
         }
-        await send(reply);
-        logTag("REPLIED: " + reply.slice(0, 40));
+        // ── Voice reply mode: synth via ElevenLabs and send as voice note ──
+        let sentAsVoice = false;
+        if (settings.voiceCloneEnabled && settings.voiceReplyMode === "auto" && reply.length <= 300) {
+          const audio = await synthesizeVoice(reply);
+          if (audio) {
+            try {
+              await sock.sendMessage(from, { audio, mimetype: "audio/mpeg", ptt: true });
+              sentAsVoice = true;
+              logTag("REPLIED (voice): " + reply.slice(0, 40));
+            } catch (e) { logTag("voice_send_err:" + e.message.slice(0,30)); }
+          }
+        }
+        if (!sentAsVoice) {
+          await send(reply);
+          logTag("REPLIED: " + reply.slice(0, 40));
+        }
         // Async fact extraction — fire-and-forget, builds long-term memory
         if (text && text.length > 15) {
           const recentTexts = (convHistory[from] || []).filter(m => m.role === "user").map(m => m.content);
