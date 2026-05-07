@@ -545,7 +545,9 @@ async function connectToWhatsApp() {
     version, auth: state,
     printQRInTerminal: !usingPairingCode,
     logger: pino({ level: "silent" }),
-    browser: Browsers.baileys("Desktop"),
+    // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
+    // Browsers.baileys() is rejected by WA when pairing — use macOS Safari instead.
+    browser: usingPairingCode ? Browsers.macOS("Safari") : Browsers.macOS("Desktop"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
@@ -2085,30 +2087,6 @@ setInterval(async () => {
 }, 25 * 1000);
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
-// Pairing code endpoint — easier than QR for users who can't scan
-// Accepts BOTH: GET ?number=... (URL bar)  AND  POST {phone:"..."} (dashboard UI)
-async function handlePair(req, res) {
-  const raw = req.body?.phone || req.body?.number || req.query?.number || req.query?.phone || "";
-  const phone = String(raw).replace(/\D/g, "");
-  if (!phone || phone.length < 10) return res.status(400).json({ error: "send your number with country code, digits only (e.g. 2349132883869)" });
-  if (isConnected) return res.status(400).json({ error: "already connected — go to dashboard and Logout first if you want to re-pair" });
-  if (!sock) return res.status(503).json({ error: "socket not ready, wait 10 seconds and try again" });
-  try {
-    // Tiny delay so Baileys is fully initialized
-    await new Promise(r => setTimeout(r, 500));
-    const code = await sock.requestPairingCode(phone);
-    // Format as XXXX-XXXX for readability if it's 8 chars
-    const pretty = code && code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
-    console.log(`[MFG_bot] Pairing code generated for ${phone}: ${pretty}`);
-    res.json({ ok: true, phone, code: pretty, raw: code, instructions: "open WhatsApp → Settings → Linked Devices → Link a device → Link with phone number → enter this code" });
-  } catch (e) {
-    console.log(`[MFG_bot] Pair code failed for ${phone}: ${e.message}`);
-    res.status(500).json({ error: e.message + " — try again in a few seconds, the bot may still be starting" });
-  }
-}
-app.get("/api/pair", handlePair);
-app.post("/api/pair", handlePair);
-
 app.get("/api/status", (req, res) => res.json({
   connected: isConnected,
   hasQr,
@@ -2177,23 +2155,23 @@ app.get("/api/qr", (req, res) =>
 );
 
 // Pairing code — restarts the socket in phone-pairing mode (no QR conflict)
-app.post("/api/pair", async (req, res) => {
-  const { phone } = req.body;
-  if (!phone) return res.status(400).json({ error: "missing phone number" });
-  if (isConnected) return res.status(400).json({ error: "already connected" });
-
-  const clean = phone.replace(/[^0-9]/g, "");
-  if (!clean) return res.status(400).json({ error: "invalid phone number" });
+// Accepts: POST {phone}  OR  GET ?number=...  OR  GET ?phone=...
+async function handlePair(req, res) {
+  const raw = req.body?.phone || req.body?.number || req.query?.phone || req.query?.number || "";
+  const clean = String(raw).replace(/[^0-9]/g, "");
+  if (!clean || clean.length < 10) return res.status(400).json({ error: "send your number with country code, digits only (e.g. 2349132883869)" });
+  if (isConnected) return res.status(400).json({ error: "already connected — logout first to re-pair" });
 
   // Store the phone so the next connectToWhatsApp() uses pairing mode
   pendingPairPhone = clean;
   hasQr = false; currentQr = null;
+  console.log(`[MFG_bot] /api/pair — restarting socket in pairing mode for ${clean}`);
 
   // Create a Promise that resolves when the pairing code is ready (or times out)
   const codePromise = new Promise((resolve) => {
     pairCodeResolve = resolve;
     setTimeout(() => {
-      if (pairCodeResolve) { pairCodeResolve({ success: false, error: "timeout — make sure bot is not already connected" }); pairCodeResolve = null; }
+      if (pairCodeResolve) { pairCodeResolve({ success: false, error: "timeout — try again" }); pairCodeResolve = null; }
     }, 30000);
   });
 
@@ -2205,9 +2183,15 @@ app.post("/api/pair", async (req, res) => {
   connectToWhatsApp();
 
   const result = await codePromise;
-  if (result.success) return res.json({ success: true, code: result.code });
+  if (result.success) {
+    const c = result.code;
+    const pretty = c && c.length === 8 ? `${c.slice(0,4)}-${c.slice(4)}` : c;
+    return res.json({ success: true, ok: true, code: pretty, raw: c, instructions: "WhatsApp → Settings → Linked Devices → Link a device → Link with phone number → enter this code (valid ~60s)" });
+  }
   return res.status(500).json({ error: result.error });
-});
+}
+app.post("/api/pair", handlePair);
+app.get("/api/pair", handlePair);
 
 app.get("/api/settings", (req, res) => res.json(settings));
 app.post("/api/settings", (req, res) => {
