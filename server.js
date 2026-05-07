@@ -108,6 +108,7 @@ let userData = readJSON("users.json", {});
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
+let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let allChats = [];
 let recentMsgLog = [];
 let lastGroqError = null;
@@ -583,6 +584,7 @@ async function connectToWhatsApp() {
     if (qr) { currentQr = qr; hasQr = true; isConnected = false; console.log("[MFG_bot] QR Generated"); }
     if (connection === "open") {
       isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
+      hasEverConnected = true;
       console.log("[MFG_bot] Connected to WhatsApp");
       // Greet the owner on every fresh connection
       setTimeout(async () => {
@@ -598,15 +600,30 @@ async function connectToWhatsApp() {
       const err = lastDisconnect?.error;
       const code = err?.output?.statusCode;
       const reason = err?.message || err?.toString() || "unknown";
-      const shouldReconnect = code !== DisconnectReason.loggedOut;
-      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reason: ${reason}. Reconnect: ${shouldReconnect}`);
-      if (code === DisconnectReason.loggedOut) {
-        fs.rmSync(path.join(__dirname, "auth_info_baileys"), { recursive: true, force: true });
+
+      // CRITICAL: Baileys 6.7.x sends 401/loggedOut AS PART OF the pair-success
+      // handshake (right after the pairing code is accepted). If we treat that
+      // as a real logout and wipe creds, the just-paired session is destroyed
+      // and the bot bounces back to QR mode. Only treat as real logout if we've
+      // ever actually been "open" before.
+      const isPostPairRestart = !hasEverConnected;
+      const isRealLogout = code === DisconnectReason.loggedOut && hasEverConnected;
+      const shouldReconnect = code !== DisconnectReason.loggedOut || isPostPairRestart;
+      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reason: ${reason}. Reconnect: ${shouldReconnect}. PostPairRestart: ${isPostPairRestart}`);
+
+      if (isRealLogout) {
+        const wipePath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
+        try { fs.rmSync(wipePath, { recursive: true, force: true }); console.log(`[MFG_bot] Real logout — wiped ${wipePath}`); }
+        catch (e) { console.log(`[MFG_bot] auth wipe warn: ${e.message}`); }
       }
       if (shouldReconnect) {
         reconnectCount++;
-        const delay = Math.min(reconnectCount * 8000, 60000);
-        console.log(`[MFG_bot] Reconnecting in ${delay/1000}s (attempt ${reconnectCount})...`);
+        // 515 = "restart required" (normal post-pair) → reconnect FAST
+        // post-pair-restart (any code, no prior open) → reconnect FAST so creds get used
+        // otherwise standard backoff
+        const fastReconnect = code === 515 || isPostPairRestart;
+        const delay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
+        console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
         setTimeout(connectToWhatsApp, delay);
       }
     }
