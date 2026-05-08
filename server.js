@@ -111,6 +111,15 @@ let reconnectCount = 0, startTime = Date.now();
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
 let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
+// ── DEDUP + STALENESS GUARDS ─────────────────────────────────────────────────
+// processedMsgIds: prevents the bot from acting on the same message twice when
+// Baileys re-delivers it after a Bad MAC retry, reconnect, or WA Business sync.
+// staleness filter: drops messages older than 90s (buffered from before the
+// disconnect window) so old `.vv` / `.ai` / etc commands don't re-execute on
+// reconnect, which was causing the bot to "resend messages back to senders".
+const processedMsgIds = new Set();
+const PROCESSED_MAX = 1000;
+const STALE_MSG_MS = 90 * 1000;
 let allChats = [];
 let recentMsgLog = [];
 let lastGroqError = null;
@@ -678,6 +687,36 @@ async function connectToWhatsApp() {
     if (type !== "notify") return;
     for (const msg of messages) {
       if (!msg.message) continue;
+
+      // ── DEDUP: skip if we've already processed this message id ──
+      // Fixes the "bot resends same message back to senders" bug caused by
+      // Baileys re-delivering messages after Bad MAC / reconnect / WA sync.
+      const msgId = msg.key.id;
+      if (msgId) {
+        if (processedMsgIds.has(msgId)) {
+          console.log(`[MFG_bot] dedup: skip duplicate ${msgId.slice(-12)}`);
+          continue;
+        }
+        processedMsgIds.add(msgId);
+        if (processedMsgIds.size > PROCESSED_MAX) {
+          const keep = [...processedMsgIds].slice(-Math.floor(PROCESSED_MAX / 2));
+          processedMsgIds.clear();
+          for (const id of keep) processedMsgIds.add(id);
+        }
+      }
+
+      // ── STALENESS: drop messages older than 90s ──
+      // Prevents old commands from re-executing when Baileys flushes a backlog
+      // after reconnect (e.g. an old `.vv` reveals a view-once unprompted).
+      const msgTimeSec = Number(msg.messageTimestamp || 0);
+      if (msgTimeSec > 0) {
+        const ageMs = Date.now() - msgTimeSec * 1000;
+        if (ageMs > STALE_MSG_MS) {
+          console.log(`[MFG_bot] skip stale msg (${Math.round(ageMs/1000)}s old) from ${(msg.key.remoteJid||'?').slice(-15)}`);
+          continue;
+        }
+      }
+
       const isFromMe = msg.key.fromMe;
       messageCount++;
       const from = msg.key.remoteJid;
