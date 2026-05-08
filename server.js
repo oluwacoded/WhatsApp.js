@@ -685,8 +685,9 @@ async function connectToWhatsApp() {
       return undefined; // tell Baileys to fetch fresh
     },
 
-    // ── shouldIgnoreJid: drop status broadcasts at the source ──
-    shouldIgnoreJid: (jid) => jid === "status@broadcast" || jid?.endsWith("@newsletter"),
+    // ── shouldIgnoreJid: drop newsletter junk only ──
+    // We KEEP status@broadcast so .sreact (status auto-react) can see + react.
+    shouldIgnoreJid: (jid) => jid?.endsWith("@newsletter"),
   });
 
   // Populate the group cache when Baileys does fetch metadata
@@ -813,6 +814,27 @@ async function connectToWhatsApp() {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
+      // ── STATUS AUTO-REACT: if .sreact is on and a contact posted a status,
+      //    fire the configured emoji reaction at it. Runs BEFORE other gates
+      //    because status posts are stub-y and would otherwise be filtered.
+      if (
+        settings.statusReactEmoji &&
+        messages[0]?.key?.remoteJid === "status@broadcast" &&
+        msg.key?.remoteJid === "status@broadcast" &&
+        !msg.key.fromMe &&
+        msg.message
+      ) {
+        try {
+          await sock.sendMessage("status@broadcast", {
+            react: { text: settings.statusReactEmoji, key: msg.key }
+          }, { statusJidList: [msg.key.participant].filter(Boolean) });
+          console.log(`[MFG_bot] status auto-react ${settings.statusReactEmoji} → ${(msg.key.participant||'?').slice(-15)}`);
+        } catch (e) {
+          console.log(`[MFG_bot] status react fail: ${e.message}`);
+        }
+        continue; // don't run other handlers on status posts
+      }
+
       // ── BAD-MAC RECOVERY: detect undecryptable messages and wipe that
       //    peer's signal session so it auto-renegotiates on next message.
       //    Baileys surfaces decryption failures as CIPHERTEXT stub upserts.
