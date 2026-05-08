@@ -10,7 +10,9 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   Browsers,
-  downloadMediaMessage
+  downloadMediaMessage,
+  makeCacheableSignalKeyStore,
+  proto
 } = require("baileys");
 const express = require("express");
 const cors = require("cors");
@@ -111,15 +113,52 @@ let reconnectCount = 0, startTime = Date.now();
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
 let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
-// ── DEDUP + STALENESS GUARDS ─────────────────────────────────────────────────
-// processedMsgIds: prevents the bot from acting on the same message twice when
-// Baileys re-delivers it after a Bad MAC retry, reconnect, or WA Business sync.
-// staleness filter: drops messages older than 90s (buffered from before the
-// disconnect window) so old `.vv` / `.ai` / etc commands don't re-execute on
-// reconnect, which was causing the bot to "resend messages back to senders".
-const processedMsgIds = new Set();
-const PROCESSED_MAX = 1000;
-const STALE_MSG_MS = 90 * 1000;
+
+// ── PROPER BAILEYS RETRY STORE ───────────────────────────────────────────────
+// Baileys calls getMessage(key) when a peer requests a retry (their session got
+// out of sync). If we return empty, the peer's session corrupts → Bad MAC →
+// reconnect storm → buffered messages get re-delivered → bot resends. The fix
+// is to actually remember messages we sent so we can answer retries properly.
+// Persisted to disk so it survives restarts (the most common cause of session
+// drift is a redeploy that wipes in-memory state mid-conversation).
+const MSG_STORE_PATH = path.join(__dirname, "data", "msg_store.json");
+const MSG_STORE_MAX = 2000; // ~last 2000 messages, plenty for retry windows
+function loadMsgStore() {
+  try {
+    if (!fs.existsSync(MSG_STORE_PATH)) return new Map();
+    const raw = JSON.parse(fs.readFileSync(MSG_STORE_PATH, "utf8"));
+    return new Map(Object.entries(raw));
+  } catch { return new Map(); }
+}
+let messageStore = loadMsgStore();
+let msgStoreDirty = false;
+function msgStoreKey(jid, id) { return `${jid}::${id}`; }
+function rememberMessage(jid, id, message) {
+  if (!jid || !id || !message) return;
+  messageStore.set(msgStoreKey(jid, id), message);
+  // Trim oldest when we exceed the cap (Map preserves insertion order)
+  if (messageStore.size > MSG_STORE_MAX) {
+    const drop = messageStore.size - MSG_STORE_MAX;
+    const it = messageStore.keys();
+    for (let i = 0; i < drop; i++) messageStore.delete(it.next().value);
+  }
+  msgStoreDirty = true;
+}
+// Flush to disk every 10s if dirty — avoids hammering the FS per-message
+setInterval(() => {
+  if (!msgStoreDirty) return;
+  try {
+    if (!fs.existsSync(path.dirname(MSG_STORE_PATH))) fs.mkdirSync(path.dirname(MSG_STORE_PATH), { recursive: true });
+    fs.writeFileSync(MSG_STORE_PATH, JSON.stringify(Object.fromEntries(messageStore)));
+    msgStoreDirty = false;
+  } catch (e) { /* ignore disk errors */ }
+}, 10000);
+
+// ── GROUP METADATA CACHE ─────────────────────────────────────────────────────
+// Baileys re-fetches group metadata on every group message unless we cache it.
+// Cache misses also contribute to retry storms in active groups.
+const groupMetadataCache = new Map(); // jid -> { metadata, ts }
+const GROUP_META_TTL = 5 * 60 * 1000;
 let allChats = [];
 let recentMsgLog = [];
 let lastGroqError = null;
@@ -553,23 +592,65 @@ async function connectToWhatsApp() {
 
   const usingPairingCode = !!pendingPairPhone;
 
+  // Silent logger for the signal key store (it logs every key op at trace level)
+  const signalLogger = pino({ level: "silent" });
+
   sock = makeWASocket({
-    version, auth: state,
-    // printQRInTerminal removed (deprecated in baileys 6.7.21+); we render QR via qr event instead
+    version,
+    // ── PROPER AUTH STATE ──
+    // Wrap the file-backed key store in Baileys' cacheable wrapper. This keeps
+    // signal keys in memory between writes, which is what fixes the "Bad MAC"
+    // storm — when keys are re-read from disk on every decrypt, races between
+    // creds.update writes and concurrent decrypts cause libsignal to see stale
+    // session state and reject the MAC.
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, signalLogger),
+    },
     logger: pino({ level: "silent" }),
     // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
-    // Browsers.baileys() and macOS variants are rejected by WA pairing flow.
-    // Ubuntu Chrome is the confirmed-working fingerprint across Baileys 6.7.x.
     browser: usingPairingCode ? Browsers.ubuntu("Chrome") : Browsers.macOS("Desktop"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
-    retryRequestDelayMs: 2000,
-    maxMsgRetryCount: 3,
+    retryRequestDelayMs: 250,    // tight retry — answer peer retry requests fast
+    maxMsgRetryCount: 5,
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
     markOnlineOnConnect: false,
-    getMessage: async () => ({ conversation: "" }),
+    emitOwnEvents: false,        // don't fire events for our own sends (cuts feedback noise)
+    fireInitQueries: true,
+    transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
+
+    // ── REAL getMessage: answers peer retry requests with the actual content ──
+    // This is THE fix for Bad MAC. When a peer's session falls out of sync they
+    // ask "retry msg X" — Baileys calls this to re-encrypt and re-send. Empty
+    // returns here are exactly why the session corruption was cascading.
+    getMessage: async (key) => {
+      const stored = messageStore.get(msgStoreKey(key.remoteJid, key.id));
+      if (stored) return stored;
+      return proto.Message.fromObject({}); // empty proto, not a fake conversation
+    },
+
+    // ── cachedGroupMetadata: stops Baileys re-querying group info on every msg ──
+    cachedGroupMetadata: async (jid) => {
+      const hit = groupMetadataCache.get(jid);
+      if (hit && Date.now() - hit.ts < GROUP_META_TTL) return hit.metadata;
+      return undefined; // tell Baileys to fetch fresh
+    },
+
+    // ── shouldIgnoreJid: drop status broadcasts at the source ──
+    shouldIgnoreJid: (jid) => jid === "status@broadcast" || jid?.endsWith("@newsletter"),
+  });
+
+  // Populate the group cache when Baileys does fetch metadata
+  sock.ev.on("groups.update", (updates) => {
+    for (const u of updates) {
+      if (u.id) {
+        const cur = groupMetadataCache.get(u.id);
+        groupMetadataCache.set(u.id, { metadata: { ...(cur?.metadata || {}), ...u }, ts: Date.now() });
+      }
+    }
   });
 
   // ─── Pairing Code Request ─────────────────────────────────────────────────
@@ -688,33 +769,11 @@ async function connectToWhatsApp() {
     for (const msg of messages) {
       if (!msg.message) continue;
 
-      // ── DEDUP: skip if we've already processed this message id ──
-      // Fixes the "bot resends same message back to senders" bug caused by
-      // Baileys re-delivering messages after Bad MAC / reconnect / WA sync.
-      const msgId = msg.key.id;
-      if (msgId) {
-        if (processedMsgIds.has(msgId)) {
-          console.log(`[MFG_bot] dedup: skip duplicate ${msgId.slice(-12)}`);
-          continue;
-        }
-        processedMsgIds.add(msgId);
-        if (processedMsgIds.size > PROCESSED_MAX) {
-          const keep = [...processedMsgIds].slice(-Math.floor(PROCESSED_MAX / 2));
-          processedMsgIds.clear();
-          for (const id of keep) processedMsgIds.add(id);
-        }
-      }
-
-      // ── STALENESS: drop messages older than 90s ──
-      // Prevents old commands from re-executing when Baileys flushes a backlog
-      // after reconnect (e.g. an old `.vv` reveals a view-once unprompted).
-      const msgTimeSec = Number(msg.messageTimestamp || 0);
-      if (msgTimeSec > 0) {
-        const ageMs = Date.now() - msgTimeSec * 1000;
-        if (ageMs > STALE_MSG_MS) {
-          console.log(`[MFG_bot] skip stale msg (${Math.round(ageMs/1000)}s old) from ${(msg.key.remoteJid||'?').slice(-15)}`);
-          continue;
-        }
+      // ── Remember every message we see (incoming AND outgoing) so getMessage
+      //    can answer retry requests from peers with the real content. This is
+      //    what permanently breaks the Bad MAC → reconnect → resend cycle.
+      if (msg.key.id && msg.key.remoteJid) {
+        rememberMessage(msg.key.remoteJid, msg.key.id, msg.message);
       }
 
       const isFromMe = msg.key.fromMe;
@@ -745,7 +804,13 @@ async function connectToWhatsApp() {
 
       const send = async (t) => {
         const m = await sock.sendMessage(from, { text: t });
-        if (m?.key) lastBotMsgByChat.set(from, m.key);
+        if (m?.key) {
+          lastBotMsgByChat.set(from, m.key);
+          // Store the message we just sent so getMessage can answer if the
+          // peer asks for a retry (since emitOwnEvents:false means we won't
+          // see this through messages.upsert).
+          if (m.key.id) rememberMessage(from, m.key.id, m.message || { conversation: t });
+        }
         return m;
       };
       // Owner detection — works in DMs AND groups regardless of @s.whatsapp.net vs @lid JID format
