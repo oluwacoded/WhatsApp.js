@@ -12,6 +12,7 @@ const {
   Browsers,
   downloadMediaMessage,
   makeCacheableSignalKeyStore,
+  WAMessageStubType,
   proto
 } = require("baileys");
 const express = require("express");
@@ -159,6 +160,51 @@ setInterval(() => {
 // Cache misses also contribute to retry storms in active groups.
 const groupMetadataCache = new Map(); // jid -> { metadata, ts }
 const GROUP_META_TTL = 5 * 60 * 1000;
+
+// ── MESSAGE AGE SEMANTICS ────────────────────────────────────────────────────
+// WhatsApp re-delivers unacked messages whenever the bot reconnects. Side-
+// effecting actions (commands like .sreact, AI replies, proactive sends) must
+// only fire for FRESH messages — otherwise a Railway restart at 7am replays
+// every command/AI-reply that happened overnight. This is the protocol-correct
+// behaviour: the WhatsApp client itself doesn't pop notifications for ancient
+// re-delivered messages either.
+const MAX_ACTIONABLE_MSG_AGE_MS = 60 * 1000;
+function msgAgeMs(msg) {
+  const t = Number(msg?.messageTimestamp || 0);
+  return t > 0 ? Date.now() - t * 1000 : 0;
+}
+
+// ── BAD-MAC SESSION AUTO-RECOVERY ────────────────────────────────────────────
+// When libsignal can't decrypt a peer's message (Bad MAC), Baileys surfaces it
+// as a CIPHERTEXT-stub upsert. The protocol-correct response is to wipe THAT
+// peer's session so the next message triggers a fresh handshake — no manual
+// re-pair required. Threshold avoids nuking a session on a single hiccup.
+const badMacCount = new Map(); // jid -> count
+const BAD_MAC_THRESHOLD = 3;
+const wipedSessions = new Set(); // jids we've already wiped this process
+function sessionFilesForJid(authPath, jid) {
+  // Baileys file naming: session-<jid>.json (with various jid normalisations)
+  try {
+    const all = fs.readdirSync(authPath);
+    const tag = (jid || "").split("@")[0].split(":")[0];
+    if (!tag) return [];
+    return all
+      .filter(f => f.startsWith("session-") && f.includes(tag))
+      .map(f => path.join(authPath, f));
+  } catch { return []; }
+}
+function wipePeerSession(jid) {
+  if (!jid || wipedSessions.has(jid)) return;
+  const authPath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
+  const files = sessionFilesForJid(authPath, jid);
+  let removed = 0;
+  for (const f of files) {
+    try { fs.unlinkSync(f); removed++; } catch {}
+  }
+  wipedSessions.add(jid);
+  badMacCount.delete(jid);
+  console.log(`[MFG_bot] BAD-MAC RECOVERY: wiped ${removed} session file(s) for ${jid.slice(-20)} — next msg will renegotiate fresh session`);
+}
 let allChats = [];
 let recentMsgLog = [];
 let lastGroqError = null;
@@ -767,6 +813,17 @@ async function connectToWhatsApp() {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
     for (const msg of messages) {
+      // ── BAD-MAC RECOVERY: detect undecryptable messages and wipe that
+      //    peer's signal session so it auto-renegotiates on next message.
+      //    Baileys surfaces decryption failures as CIPHERTEXT stub upserts.
+      if (msg.messageStubType === WAMessageStubType.CIPHERTEXT) {
+        const peer = msg.key.participant || msg.key.remoteJid;
+        const n = (badMacCount.get(peer) || 0) + 1;
+        badMacCount.set(peer, n);
+        console.log(`[MFG_bot] CIPHERTEXT/Bad-MAC #${n} from ${(peer||'?').slice(-20)}`);
+        if (n >= BAD_MAC_THRESHOLD) wipePeerSession(peer);
+        continue;
+      }
       if (!msg.message) continue;
 
       // ── Remember every message we see (incoming AND outgoing) so getMessage
@@ -774,6 +831,17 @@ async function connectToWhatsApp() {
       //    what permanently breaks the Bad MAC → reconnect → resend cycle.
       if (msg.key.id && msg.key.remoteJid) {
         rememberMessage(msg.key.remoteJid, msg.key.id, msg.message);
+      }
+
+      // ── MESSAGE-AGE GUARD: stop side effects on re-delivered backlog ──
+      // We still let the message flow through (so it gets stored for context),
+      // but we mark it as "too old to act on". This is what stops the .sreact
+      // / .online / .vv replay storm after a Railway restart re-delivers a
+      // backlog of unacked messages from hours ago.
+      const ageMs = msgAgeMs(msg);
+      const isStale = ageMs > MAX_ACTIONABLE_MSG_AGE_MS;
+      if (isStale) {
+        console.log(`[MFG_bot] stale msg (${Math.round(ageMs/1000)}s old) from ${(msg.key.remoteJid||'?').slice(-15)} — no action, context only`);
       }
 
       const isFromMe = msg.key.fromMe;
@@ -1037,6 +1105,9 @@ async function connectToWhatsApp() {
 
       // ── Commands ────────────────────────────────────────────────────────
       if (text.startsWith(pfx)) {
+        // Stale command guard: never re-execute a command from a re-delivered
+        // backlog. This is the fix for the .sreact / .online replay storm.
+        if (isStale) { logTag(`skip:stale_cmd_${Math.round(ageMs/1000)}s`); continue; }
         const [rawCmd, ...args] = text.slice(pfx.length).trim().split(/\s+/);
         const cmd = rawCmd.toLowerCase();
         trackCommand(cmd);
@@ -2209,6 +2280,8 @@ async function connectToWhatsApp() {
       // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
       if (!settings.aiEnabled) { logTag("skip:ai_disabled"); continue; }
       if (isFromMe) { logTag("skip:fromMe"); continue; }
+      // Stale guard: don't AI-reply to messages from a re-delivered backlog
+      if (isStale) { logTag(`skip:stale_${Math.round(ageMs/1000)}s`); continue; }
       if (text && text.startsWith(pfx)) { logTag("skip:command"); continue; }
       if (from?.endsWith("@g.us")) { logTag("skip:group"); continue; }
       if (from?.endsWith("@broadcast")) { logTag("skip:broadcast"); continue; }
