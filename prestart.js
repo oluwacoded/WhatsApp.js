@@ -95,9 +95,11 @@ const lastProactiveCounts = new Map();`);
 let lastConnectedAt = 0;`);
   }
 
-  // 8) Update connection.open handler to set lastConnectedAt = Date.now()
+  // 8) Update connection.open handler to set lastConnectedAt = Date.now() and notify owner with linked user display name
   src = src.replace(/if \(connection === "open"\) \{[\s\S]*?console.log\("\[MFG_bot\] Connected to WhatsApp"\);/, (m) => {
-    return m + '\n      lastConnectedAt = Date.now();';
+    // augment the greeting to include linked user display and notify owner explicitly
+    const add = `\n      lastConnectedAt = Date.now();\n      // Notify owner with linked user display name (if available)\n      try {\n        const linkedName = sock?.user?.name || sock?.user?.notify || sock?.user?.pushname || sock?.user?.id || 'unknown';\n        await sock.sendMessage(OWNER_JID, { text: `🤖 thug v1.0 connected ✅\n\nlinked user: ${linkedName}\njid: ${sock?.user?.id || 'unknown'}\n\nI'll inform you when I contact my maker or when someone uses .menu` });\n        // Also send a short greeting previously present (kept for compatibility)\n      } catch (e) { console.log('[MFG_bot] Could not message owner after connect:', e.message); }`;
+    return m + add;
   });
 
   // 9) Ensure /api/qr has CORS header — replace its handler
@@ -114,6 +116,23 @@ let lastConnectedAt = 0;`);
     // place near end before Start or append
     src = src.replace(/\/\/ ─── Start ────────────────────────────────────────────────────────────────────[\s\S]*/, (m) => regenCode + '\n' + m);
   }
+
+  // 11) Enable autoReadStatus by default in SETTINGS_DEFAULTS (replace false -> true)
+  src = src.replace(/autoReadStatus: false,/, 'autoReadStatus: true,');
+
+  // 12) Inject .restart owner-only command (restart socket) inside commands section
+  // Find a stable anchor: the .bot command handling exists earlier, we'll insert after .bot block by searching for `if (cmd === "bot")` block end and inserting restart after it.
+  src = src.replace(/(if \(cmd === "bot"\) \{[\s\S]*?continue;\n\s*\})/, (m) => {
+    const restartCmd = `\n$1\n\n        // .restart — owner only: gracefully restart the WhatsApp socket\n        if (cmd === "restart") {\n          if (!senderIsOwner) { await send("owner only."); continue; }\n          try {\n            await send("restarting socket... goodbye");\n            if (sock) { try { sock.ev.removeAllListeners(); sock.end(new Error('owner restart')); } catch (e) {} sock = null; }\n            setTimeout(connectToWhatsApp, 1500);\n          } catch (e) { await send('restart failed: ' + e.message); }\n          continue;\n        }`;
+    return restartCmd;
+  });
+
+  // 13) Modify the big commands list handler to special-case .menu: send concise menu + notify owner
+  src = src.replace(/if \(cmd === "command" \|\| cmd === "commands" \|\| cmd === "list" \|\| cmd === "work" \|\| cmd === "teddy" \|\| cmd === "menu" \|\| cmd === "help" \|\| cmd === "allcmd"\) \{[\s\S]*?await send\(part1\);[\s\S]*?await send\(part2\);[\s\S]*?continue;\n\s*\}/, (m) => {
+    const menuHandler = `if (cmd === "menu") {\n          // concise menu for casual users — also notify owner that this user requested menu\n          try {\n            const userName = msg.pushName || from || 'there';\n            await send(`Hello ${userName} 👋\n\nI am thug v1.0 — teddymfg's bot.\nMaker: +${OWNER_NUMBER} \nType .list to see all commands or .help`);\n            // notify owner\n            try { await sock.sendMessage(OWNER_JID, { text: `🔔 User ${userName} (${from}) requested the .menu at ${new Date().toLocaleString()}` }); } catch (e) {}\n          } catch (e) { /* ignore */ }\n          continue;\n        }\n\n        // Full command list fallback`;
+    // Replace the first `if (...) {` with our new block inserted before the original full dump
+    return m.replace(/if \(cmd === "command"/, '/* FALLTHROUGH TO FULL COMMANDS */\n        ' + menuHandler + '\n        if (cmd === "command"');
+  });
 
   return src;
 }
