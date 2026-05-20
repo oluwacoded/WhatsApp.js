@@ -2781,6 +2781,79 @@ app.post("/api/logout", (req, res) => {
   }
 });
 
+// ─── Bots Registry API (replaces Netlify Functions) ─────────────────────────
+function readBots() { return readJSON("bots.json", []); }
+function writeBots(bots) { writeJSON("bots.json", bots); }
+
+function validateBotInput(input, partial = false) {
+  const name = typeof input.name === "string" ? input.name.trim().slice(0, 80) : "";
+  const url  = typeof input.url  === "string" ? input.url.trim().slice(0, 500) : "";
+  const status = typeof input.status === "string" ? input.status.trim() : "idle";
+  const notes  = input.notes === undefined ? undefined : String(input.notes).trim().slice(0, 500);
+  const allowed = ["idle", "online", "maintenance"];
+
+  if (!partial || input.name !== undefined) {
+    if (!name) return { error: "Bot name is required." };
+  }
+  if (!partial || input.url !== undefined) {
+    try {
+      const p = new URL(url);
+      if (!["http:", "https:"].includes(p.protocol)) throw new Error("bad protocol");
+    } catch { return { error: "Bot URL must be a valid http or https URL." }; }
+  }
+  if (input.status !== undefined && !allowed.includes(status)) {
+    return { error: "Status must be idle, online, or maintenance." };
+  }
+  return { value: { name, url, status, notes } };
+}
+
+app.get("/api/bots", (req, res) => {
+  res.json({ bots: readBots() });
+});
+
+app.post("/api/bots", (req, res) => {
+  const result = validateBotInput(req.body || {});
+  if (result.error) return res.status(400).json({ error: result.error });
+  const bot = {
+    id: require("crypto").randomUUID(),
+    name: result.value.name,
+    url:  result.value.url,
+    status: result.value.status || "idle",
+    notes: result.value.notes ?? "",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  const bots = [bot, ...readBots()];
+  writeBots(bots);
+  res.status(201).json({ bot });
+});
+
+app.patch("/api/bots/:id", (req, res) => {
+  const bots = readBots();
+  const idx = bots.findIndex(b => b.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "Bot not found." });
+  const result = validateBotInput(req.body || {}, true);
+  if (result.error) return res.status(400).json({ error: result.error });
+  const current = bots[idx];
+  const next = {
+    ...current,
+    name:   result.value.name   || current.name,
+    url:    result.value.url    || current.url,
+    status: result.value.status || current.status,
+    notes:  result.value.notes !== undefined ? result.value.notes : current.notes,
+    updated_at: new Date().toISOString(),
+  };
+  bots[idx] = next;
+  writeBots(bots);
+  res.json({ bot: next });
+});
+
+app.delete("/api/bots/:id", (req, res) => {
+  const bots = readBots().filter(b => b.id !== req.params.id);
+  writeBots(bots);
+  res.status(204).end();
+});
+
 // Serve React for all non-API routes
 app.get("*", (req, res) => {
   const indexPath = path.join(__dirname, "client/dist/index.html");
