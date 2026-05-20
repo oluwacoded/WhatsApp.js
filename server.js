@@ -52,7 +52,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "client/dist")));
 
 // ─── Persistence ────────────────────────────────────────────────────────────
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
 function readJSON(file, def) {
@@ -88,7 +88,6 @@ const SETTINGS_DEFAULTS = {
   birthdayWishes: true,         // Auto-wish birthdays mentioned in chat
   voiceCloneEnabled: false,     // Requires ELEVENLABS_API_KEY + voice ID
   voiceReplyMode: "off",        // "off" | "auto" (every reply) | "owner" (only when owner asks .voice me)
-  paymentsEnabled: false,       // Requires PAYSTACK_SECRET or FLUTTERWAVE_SECRET
   greeting: "yo. mfg_bot here.",
   systemPrompt: `You are texting AS the owner of this phone — you ARE them. Not a bot, not an assistant. Just them.
 
@@ -126,6 +125,7 @@ WHEN UNSURE: Just be short, lowercase, casual. One word answers are fine. "yo", 
 };
 // Merge file values OVER defaults — new feature flags get defaults until user changes them
 let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
+delete settings.paymentsEnabled;
 
 let tokenData = readJSON("tokenData.json", {
   validTokens: [ "a7F9kLm2Qx8P", "Zr4Tn8Vy1Bc6", "pQ5mX2sL9dKe", "H8uJ3wRt7Nz1", "yL0cV6kPq4Xm", "T9bF2nGh5Wr8", "mX7qL1zCv9Dt", "R4pNk8Jw2Ys5", "vD6tQ3mLp1Xc", "K2yW9nFr5Tb7", "cM8xQ4vL1zHp", "P5rT7nYk2Wd9", "fJ3mX8qLc6Vz", "N1wK4tRp9Ys2", "zQ7vM2xLf5Dc", "B9kT3nWy8Rp1", "gL4xQ7mVc2Dt", "W6pNz1kY5Rf8", "tX2mL9qCv4Jh", "Y8rK5nWp1Dz3", "qF7vM2xLc9Tb", "D1kY4nRp8Ws5", "mQ9xL2vTc7Fh", "R5pNz8kW1Dy4", "cX3mL7qVf2Tn", "T8rK1nWp5Dz9", "zF4vM7xLc2Tb", "B1kY9nRp4Ws8", "gQ5xL2vTc8Fh", "W7pNz1kY4Rf9", "tX8mL3qCv5Jh", "Y2rK9nWp1Dz6", "qF5vM8xLc4Tb", "D7kY1nRp9Ws2", "mQ4xL8vTc5Fh", "R1pNz7kW2Dy9", "cX5mL9qVf1Tn", "T2rK8nWp4Dz7", "zF1vM5xLc9Tb", "B8kY2nRp6Ws4", "gQ7xL1vTc5Fh", "W9pNz4kY2Rf8", "tX6mL3qCv1Jh", "Y5rK8nWp2Dz9", "qF1vM4xLc7Tb", "D9kY5nRp2Ws8", "mQ3xL7vTc1Fh", "R8pNz2kW5Dy4", "cX1mL6qV9Tn3", "T5rK2nWp8Dz1", "zF9vM3xLc7Tb", "B4kY8nRp1Ws5", "gQ2xL9vTc6Fh", "W1pNz5kY8Rf3", "tX4mL7qCv2Jh", "Y9rK1nWp6Dz5", "qF3vM8xLc2Tb", "D5kY7nRp4Ws1", "mQ1xL6vTc9Fh", "R2pNz8kW3Dy7", "cX9mL4qV1Tn5", "T7rK3nWp9Dz2", "zF2vM6xLc8Tb", "B5kY1nRp7Ws9", "gQ8xL4vTc2Fh", "W3pNz9kY1Rf6", "tX5mL2qCv8Jh", "Y1rK7nWp4Dz9", "qF6vM3xLc5Tb", "D8kY2nRp9Ws4", "mQ7xL1vTc3Fh", "R4pNz6kW8Dy2", "cX2mL9qV5Tn1", "T1rK8nWp3Dz7", "zF5vM7xLc4Tb", "B2kY9nRp6Ws1", "gQ4xL8vTc5Fh", "W6pNz1kY7Rf2", "tX9mL3qCv4Jh", "Y7rK5nWp1Dz8", "qF2vM9xLc6Tb", "D4kY7nRp3Ws5", "mQ8xL1vTc2Fh", "R9pNz5kW4Dy1", "cX6mL2qV8Tn7", "T3rK9nWp5Dz1", "zF7vM4xLc1Tb", "B1kY5nRp8Ws3", "gQ9xL2vTc4Fh", "W5pNz8kY1Rf7", "tX1mL6qCv9Jh", "Y4rK2nWp7Dz5", "qF8vM1xLc3Tb", "D2kY6nRp9Ws4", "mQ5xL7vTc1Fh", "R3pNz4kW8Dy2", "cX7mL1qV5Tn9", "T9rK4nWp2Dz6", "zF3vM8xLc5Tb", "B6kY1nRp7Ws2" ],
@@ -160,7 +160,7 @@ let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
 // is to actually remember messages we sent so we can answer retries properly.
 // Persisted to disk so it survives restarts (the most common cause of session
 // drift is a redeploy that wipes in-memory state mid-conversation).
-const MSG_STORE_PATH = path.join(__dirname, "data", "msg_store.json");
+const MSG_STORE_PATH = path.join(DATA_DIR, "msg_store.json");
 const MSG_STORE_MAX = 2000; // ~last 2000 messages, plenty for retry windows
 function loadMsgStore() {
   try {
@@ -351,17 +351,64 @@ async function searchYoutube(query) {
   } catch (e) { console.log("[MFG_bot] yt search err:", e.message); return null; }
 }
 
+function sanitizeFileName(name) {
+  return String(name || "song").replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim().slice(0, 48) || "song";
+}
+
+async function streamToBuffer(stream, maxBytes = 25 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    stream.on("data", chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        stream.destroy(new Error("audio file is too large for WhatsApp"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
+  });
+}
+
 async function downloadYoutubeAudio(url) {
   try {
     const res = await fetch("https://api-olive-five-53.vercel.app/download?url=" + encodeURIComponent(url));
     const data = await res.json();
     const audioUrl = data?.audio?.["320"] || data?.audio?.["128"];
-    if (!audioUrl) return null;
-    const audioRes = await fetch(audioUrl);
-    const arrayBuffer = await audioRes.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    if (audioUrl) {
+      const audioRes = await fetch(audioUrl);
+      const arrayBuffer = await audioRes.arrayBuffer();
+      return { buffer: Buffer.from(arrayBuffer), title: data?.title || "song", source: "api" };
+    }
   } catch (e) {
-    console.log("[MFG_bot] dl err:", e.message);
+    console.log("[MFG_bot] external dl err:", e.message);
+  }
+
+  try {
+    if (!ytdl.validateURL(url)) return null;
+    const info = await ytdl.getInfo(url, { agent: ytdlAgent });
+    const stream = ytdl.downloadFromInfo(info, {
+      agent: ytdlAgent,
+      filter: "audioonly",
+      quality: "highestaudio",
+      highWaterMark: 1 << 25
+    });
+    return { buffer: await streamToBuffer(stream), title: info?.videoDetails?.title || "song", source: "ytdl" };
+  } catch (e) {
+    console.log("[MFG_bot] ytdl err:", e.message);
+    return null;
+  }
+}
+
+async function getYoutubeInfo(url) {
+  try {
+    if (!ytdl.validateURL(url)) return null;
+    const info = await ytdl.getBasicInfo(url, { agent: ytdlAgent });
+    return info.videoDetails;
+  } catch (e) {
+    console.log("[MFG_bot] yt info err:", e.message);
     return null;
   }
 }
@@ -1170,10 +1217,10 @@ async function connectToWhatsApp() {
           const ytUrl = isUrl ? text.match(/https?:\S+/)[0] : await searchYoutube(text);
           if (!ytUrl) { await send("❌ couldn't find that song. try again with .song <name>"); continue; }
           if (!isUrl) await send("⏬ found it — downloading...");
-          const audioBuf = await downloadYoutubeAudio(ytUrl);
-          if (!audioBuf) { await send(`❌ download failed. try the link: ${ytUrl}`); continue; }
+          const audio = await downloadYoutubeAudio(ytUrl);
+          if (!audio?.buffer) { await send(`❌ download failed. try the link: ${ytUrl}`); continue; }
           try {
-            await sock.sendMessage(from, { audio: audioBuf, mimetype: "audio/mp4", fileName: `${text.slice(0,30)}.mp3` });
+            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || text)}.mp3` });
             await send("✅ enjoy 🎧");
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
@@ -2087,58 +2134,12 @@ async function connectToWhatsApp() {
           else await send(`🎤 voice clone (ElevenLabs)\nstatus: ${settings.voiceReplyMode === "auto" ? "🟢 auto (every reply as voice)" : "🔴 off"}\nkey: ${process.env.ELEVENLABS_API_KEY?"✅":"❌"} | voice id: ${process.env.ELEVENLABS_VOICE_ID?"✅":"❌"}\n\n.voice on    — every AI reply becomes a voice note\n.voice off   — back to text\n.voice test [text] — test the clone now`);
           continue;
         }
-        if (cmd === "createacct" || cmd === "pay") {
-          const userName = msg.pushName || "User";
-          const randomNIN = Array.from({length: 11}, () => Math.floor(Math.random() * 10)).join('');
-          const txRef = "tx-" + Date.now();
-          const flwSecret = "FLWSECK-14b11162ce0167093f3353be3612e2c7-19e42c2f103vt-X";
-
-          await send("Creating your bank account... please wait ⏳");
-          try {
-            const res = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
-              method: "POST",
-              headers: { 
-                "Authorization": "Bearer " + flwSecret,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                email: "user" + Date.now() + "@gmail.com",
-                is_permanent: true,
-                nin: randomNIN,
-                bvn: randomNIN,
-                tx_ref: txRef,
-                firstname: userName.split(" ")[0],
-                lastname: userName.split(" ")[1] || "Account",
-                narration: userName
-              })
-            });
-
-            const data = await res.json();
-            if (data && data.status === "success") {
-              const acct = data.data;
-              await send(`✅ Bank Account Created Successfully\n\n🏦 Bank: ${acct.bank_name}\n🔢 Account Number: ${acct.account_number}\n👤 Account Name: ${userName}\n\nUse this account to receive payments.`);
-            } else {
-              await send("❌ Failed to create bank account. " + (data.message || "Unknown error"));
-            }
-          } catch (err) {
-            console.error(err.message);
-            await send("❌ Error creating account: " + err.message);
-          }
-          continue;
-        }
-
-        if (cmd === "btc") {
-          const btcArgs = args.join(" ");
-          if (btcArgs.startsWith("send")) {
-            await send("📤 Crypto withdrawal initiated.\nStatus: Pending confirmation...\n\nNote: this is a simulated transaction.");
-          } else {
-            // Provide deposit info
-            await send("💰 Bitcoin (BTC) Deposit Info\n\nNetwork: Bitcoin (BTC)\nAddress: bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\n\nTo send out crypto, use:\n.btc send <address> <amount>");
-          }
+        if (cmd === "createacct" || cmd === "pay" || cmd === "btc") {
+          await send("that payment/crypto command has been removed. use .song, .download, .music, or .list for the active bot features.");
           continue;
         }
         if (cmd === "bigshot" || cmd === "features") {
-          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .pay .createacct .btc .download .song .vv .calc`);
+          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n🎵 Music download: 🟢\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .download .song .music .ytinfo .vv .calc`);
           continue;
         }
 
@@ -2155,6 +2156,7 @@ async function connectToWhatsApp() {
             `here are the most useful things i can do for you:\n\n` +
             `🎵 *.song <name>* — find & download any song as MP3\n` +
             `📥 *.download <YouTube link>* — download any YouTube audio\n` +
+            `ℹ️ *.music* — all music download commands\n` +
             `🤖 *.ai* — chat with me, i reply to anything\n` +
             `🎙 voice notes — i transcribe & reply\n` +
             `🖼 images — i can see them & reply\n` +
@@ -2180,10 +2182,10 @@ async function connectToWhatsApp() {
             continue;
           }
           await send("⏬ downloading... give me a few seconds");
-          const audioBuf = await downloadYoutubeAudio(url);
-          if (!audioBuf) { await send("❌ couldn't download that. make sure it's a valid YouTube/SoundCloud link or try .song <name> instead"); continue; }
+          const audio = await downloadYoutubeAudio(url);
+          if (!audio?.buffer) { await send("❌ couldn't download that. make sure it's a valid YouTube link or try .song <name> instead"); continue; }
           try {
-            await sock.sendMessage(from, { audio: audioBuf, mimetype: "audio/mp4", fileName: "song.mp3" });
+            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title)}.mp3` });
             await send("✅ enjoy 🎧");
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
@@ -2195,12 +2197,30 @@ async function connectToWhatsApp() {
           const ytUrl = await searchYoutube(query);
           if (!ytUrl) { await send("❌ couldn't find that song. try a different name or paste a YouTube link with .download <link>"); continue; }
           await send("⏬ found it — downloading...");
-          const audioBuf = await downloadYoutubeAudio(ytUrl);
-          if (!audioBuf) { await send(`❌ download failed. try the link directly: ${ytUrl}`); continue; }
+          const audio = await downloadYoutubeAudio(ytUrl);
+          if (!audio?.buffer) { await send(`❌ download failed. try the link directly: ${ytUrl}`); continue; }
           try {
-            await sock.sendMessage(from, { audio: audioBuf, mimetype: "audio/mp4", fileName: `${query.slice(0,30)}.mp3` });
+            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || query)}.mp3` });
             await send("✅ enjoy 🎧");
           } catch (e) { await send("❌ send failed: " + e.message); }
+          continue;
+        }
+
+        if (cmd === "music" || cmd === "songs") {
+          await send(`🎵 music commands\n\n.song <artist - title> — search YouTube and send MP3\n.play <artist - title> — same as .song\n.download <YouTube link> — download a direct YouTube link\n.dl <YouTube link> — short alias\n.mp3 <YouTube link> — short alias\n.ytinfo <YouTube link> — show title, channel, duration, and views\n\nTip: type .download alone, then send the song name or YouTube link in your next message.`);
+          continue;
+        }
+
+        if (cmd === "ytinfo" || cmd === "songinfo") {
+          const input = args.join(" ");
+          if (!input) { await send(".ytinfo <YouTube link or song name>"); continue; }
+          const url = ytdl.validateURL(input) ? input : await searchYoutube(input);
+          if (!url) { await send("❌ couldn't find that video."); continue; }
+          const info = await getYoutubeInfo(url);
+          if (!info) { await send("❌ couldn't read that YouTube info."); continue; }
+          const seconds = Number(info.lengthSeconds || 0);
+          const duration = seconds ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "unknown";
+          await send(`🎵 ${info.title}\n📺 ${info.author?.name || "YouTube"}\n⏱ ${duration}\n👀 ${info.viewCount || "unknown"} views\n🔗 ${url}`);
           continue;
         }
 
@@ -2397,7 +2417,7 @@ async function connectToWhatsApp() {
 
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n.createacct / .pay — create virtual bank account\n.btc — crypto deposit/withdrawal info\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
+          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.play <name> — song download alias\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.music — show all music commands\n.ytinfo <link/name> — show youtube details\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg>\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute / .unmute\n.lock / .unlock\n.setname <new name>\n.setdesc <new description>\n.revoke\n.leave\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
 
           const partUpgraded = `🆕 *NEW — UPGRADED (Baileys 6.7.21)*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n.statusreact off — turn off\n_(alias: .sreact)_\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results (now decryptable!)\n_(alias: .votes)_\n\n_these are NEW since the upgrade — older versions could not do these_\n\n`;
 
@@ -2613,7 +2633,7 @@ app.get("/api/recent", (req, res) => res.json({
     scamAlertsTotal: scamAlerts.length,
     birthdaysTracked: Object.keys(birthdayMemory).length,
     voiceClone: settings.voiceCloneEnabled,
-    payments: settings.paymentsEnabled
+    musicDownload: true
   }
 }));
 
