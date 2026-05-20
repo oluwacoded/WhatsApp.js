@@ -3870,6 +3870,47 @@ setInterval(() => {
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
   connectToWhatsApp();
+
+  // ─── Hub Self-Registration ────────────────────────────────────────────────
+  // Register this backend with the hub so it receives forwarded payments.
+  // Uses REPLIT_DEV_DOMAIN when available (Replit), falls back to localhost.
+  const HUB_SECRET = (process.env.FLW_SECRET_KEY || "").slice(0, 20);
+  const selfDomain = process.env.REPLIT_DEV_DOMAIN
+    ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+    : `http://localhost:${PORT}`;
+  const HUB_URL = selfDomain; // this server is the hub
+
+  fetch(`${HUB_URL}/webhook/backends`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: process.env.BOT_NAME || "Local Bot",
+      url: `${selfDomain}/webhook`,
+      adminSecret: HUB_SECRET
+    })
+  })
+    .then(r => r.json())
+    .then(d => console.log("[Hub] Self-registered:", d.backend?.name || d.error || d))
+    .catch(e => console.log("[Hub] Self-registration failed:", e.message));
+
+  // ─── Catch-up: replay any payments missed while offline ──────────────────
+  setTimeout(() => {
+    fetch(`${HUB_URL}/webhook/events?secret=${HUB_SECRET}&limit=50`)
+      .then(r => r.json())
+      .then(d => {
+        const events = d.events || [];
+        if (!events.length) return;
+        console.log(`[Hub] Replaying ${events.length} missed payment event(s)...`);
+        events.forEach(e =>
+          fetch(`http://localhost:${PORT}/webhook`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-MFG-Forwarded": "1", "X-Event-Id": e.id },
+            body: JSON.stringify(e.payload)
+          }).catch(() => {})
+        );
+      })
+      .catch(e => console.log("[Hub] Catch-up poll failed:", e.message));
+  }, 3000); // wait 3s so WhatsApp connection is ready before we fire alerts
 });
 
 server.on("error", (err) => {
