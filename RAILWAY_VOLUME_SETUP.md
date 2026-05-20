@@ -23,6 +23,14 @@ For **each** Railway service (`whatsappjs-production-6831` and `whatsappjs-produ
 4. **Value:** `/data/auth_info_baileys`
 5. Click **Add**
 
+### 2b. Set the bot data path env var
+1. Add another variable in the same **Variables** tab
+2. **Name:** `DATA_DIR`
+3. **Value:** `/data`
+4. Click **Add**
+
+This keeps settings, notes, contact memory, command state, and other JSON runtime files on the same persistent Railway volume instead of resetting them on each deploy.
+
 ### 3. Redeploy ONCE
 The service will redeploy automatically when you add the variable.
 - Wait for it to come up
