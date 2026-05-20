@@ -149,6 +149,7 @@ let userData = readJSON("users.json", {});
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
+const activePersona = new Map(); // jid → persona name (e.g. "Burna Boy")
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
 let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
@@ -1552,41 +1553,13 @@ async function connectToWhatsApp() {
           await send(args.join(" ").split("").map(c => { const i = "abcdefghijklmnopqrstuvwxyz".indexOf(c.toLowerCase()); return i>=0 ? fc[i] : c; }).join("") || ".aesthetic <text>");
           continue;
         }
-        if (cmd === "leet") {
-          const lm = {a:"4",e:"3",i:"1",o:"0",s:"5",t:"7",l:"1",b:"8",g:"9"};
-          await send(args.join(" ").split("").map(c => lm[c.toLowerCase()]||c).join("") || ".leet <text>");
-          continue;
-        }
         if (cmd === "count") { const t = args.join(" "); await send(`chars: ${t.length}\nwords: ${t.split(/\s+/).filter(Boolean).length}\nlines: ${t.split("\n").length}` || ".count <text>"); continue; }
         if (cmd === "repeat") {
           const n = Math.min(parseInt(args[0])||2,10); const t = args.slice(1).join(" ");
           await send(t ? Array(n).fill(t).join("\n") : ".repeat <times> <text>"); continue;
         }
-        if (cmd === "binary") { await send(args.join(" ").split("").map(c=>c.charCodeAt(0).toString(2).padStart(8,"0")).join(" ")||".binary <text>"); continue; }
-        if (cmd === "hex") { await send(args.join(" ").split("").map(c=>c.charCodeAt(0).toString(16)).join(" ")||".hex <text>"); continue; }
-        if (cmd === "base64") {
-          const sub=args[0]; const t=args.slice(1).join(" ");
-          if(sub==="encode") await send(Buffer.from(t).toString("base64"));
-          else if(sub==="decode"){try{await send(Buffer.from(t,"base64").toString("utf8"));}catch{await send("invalid base64");}}
-          else await send(".base64 encode <text> | .base64 decode <text>");
-          continue;
-        }
-        if (cmd === "caesar") {
-          const shift=parseInt(args[0])||3; const t=args.slice(1).join(" ");
-          await send(t.split("").map(c=>{if(c.match(/[a-z]/))return String.fromCharCode((c.charCodeAt(0)-97+shift)%26+97);if(c.match(/[A-Z]/))return String.fromCharCode((c.charCodeAt(0)-65+shift)%26+65);return c;}).join("")||".caesar <shift> <text>");
-          continue;
-        }
-        if (cmd === "pig") {
-          const v="aeiou";
-          await send(args.join(" ").split(" ").map(w=>{if(!w)return w;if(v.includes(w[0].toLowerCase()))return w+"yay";let i=0;while(i<w.length&&!v.includes(w[i].toLowerCase()))i++;return w.slice(i)+w.slice(0,i)+"ay";}).join(" ")||".pig <text>");
-          continue;
-        }
-        if (cmd === "owoify") { await send(args.join(" ").replace(/[rl]/g,"w").replace(/[RL]/g,"W").replace(/n([aeiou])/g,"ny$1").replace(/N([aeiou])/g,"Ny$1").replace(/ove/g,"uv")||".owoify <text>"); continue; }
-        if (cmd === "uwuify") { await send(args.join(" ").replace(/[rl]/g,"w").replace(/[RL]/g,"W").replace(/!/g," uwu!").replace(/\./g," uwu.")||".uwuify <text>"); continue; }
-        if (cmd === "palindrome") { const t=args.join(" ").toLowerCase().replace(/[^a-z0-9]/g,""); await send(`"${args.join(" ")}" is${t===t.split("").reverse().join("")?"":" NOT"} a palindrome`); continue; }
         if (cmd === "wordcount") { await send(`${args.join(" ").split(/\s+/).filter(Boolean).length} words`); continue; }
         if (cmd === "charcount") { await send(`${args.join(" ").length} characters`); continue; }
-        if (cmd === "vowels") { const t=args.join(" "); await send(`vowels: ${(t.match(/[aeiouAEIOU]/g)||[]).length} / ${t.length} chars`); continue; }
         if (cmd === "emojify") { const emojis=["😂","🔥","💯","👀","😭","✨","💀","🙏","😤","🫶"]; await send(args.join(" ").split(" ").map(w=>w+" "+emojis[Math.floor(Math.random()*emojis.length)]).join(" ")); continue; }
 
         // ── MATH / CALC ──────────────────────────────────────────────────
@@ -1618,13 +1591,6 @@ async function connectToWhatsApp() {
           if(!isNaN(w)&&!isNaN(h)&&h>0){const bmi=(w/(h*h)).toFixed(1);const cat=bmi<18.5?"underweight":bmi<25?"normal":bmi<30?"overweight":"obese";await send(`bmi: ${bmi} — ${cat}`);}
           else await send(".bmi <weight kg> <height m>"); continue;
         }
-        if (cmd === "roman") {
-          const n=parseInt(args[0]);
-          if(isNaN(n)||n<1||n>3999){await send("give a number between 1 and 3999");continue;}
-          const vals=[1000,900,500,400,100,90,50,40,10,9,5,4,1],syms=["M","CM","D","CD","C","XC","L","XL","X","IX","V","IV","I"];
-          let r="",num=n; vals.forEach((v,i)=>{while(num>=v){r+=syms[i];num-=v;}});
-          await send(`${n} = ${r}`); continue;
-        }
         if (cmd === "random") {
           const [mn,mx]=args.map(Number);
           await send(!isNaN(mn)&&!isNaN(mx)?`🎲 ${Math.floor(Math.random()*(mx-mn+1))+mn}`:".random <min> <max>"); continue;
@@ -1637,35 +1603,12 @@ async function connectToWhatsApp() {
         }
         if (cmd === "sqrt") { const n=parseFloat(args[0]); await send(!isNaN(n)?`√${n} = ${Math.sqrt(n).toFixed(6)}`:".sqrt <number>"); continue; }
         if (cmd === "pow") { const [b,e]=args.map(Number); await send(!isNaN(b)&&!isNaN(e)?`${b}^${e} = ${Math.pow(b,e)}`:".pow <base> <exponent>"); continue; }
-        if (cmd === "mod") { const [a,b]=args.map(Number); await send(!isNaN(a)&&!isNaN(b)?`${a} mod ${b} = ${a%b}`:".mod <a> <b>"); continue; }
         if (cmd === "round") { const n=parseFloat(args[0]); await send(!isNaN(n)?`${n} rounded = ${Math.round(n)}`:".round <number>"); continue; }
-        if (cmd === "fibonacci") {
-          const n=Math.min(parseInt(args[0])||10,25);
-          let a=0,b=1,seq=[0];for(let i=1;i<n;i++){[a,b]=[b,a+b];seq.push(a);}
-          await send(`fibonacci (${n} terms):\n${seq.join(", ")}`); continue;
-        }
-        if (cmd === "factorial") {
-          const n=parseInt(args[0]);
-          if(isNaN(n)||n<0||n>20){await send("number must be 0–20");continue;}
-          let r=1;for(let i=2;i<=n;i++)r*=i;
-          await send(`${n}! = ${r}`); continue;
-        }
-        if (cmd === "isprime") {
-          const n=parseInt(args[0]);
-          if(isNaN(n)){await send(".isprime <number>");continue;}
-          if(n<2){await send(`${n} is not prime`);continue;}
-          let prime=true;for(let i=2;i<=Math.sqrt(n);i++)if(n%i===0){prime=false;break;}
-          await send(`${n} is${prime?"":" not"} prime`); continue;
-        }
         if (cmd === "password") {
           const len=Math.min(parseInt(args[0])||12,32);
           const chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
           let pwd="";for(let i=0;i<len;i++)pwd+=chars[Math.floor(Math.random()*chars.length)];
           await send(`🔑 ${pwd}`); continue;
-        }
-        if (cmd === "uuid") {
-          const u="xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==="x"?r:(r&0x3|0x8)).toString(16);});
-          await send(u); continue;
         }
 
         // ── FUN / GAMES ──────────────────────────────────────────────────
@@ -1723,7 +1666,6 @@ async function connectToWhatsApp() {
         if (cmd === "cringe") { const pct=Math.floor(Math.random()*101); const cringeLabel=pct>70?"💀 unforgivable":pct>40?"😬 kinda cringe":"👍 not cringe"; await send(`cringe level: ${pct}/100 ${cringeLabel}`); continue; }
         if (cmd === "salty") { const pct=Math.floor(Math.random()*101); const saltyLabel=pct>70?"very salty bro":pct>40?"a little salty":"not salty"; await send(`salty meter: ${pct}% 🧂 ${saltyLabel}`); continue; }
         if (cmd === "goat") { const target=args.join(" ")||"you"; await send(`${target} is the GOAT 🐐 no debate`); continue; }
-        if (cmd === "hotdog") { await send(Math.random()>0.5?"it's a hotdog 🌭":"it's NOT a hotdog ❌"); continue; }
         if (cmd === "lucky") { const n=Math.floor(Math.random()*100)+1; await send(`🍀 your lucky number today: ${n}`); continue; }
 
         // ── SOCIAL ───────────────────────────────────────────────────────
@@ -1813,6 +1755,161 @@ async function connectToWhatsApp() {
         if (cmd === "keys") {
           const ks=savedKV[from]?Object.keys(savedKV[from]):[];
           await send(ks.length?`saved keys:\n${ks.join(", ")}`:"nothing saved. use .save <key> <value>"); continue;
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // ██  ONE-OF-ONE SIGNATURE COMMANDS — powered by Groq AI  ████████
+        // ══════════════════════════════════════════════════════════════════
+
+        // .persona <name|off> — AI becomes ANY celebrity / character for this chat
+        if (cmd === "persona") {
+          const name = args.join(" ").trim();
+          if (!name) { await send(`🎭 *PERSONA MODE*\n\nType *.persona <name>* and I'll become that person for this conversation.\n\nExamples:\n.persona Burna Boy\n.persona Davido\n.persona Obi Cubana\n.persona Elon Musk\n.persona Wizkid\n\nType *.persona off* to go back to normal.`); continue; }
+          if (name.toLowerCase() === "off") {
+            activePersona.delete(from);
+            await send("🎭 Persona mode off. i'm back to myself."); continue;
+          }
+          activePersona.set(from, name);
+          await send(`🎭 *Persona activated: ${name}*\n\nI'm now responding AS ${name}. Every reply I give will be in their voice, style, energy — the way they actually talk.\n\nType *.persona off* to bring me back.`);
+          continue;
+        }
+
+        // .lyrics <vibe or title> — AI writes an original Afrobeats / Naija song
+        if (cmd === "lyrics" || cmd === "song lyrics") {
+          const vibe = args.join(" ").trim();
+          if (!vibe) { await send("🎵 *.lyrics <vibe or title>*\n\nExamples:\n.lyrics heartbreak Afrobeats\n.lyrics Asake style about money\n.lyrics love song for Lagos girl"); continue; }
+          await send("🎵 writing lyrics...");
+          const prompt = `Write an original, fire Afrobeats/Nigerian pop song based on this vibe or title: "${vibe}". Include: Song Title, Verse 1, Chorus, Verse 2, Bridge. Use Nigerian slang, pidgin naturally. Make it sound like it could be a real hit. Keep it authentic and creative.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ couldn't write that one. try again."); continue;
+        }
+
+        // .freestyle <topic> — AI spits bars in Nigerian/Afrobeats rap style
+        if (cmd === "freestyle" || cmd === "bars") {
+          const topic = args.join(" ").trim() || "life and hustle";
+          await send("🎤 cooking bars...");
+          const prompt = `Spit a fire freestyle rap/bars about: "${topic}". Nigerian/Afrobeats style — mix English and pidgin naturally. 8-16 bars. Make it rhythmic, with wordplay, punches, and real Nigerian energy. No intro text, just drop the bars.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ bars came out wrong. try again."); continue;
+        }
+
+        // .shade <person or situation> — AI crafts the perfect subtle shade
+        if (cmd === "shade") {
+          const target = args.join(" ").trim();
+          if (!target) { await send("😏 *.shade <person or situation>*\n\nExamples:\n.shade my ex\n.shade people who talk too much\n.shade fake friends"); continue; }
+          await send("😏 crafting shade...");
+          const prompt = `Write the most perfectly crafted, subtle shade about: "${target}". Nigerian style — indirect, smart, could be a WhatsApp status or caption. It should cut deep but sound innocent. Use "I'm not saying anything but..." energy. Short, punchy, devastating.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ couldn't craft that shade."); continue;
+        }
+
+        // .capcheck <claim> — AI delivers a Cap or Facts verdict
+        if (cmd === "capcheck" || cmd === "cap" || cmd === "facts") {
+          const claim = args.join(" ").trim();
+          if (!claim) { await send("🧢 *.capcheck <claim>*\n\nExamples:\n.capcheck Arsenal is the best team\n.capcheck Burna Boy is the greatest\n.capcheck Money can't buy happiness"); continue; }
+          await send("🔍 analyzing...");
+          const prompt = `Analyze this claim and give a Cap or Facts verdict: "${claim}". Be opinionated, funny, and decisive. State clearly if it's CAP 🧢 or FACTS ✅, then explain why in Nigerian English/pidgin. Keep it entertaining and short.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ couldn't check that."); continue;
+        }
+
+        // .naija <topic> — explains ANYTHING in pure Nigerian pidgin/slang
+        if (cmd === "naija" || cmd === "pidgin" || cmd === "explain") {
+          const topic = args.join(" ").trim();
+          if (!topic) { await send("🇳🇬 *.naija <topic>*\n\nI'll explain ANYTHING in pure Nigerian pidgin.\n\nExamples:\n.naija quantum physics\n.naija how the stock market works\n.naija why women are complicated"); continue; }
+          await send("🇳🇬 lemme break am down...");
+          const prompt = `Explain this topic in pure Nigerian pidgin/slang: "${topic}". Make it funny, relatable, and understandable to any Nigerian. Use real pidgin expressions, naija humor, local analogies. Keep it authentic — like you're explaining to your boys at a pepper soup joint.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ couldn't break that down."); continue;
+        }
+
+        // .testimony <topic> — generates a hilarious Nigerian church testimony
+        if (cmd === "testimony") {
+          const topic = args.join(" ").trim() || "random miracle";
+          await send("🙌 *receiving testimony...*");
+          const prompt = `Write a hilarious Nigerian Pentecostal church testimony about: "${topic}". Include: dramatic background story, the problem, how they prayed, the miracle that happened, and the praise at the end. Use Nigerian church language, pidgin, dramatic flair. Make it funny but believable. The congregation should be shaking.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ testimony no come. try again."); continue;
+        }
+
+        // .settle <topic> — AI settles any debate ONCE AND FOR ALL
+        if (cmd === "settle") {
+          const topic = args.join(" ").trim();
+          if (!topic) { await send("⚖️ *.settle <debate topic>*\n\nExamples:\n.settle Wizkid vs Davido\n.settle Lagos vs Abuja\n.settle Jollof: Nigeria vs Ghana"); continue; }
+          await send("⚖️ *settling this once and for all...*");
+          const prompt = `Settle this debate ONCE AND FOR ALL: "${topic}". Give a FINAL, definitive ruling. Be bold, entertaining, use Nigerian references. No sitting on the fence — pick a winner/side and defend it passionately. End with "CASE CLOSED. 🔨" energy.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ couldn't settle that one."); continue;
+        }
+
+        // .manifest <dream> — writes a powerful manifestation/affirmation
+        if (cmd === "manifest" || cmd === "manifestation") {
+          const dream = args.join(" ").trim();
+          if (!dream) { await send("✨ *.manifest <your dream>*\n\nExamples:\n.manifest becoming a billionaire\n.manifest getting my dream job\n.manifest buying my first car"); continue; }
+          await send("✨ *manifesting...*");
+          const prompt = `Write a powerful, deeply personal manifestation/affirmation for this dream: "${dream}". Nigerian context — reference God, hustle, faith. Mix English and pidgin naturally. Should feel spiritual, motivating, and real. Like a prayer meets affirmation. 5-8 powerful lines.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ manifestation failed. try again."); continue;
+        }
+
+        // .expose <claim> — AI "exposes" anything with receipts
+        if (cmd === "expose") {
+          const claim = args.join(" ").trim();
+          if (!claim) { await send("🕵️ *.expose <person or claim>*\n\nExamples:\n.expose why people ghost others\n.expose the real reason Lagos traffic is bad\n.expose fake friends"); continue; }
+          await send("🕵️ *pulling receipts...*");
+          const prompt = `EXPOSE the truth about: "${claim}". Write it like a viral thread — dramatic, revealing, with "facts don't care about your feelings" energy. Nigerian style, mix of English and pidgin. Make points 1 by 1. End with a hard-hitting conclusion.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ couldn't pull those receipts."); continue;
+        }
+
+        // .punchline <topic> — AI generates a savage one-liner
+        if (cmd === "punchline" || cmd === "oneliner") {
+          const topic = args.join(" ").trim() || "life";
+          await send("💥 cooking...");
+          const prompt = `Write ONE savage, perfectly crafted punchline/one-liner about: "${topic}". Nigerian humor preferred. Short, sharp, devastating. Should make someone scream or send it to 10 people. No intro, just the line.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ punchline flopped. try again."); continue;
+        }
+
+        // .caption <context> — generates fire social media captions
+        if (cmd === "caption" || cmd === "captions") {
+          const context = args.join(" ").trim();
+          if (!context) { await send("📸 *.caption <context>*\n\nExamples:\n.caption beach photo with friends\n.caption just got a new job\n.caption Friday night out in Lagos"); continue; }
+          await send("📸 *crafting fire captions...*");
+          const prompt = `Generate 3 fire, ready-to-post captions for: "${context}". Mix styles: 1 savage/witty, 1 deep/inspirational, 1 funny/Nigerian. Include relevant emojis. These should be the kind people screenshot and save.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ captions flopped. try again."); continue;
+        }
+
+        // .prayer <situation> — Nigerian-style prayer for any situation
+        if (cmd === "prayer" || cmd === "pray") {
+          const situation = args.join(" ").trim() || "general blessing";
+          await send("🙏 *interceding...*");
+          const prompt = `Write a Nigerian Pentecostal-style prayer for: "${situation}". Use powerful prayer language, mix English and pidgin, call on the Holy Ghost, bind and cast, declare and decree. Make it dramatic and full of Nigerian church energy. It should feel powerful AND be hilarious. End with a strong AMEN.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ prayer not through. try again."); continue;
+        }
+
+        // .argue <position on topic> — AI passionately argues any side
+        if (cmd === "argue") {
+          const position = args.join(" ").trim();
+          if (!position) { await send("🗣 *.argue <position on topic>*\n\nExamples:\n.argue that Afrobeats is the best genre\n.argue that Nigeria will be great\n.argue that pineapple belongs on pizza"); continue; }
+          await send("🗣 *building the case...*");
+          const prompt = `Argue this position PASSIONATELY and convincingly: "${position}". Don't hold back — be a lawyer, a preacher, and a Nigerian uncle all in one. Make the strongest possible case. Use facts, emotion, Nigerian proverbs, and analogies. Win the argument.`;
+          const reply = await askGroq(prompt, from);
+          await send(reply || "❌ argument collapsed. try again."); continue;
+        }
+
+        // .refer — referral system info
+        if (cmd === "refer" || cmd === "referral") {
+          await send(`🤝 *REFERRAL PROGRAM*\n\n━━━━━━━━━━━━━━━━━━━━\nEarn free bot access by referring friends!\n━━━━━━━━━━━━━━━━━━━━\n\nHow it works:\n1️⃣ Tell your friends about mfg_bot\n2️⃣ They pay ₦3,000 and get their token\n3️⃣ Every 3 referrals = 1 free token for you\n\n📲 To refer: tell them to contact *+2349132883869*\nand mention your number when paying.\n\n_built by teddymfg • the bot that does everything_`);
+          continue;
+        }
+
+        // .premium / .vip — show premium info
+        if (cmd === "premium" || cmd === "vip") {
+          await send(`👑 *MFG_BOT PREMIUM*\n\n━━━━━━━━━━━━━━━━━━━━\n🔓 *WHAT YOU GET WITH ACCESS:*\n━━━━━━━━━━━━━━━━━━━━\n\n🤖 AI replies in owner's exact style\n🎵 Unlimited music downloads (MP3)\n🎭 Persona mode (become any celebrity)\n🎤 Freestyle & lyrics generator\n😏 Shade, capcheck, settle debates\n🇳🇬 Explain anything in pidgin\n🙌 Testimony & prayer generator\n📸 Fire caption generator\n✨ Manifestation writer\n🕵️ Expose mode\n💬 200+ total commands\n🔊 Voice note AI replies\n📱 Works 24/7 — even when owner is offline\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *PRICE: ₦3,000 (one-time)*\n━━━━━━━━━━━━━━━━━━━━\n\nContact *+2349132883869* to get your token.\n_Each token is one number. No sharing._`);
+          continue;
         }
 
         // ── GROUP COMMANDS ────────────────────────────────────────────────
@@ -2469,7 +2566,7 @@ async function connectToWhatsApp() {
 
           const partUpgraded = `━━━━━━━━━━━━━━━━━━━━\n🆕 *NEW FEATURES (v6.7.21)*\n━━━━━━━━━━━━━━━━━━━━\n\n✏️ *EDIT MESSAGES*\n*.say <text>* — bot sends a tracked message\n*.editlast <new text>* — edit bot's last reply\n\n📌 *CHAT PIN*\n*.pin* — pin chat to top\n*.unpin* — unpin\n\n📰 *CHANNELS*\n*.channel create <name>*\n*.channel info / follow / post*\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE SEND*\n*.vvideo* — re-send as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n*.statusreact <emoji>* — react to every status\n*.statusreact off* — turn off\n_(alias: .sreact)_\n\n📊 *POLL VOTES*\n*.pollvotes* — reply to poll to see results\n_(alias: .votes)_\n\n`;
 
-          const part2 = partUpgraded + `━━━━━━━━━━━━━━━━━━━━\n📝 *TEXT TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n━━━━━━━━━━━━━━━━━━━━\n🔢 *MATH & CALC*\n━━━━━━━━━━━━━━━━━━━━\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n━━━━━━━━━━━━━━━━━━━━\n🎮 *FUN & GAMES*\n━━━━━━━━━━━━━━━━━━━━\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n━━━━━━━━━━━━━━━━━━━━\n😤 *VIBE CHECKS*\n━━━━━━━━━━━━━━━━━━━━\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n━━━━━━━━━━━━━━━━━━━━\n🤝 *SOCIAL ACTIONS*\n━━━━━━━━━━━━━━━━━━━━\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n━━━━━━━━━━━━━━━━━━━━\n🛠 *UTILITY*\n━━━━━━━━━━━━━━━━━━━━\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio\n.call on/off — block calls\n\n━━━━━━━━━━━━━━━━━━━━\n👑 *OWNER ONLY*\n━━━━━━━━━━━━━━━━━━━━\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n╔══════════════════════╗\n║  200+ commands total 🚀  ║\n╚══════════════════════╝\n_type any command to use it_`;
+          const part2 = partUpgraded + `━━━━━━━━━━━━━━━━━━━━\n🔥 *SIGNATURE COMMANDS — ONE OF ONE*\n━━━━━━━━━━━━━━━━━━━━\n🎭 *.persona <name|off>* — bot becomes ANY celebrity (Burna Boy, Davido, etc)\n🎵 *.lyrics <vibe>* — write original Afrobeats song lyrics on demand\n🎤 *.freestyle <topic>* — AI spits bars in Nigerian rap style\n😏 *.shade <person>* — perfect subtle shade, Nigerian style\n🧢 *.capcheck <claim>* — Cap or Facts? AI gives the FINAL verdict\n🇳🇬 *.naija <topic>* — explain ANYTHING in pure Nigerian pidgin\n🙌 *.testimony <topic>* — generate a Nigerian church testimony (hilarious)\n⚖️ *.settle <debate>* — settle any argument ONCE AND FOR ALL\n✨ *.manifest <dream>* — write your manifestation/affirmation\n🕵️ *.expose <claim>* — pull receipts and expose the truth\n💥 *.punchline <topic>* — generate a savage one-liner\n📸 *.caption <context>* — 3 fire social media captions\n🙏 *.prayer <situation>* — Nigerian church prayer for anything\n🗣 *.argue <position>* — AI argues your side passionately\n💰 *.premium* — see what you get with access\n🤝 *.refer* — earn free tokens by referring friends\n\n━━━━━━━━━━━━━━━━━━━━\n📝 *TEXT TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n.upper .lower .reverse .mock .clap\n.aesthetic .count .repeat .emojify\n\n━━━━━━━━━━━━━━━━━━━━\n🔢 *MATH & CALC*\n━━━━━━━━━━━━━━━━━━━━\n.calc .percent .tax .tip .split\n.bmi .random .temp .sqrt\n.pow .round .password .age\n\n━━━━━━━━━━━━━━━━━━━━\n🎮 *FUN & GAMES*\n━━━━━━━━━━━━━━━━━━━━\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n━━━━━━━━━━━━━━━━━━━━\n😤 *VIBE CHECKS*\n━━━━━━━━━━━━━━━━━━━━\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .lucky\n\n━━━━━━━━━━━━━━━━━━━━\n🤝 *SOCIAL ACTIONS*\n━━━━━━━━━━━━━━━━━━━━\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n━━━━━━━━━━━━━━━━━━━━\n🛠 *UTILITY*\n━━━━━━━━━━━━━━━━━━━━\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio\n.call on/off — block calls\n\n━━━━━━━━━━━━━━━━━━━━\n👑 *OWNER ONLY*\n━━━━━━━━━━━━━━━━━━━━\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n╔══════════════════════╗\n║  200+ commands total 🚀  ║\n╚══════════════════════╝\n_type any command to use it_`;
 
           await send(part1);
           await new Promise(r => setTimeout(r, 700));
@@ -2515,7 +2612,13 @@ async function connectToWhatsApp() {
       }
       try {
         logTag("calling_groq");
-        let reply = await askGroq(effectiveText, from);
+        // ── Persona mode: wrap the query so AI responds AS the active persona ──
+        let groqInput = effectiveText;
+        if (activePersona.has(from)) {
+          const persona = activePersona.get(from);
+          groqInput = `[PERSONA MODE: You are now responding AS ${persona}. Match their EXACT voice, slang, energy, and speaking style. Stay fully in character. Do NOT break character or add any disclaimer.]\n\nUser says: ${effectiveText}`;
+        }
+        let reply = await askGroq(groqInput, from);
         if (!reply) { logTag("err:groq_empty"); continue; }
         if (reply.startsWith("[STOP]")) {
           aiPaused.set(from, Date.now());
