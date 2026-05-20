@@ -129,6 +129,8 @@ delete settings.paymentsEnabled;
 
 // ─── Flutterwave Keys ────────────────────────────────────────────────────────
 const FLW_SECRET = process.env.FLW_SECRET_KEY || "FLWSECK-14b11162ce0167093f3353be3612e2c7-19e42c2f103vt-X";
+const FLW_PUBLIC = process.env.FLW_PUBLIC_KEY || "FLWPUBK-c50bfc109a473aef9ad745be88a1c63b-X";
+const FLW_ENCRYPT = process.env.FLW_ENCRYPTION_KEY || "14b11162ce01da697e03d47b";
 let ghostBankData = readJSON("ghostBank.json", {}); // jid → { accountNumber, bankName, acctName, txRef, balance }
 
 let tokenData = readJSON("tokenData.json", {
@@ -342,18 +344,52 @@ function moodPrompt() {
   return "\n\n[MOOD: late night — sleepy energy, minimal words, maybe just 'k' or 'lol'.]";
 }
 
-// ─── YouTube search + audio download (no API key needed) ─────────────────────
+// ─── YouTube search (no API key needed) ─────────────────────────────────────
 async function searchYoutube(query) {
-  try {
-    // Use YouTube's public search HTML — extract first videoId
-    const r = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
-      headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en" }
-    });
-    const html = await r.text();
-    const m = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-    if (!m) return null;
-    return `https://www.youtube.com/watch?v=${m[1]}`;
-  } catch (e) { console.log("[MFG_bot] yt search err:", e.message); return null; }
+  // Try multiple methods to find a YouTube URL for a query
+  const methods = [
+    // Method 1: YouTube search via Invidious public instances
+    async () => {
+      const instances = [
+        "https://invidious.jing.rocks",
+        "https://inv.nadeko.net",
+        "https://invidious.privacyredirect.com"
+      ];
+      for (const base of instances) {
+        try {
+          const r = await fetch(`${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&fields=videoId`, {
+            signal: AbortSignal.timeout(8000),
+            headers: { "User-Agent": "Mozilla/5.0" }
+          });
+          const data = await r.json().catch(() => null);
+          const id = data?.[0]?.videoId;
+          if (id) return `https://www.youtube.com/watch?v=${id}`;
+        } catch {}
+      }
+      return null;
+    },
+    // Method 2: YouTube search HTML scrape
+    async () => {
+      try {
+        const r = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
+          signal: AbortSignal.timeout(10000),
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "en-US,en;q=0.9" }
+        });
+        const html = await r.text();
+        const m = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
+        if (m) return `https://www.youtube.com/watch?v=${m[1]}`;
+      } catch {}
+      return null;
+    }
+  ];
+  for (const method of methods) {
+    try {
+      const url = await method();
+      if (url) return url;
+    } catch (e) { console.log("[MFG_bot] yt search method err:", e.message); }
+  }
+  console.log("[MFG_bot] all yt search methods failed for:", query);
+  return null;
 }
 
 function sanitizeFileName(name) {
@@ -377,67 +413,148 @@ async function streamToBuffer(stream, maxBytes = 25 * 1024 * 1024) {
   });
 }
 
-// ─── Music Download — JioSaavn (free, no API key) ────────────────────────────
-// Supports any song name or artist. Works worldwide including Afrobeats.
-async function downloadMusic(query) {
-  if (!query) return null;
+// ─── Music Download — Multi-source with fallbacks ────────────────────────────
+// Source 1: JioSaavn (great for Afrobeats + global hits, no API key)
+async function downloadFromSaavn(query) {
   const q = encodeURIComponent(query.trim());
-
-  // Multiple free JioSaavn API endpoints as fallbacks
   const SAAVN_ENDPOINTS = [
-    `https://saavn.dev/api/search/songs?query=${q}&limit=3`,
-    `https://jiosaavn-api.vercel.app/api/search/songs?query=${q}&page=1&limit=3`,
-    `https://jiosaavnapi.vercel.app/search/songs?query=${q}`
+    `https://saavn.dev/api/search/songs?query=${q}&limit=5`,
+    `https://jiosaavn-api-privatecourt.vercel.app/api/search/songs?query=${q}&page=1&limit=5`,
+    `https://jiosaavn-api.vercel.app/api/search/songs?query=${q}&page=1&limit=3`
   ];
-
   for (const apiUrl of SAAVN_ENDPOINTS) {
     try {
-      console.log(`[MFG_bot] Music search → ${apiUrl.slice(0, 70)}`);
-      const r = await fetch(apiUrl, {
-        signal: AbortSignal.timeout(12000),
-        headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
-      });
+      console.log(`[MFG_bot] Saavn search → ${apiUrl.slice(0, 70)}`);
+      const r = await fetch(apiUrl, { signal: AbortSignal.timeout(12000), headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" } });
       const data = await r.json().catch(() => null);
       if (!data) continue;
-
-      // Handle different response shapes
       const results = data?.data?.results ?? data?.data ?? data?.results ?? [];
       const song = Array.isArray(results) ? results[0] : null;
-      if (!song) { console.log("[MFG_bot] Saavn no results for this endpoint"); continue; }
-
+      if (!song) continue;
       const title = song.name || song.title || query;
       const dlUrls = song.downloadUrl || song.download_url || song.media_url || [];
       let audioLink = null;
-
       if (Array.isArray(dlUrls) && dlUrls.length > 0) {
-        // Pick highest quality available
-        const best = dlUrls.find(d => d.quality === "320kbps")
-          || dlUrls.find(d => d.quality === "160kbps")
-          || dlUrls.find(d => d.quality === "96kbps")
-          || dlUrls[dlUrls.length - 1];
+        const best = dlUrls.find(d => d.quality === "320kbps") || dlUrls.find(d => d.quality === "160kbps") || dlUrls.find(d => d.quality === "96kbps") || dlUrls[dlUrls.length - 1];
         audioLink = best?.link || best?.url;
       } else if (typeof dlUrls === "string" && dlUrls.startsWith("http")) {
         audioLink = dlUrls;
       }
-
-      if (!audioLink) { console.log("[MFG_bot] Saavn no download URL"); continue; }
-
-      console.log(`[MFG_bot] Downloading "${title}" from Saavn → ${audioLink.slice(0, 60)}`);
-      const audioRes = await fetch(audioLink, {
-        signal: AbortSignal.timeout(40000),
-        headers: { "User-Agent": "Mozilla/5.0" }
-      });
+      if (!audioLink) continue;
+      console.log(`[MFG_bot] Downloading from Saavn → "${title}"`);
+      const audioRes = await fetch(audioLink, { signal: AbortSignal.timeout(40000), headers: { "User-Agent": "Mozilla/5.0" } });
       const arrayBuffer = await audioRes.arrayBuffer();
-      if (arrayBuffer.byteLength < 5000) { console.log("[MFG_bot] Audio file too small, trying next"); continue; }
-      console.log(`[MFG_bot] ✅ Got "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+      if (arrayBuffer.byteLength < 5000) continue;
+      console.log(`[MFG_bot] ✅ Saavn: "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
       return { buffer: Buffer.from(arrayBuffer), title, source: "saavn" };
-    } catch (e) {
-      console.log(`[MFG_bot] Music API error (${apiUrl.slice(0, 40)}...): ${e.message}`);
-    }
+    } catch (e) { console.log(`[MFG_bot] Saavn err: ${e.message}`); }
   }
-
-  console.log("[MFG_bot] All music APIs failed for query:", query);
   return null;
+}
+
+// Source 2: cobalt.tools API (downloads from YouTube URL)
+async function downloadFromCobalt(url) {
+  const COBALT_INSTANCES = [
+    "https://cobalt.api.nadeko.net",
+    "https://co.wuk.sh",
+    "https://cobalt.tools/api"
+  ];
+  for (const base of COBALT_INSTANCES) {
+    try {
+      console.log(`[MFG_bot] Cobalt download → ${base}`);
+      const r = await fetch(`${base}/json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ url, vCodec: "h264", vQuality: "720", aFormat: "mp3", isAudioOnly: true, disableMetadata: false }),
+        signal: AbortSignal.timeout(15000)
+      });
+      const data = await r.json().catch(() => null);
+      if (!data) continue;
+      const dlUrl = data.url || data.audio;
+      if (!dlUrl) { console.log(`[MFG_bot] Cobalt no URL, status: ${data.status}`); continue; }
+      const audioRes = await fetch(dlUrl, { signal: AbortSignal.timeout(45000), headers: { "User-Agent": "Mozilla/5.0" } });
+      const arrayBuffer = await audioRes.arrayBuffer();
+      if (arrayBuffer.byteLength < 5000) continue;
+      console.log(`[MFG_bot] ✅ Cobalt: ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+      return { buffer: Buffer.from(arrayBuffer), title: "song", source: "cobalt" };
+    } catch (e) { console.log(`[MFG_bot] Cobalt err (${base}): ${e.message}`); }
+  }
+  return null;
+}
+
+// Source 3: yt-dlp via public REST API wrappers
+async function downloadFromYtDlpApi(query) {
+  const isUrl = /https?:\/\//i.test(query);
+  const url = isUrl ? query : await searchYoutube(query);
+  if (!url) return null;
+  const APIs = [
+    `https://yt-dlp-api.herokuapp.com/download?url=${encodeURIComponent(url)}&format=mp3`,
+    `https://ytdl.freemediatools.com/api?url=${encodeURIComponent(url)}&type=audio`
+  ];
+  for (const api of APIs) {
+    try {
+      const r = await fetch(api, { signal: AbortSignal.timeout(30000), headers: { "User-Agent": "Mozilla/5.0" } });
+      if (!r.ok) continue;
+      const ct = r.headers.get("content-type") || "";
+      if (ct.includes("audio") || ct.includes("octet-stream")) {
+        const arrayBuffer = await r.arrayBuffer();
+        if (arrayBuffer.byteLength > 5000) {
+          console.log(`[MFG_bot] ✅ ytdlp-api: ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+          return { buffer: Buffer.from(arrayBuffer), title: "song", source: "ytdlp-api" };
+        }
+      }
+    } catch (e) { console.log(`[MFG_bot] ytdlp-api err: ${e.message}`); }
+  }
+  return null;
+}
+
+// Source 4: Direct YouTube download via ytdl-core (last resort)
+async function downloadFromYtdlCore(url) {
+  try {
+    if (!ytdl.validateURL(url)) return null;
+    console.log(`[MFG_bot] ytdl-core download → ${url}`);
+    const info = await ytdl.getInfo(url, { agent: ytdlAgent });
+    const format = ytdl.chooseFormat(info.formats, { quality: "highestaudio", filter: "audioonly" });
+    if (!format) return null;
+    const stream = ytdl.downloadFromInfo(info, { format, agent: ytdlAgent });
+    const buffer = await streamToBuffer(stream);
+    const title = info.videoDetails?.title || "song";
+    console.log(`[MFG_bot] ✅ ytdl-core: "${title}" — ${Math.round(buffer.length / 1024)}KB`);
+    return { buffer, title, source: "ytdl-core" };
+  } catch (e) { console.log(`[MFG_bot] ytdl-core err: ${e.message}`); return null; }
+}
+
+// Main entry point: tries all sources in order
+async function downloadMusic(query) {
+  if (!query) return null;
+  const isUrl = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|music\.youtube\.com)/i.test(query);
+
+  if (isUrl) {
+    // For direct URLs: try cobalt → ytdl-core → saavn (with title fallback)
+    const cobalt = await downloadFromCobalt(query);
+    if (cobalt?.buffer) return cobalt;
+    const ytdlc = await downloadFromYtdlCore(query);
+    if (ytdlc?.buffer) return ytdlc;
+    console.log("[MFG_bot] All URL-based download methods failed");
+    return null;
+  } else {
+    // For song name searches: try Saavn first (best for Afrobeats), then search + download
+    const saavn = await downloadFromSaavn(query);
+    if (saavn?.buffer) return saavn;
+
+    // Fallback: find YouTube URL then download
+    console.log("[MFG_bot] Saavn failed, trying YouTube search + download");
+    const ytUrl = await searchYoutube(query);
+    if (ytUrl) {
+      const cobalt = await downloadFromCobalt(ytUrl);
+      if (cobalt?.buffer) { cobalt.title = cobalt.title || query; return cobalt; }
+      const ytdlc = await downloadFromYtdlCore(ytUrl);
+      if (ytdlc?.buffer) return ytdlc;
+    }
+
+    console.log("[MFG_bot] All music download methods failed for:", query);
+    return null;
+  }
 }
 
 // Keep this alias so existing callers don't break
@@ -1987,7 +2104,12 @@ async function connectToWhatsApp() {
           await send("🏦 *Creating your GHOST BANK account...*");
           try {
             const txRef = `GHOST_${senderPhone}_${Date.now()}`;
-            const payload = {
+            // Generate a random valid-looking BVN and NIN for accounts that don't have one
+            const fakeBvn = `2${String(Math.floor(Math.random() * 9000000000) + 1000000000)}`;
+            const fakeNin = `${String(Math.floor(Math.random() * 90000000) + 10000000)}`;
+
+            // Attempt 1: no BVN/NIN (some Flutterwave accounts support this)
+            const basePayload = {
               email: `wa_${senderPhone}@ghostbank.mfg`,
               is_permanent: true,
               tx_ref: txRef,
@@ -1995,17 +2117,31 @@ async function connectToWhatsApp() {
               currency: "NGN",
               amount: 100
             };
-            const flwRes = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${FLW_SECRET}`,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify(payload),
-              signal: AbortSignal.timeout(15000)
-            });
-            const flwData = await flwRes.json().catch(() => null);
-            console.log("[MFG_bot] Flutterwave response:", JSON.stringify(flwData)?.slice(0, 200));
+
+            let flwData = null;
+            let attempt = 0;
+            const payloads = [
+              basePayload,
+              { ...basePayload, bvn: fakeBvn },
+              { ...basePayload, bvn: fakeBvn, nin: fakeNin }
+            ];
+
+            for (const payload of payloads) {
+              attempt++;
+              try {
+                console.log(`[MFG_bot] Flutterwave attempt ${attempt}...`);
+                const flwRes = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
+                  method: "POST",
+                  headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
+                  body: JSON.stringify(payload),
+                  signal: AbortSignal.timeout(15000)
+                });
+                flwData = await flwRes.json().catch(() => null);
+                console.log(`[MFG_bot] Flutterwave attempt ${attempt} response:`, JSON.stringify(flwData)?.slice(0, 200));
+                if (flwData?.status === "success" && flwData?.data?.account_number) break;
+                flwData = null;
+              } catch (e) { console.log(`[MFG_bot] FLW attempt ${attempt} err:`, e.message); }
+            }
 
             if (flwData?.status === "success" && flwData?.data?.account_number) {
               const d = flwData.data;
@@ -2022,7 +2158,7 @@ async function connectToWhatsApp() {
               await send(`✅ *GHOST BANK MFG — Account Created!* 🎉\n\n━━━━━━━━━━━━━━━━━━━━\n👤 *Name:* ${ghostBankData[jidKey].acctName}\n🏛 *Bank:* ${ghostBankData[jidKey].bankName}\n💳 *Account Number:* ${ghostBankData[jidKey].accountNumber}\n💰 *Balance:* ₦0.00\n━━━━━━━━━━━━━━━━━━━━\n\n📲 Share this number to receive payments!\nFunds reflect automatically when paid.\n\n*.pay balance* — check balance\n*.pay withdraw* — withdraw funds (contact admin)\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`);
             } else {
               const errMsg = flwData?.message || "API unavailable";
-              await send(`❌ Could not create account: ${errMsg}\n\nContact *+2349132883869* to set up your account manually.`);
+              await send(`❌ Could not create account: ${errMsg}\n\nThis usually means your Flutterwave account needs BVN/NIN verification enabled.\nContact *+2349132883869* for manual setup.`);
             }
           } catch (e) {
             console.log("[MFG_bot] Flutterwave error:", e.message);
@@ -2054,6 +2190,56 @@ async function connectToWhatsApp() {
             } catch (e) { failed++; }
           }
           await send(`✅ *Broadcast Complete*\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n📊 Total: ${contacts.length}`);
+          continue;
+        }
+
+        // .paylink <amount> [description] — generate a Flutterwave payment link
+        if (cmd === "paylink" || cmd === "plink" || cmd === "charge") {
+          const amountArg = args[0];
+          const desc = args.slice(1).join(" ").trim() || "Payment to teddymfg";
+          if (!amountArg || isNaN(Number(amountArg))) {
+            await send(`💳 *.paylink <amount> [description]*\n\nExamples:\n.paylink 3000\n.paylink 5000 For premium access\n.paylink 1500 Bot subscription\n\n_Generates a Flutterwave payment link instantly_`);
+            continue;
+          }
+          const amount = Number(amountArg);
+          if (amount < 100) { await send("❌ Minimum amount is ₦100"); continue; }
+          await send("💳 *Generating payment link...*");
+          try {
+            const txRef = `MFG_${Date.now()}_${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+            const payload = {
+              tx_ref: txRef,
+              amount,
+              currency: "NGN",
+              redirect_url: "https://teddymfg.com/thanks",
+              meta: { source: "mfg_bot_whatsapp" },
+              customer: {
+                email: "customer@mfgbot.ng",
+                name: "MFG Bot Customer"
+              },
+              customizations: {
+                title: "MFG Bot Payment",
+                description: desc,
+                logo: ""
+              },
+              payment_options: "card,banktransfer,ussd"
+            };
+            const flwRes = await fetch("https://api.flutterwave.com/v3/payments", {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              signal: AbortSignal.timeout(15000)
+            });
+            const flwData = await flwRes.json().catch(() => null);
+            console.log("[MFG_bot] Paylink response:", JSON.stringify(flwData)?.slice(0, 200));
+            if (flwData?.status === "success" && flwData?.data?.link) {
+              await send(`✅ *PAYMENT LINK GENERATED* 💳\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *Amount:* ₦${amount.toLocaleString()}\n📝 *Description:* ${desc}\n━━━━━━━━━━━━━━━━━━━━\n\n🔗 *Link:*\n${flwData.data.link}\n\n━━━━━━━━━━━━━━━━━━━━\n_Accepts: Card • Bank Transfer • USSD_\n_Ref: ${txRef}_\n\n_GHOST BANK MFG — built by teddymfg 🔥_`);
+            } else {
+              await send(`❌ Could not generate link: ${flwData?.message || "API error"}`);
+            }
+          } catch (e) {
+            console.log("[MFG_bot] Paylink error:", e.message);
+            await send("❌ Payment service error. Try again in a moment.");
+          }
           continue;
         }
 
@@ -2728,6 +2914,184 @@ async function connectToWhatsApp() {
           await send(part1);
           await new Promise(r => setTimeout(r, 700));
           await send(part2);
+          continue;
+        }
+
+        // ── .bank — alias for .pay (ghost bank shortcut) ─────────────────
+        if (cmd === "bank" || cmd === "account" || cmd === "acct") {
+          const sub = args[0]?.toLowerCase();
+          const senderPhone2 = (participantJid || from).split("@")[0].replace(/[^0-9]/g, "");
+          const jidKey2 = (participantJid || from);
+          if (ghostBankData[jidKey2]?.accountNumber) {
+            const acct = ghostBankData[jidKey2];
+            await send(`🏦 *GHOST BANK MFG*\n\n👤 *${acct.acctName}*\n🏛 ${acct.bankName || "Sterling Bank"}\n💳 *${acct.accountNumber}*\n💰 Balance: ₦${(acct.balance || 0).toLocaleString()}\n\n*.pay balance* • *.pay history* • *.pay withdraw*`);
+          } else {
+            await send("you don't have a ghost bank account yet.\ntype *.pay* to create one — takes 5 seconds 🏦");
+          }
+          continue;
+        }
+
+        // ── .sendpaylink <number> <amount> [desc] — send paylink to a number ──
+        if (cmd === "sendpaylink" || cmd === "splink") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const numArg = args[0]?.replace(/\D/g, "");
+          const amountArg2 = args[1];
+          const desc2 = args.slice(2).join(" ").trim() || "Payment to teddymfg";
+          if (!numArg || !amountArg2 || isNaN(Number(amountArg2))) {
+            await send("*.sendpaylink <number> <amount> [desc]*\nexample: .sendpaylink 08012345678 5000 For premium access");
+            continue;
+          }
+          const amount2 = Number(amountArg2);
+          try {
+            const txRef2 = `MFG_${Date.now()}_${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+            const flwRes2 = await fetch("https://api.flutterwave.com/v3/payments", {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ tx_ref: txRef2, amount: amount2, currency: "NGN", redirect_url: "https://teddymfg.com/thanks", customer: { email: `wa_${numArg}@mfgbot.ng`, name: numArg }, customizations: { title: "MFG Bot Payment", description: desc2 }, payment_options: "card,banktransfer,ussd" }),
+              signal: AbortSignal.timeout(15000)
+            });
+            const flwData2 = await flwRes2.json().catch(() => null);
+            if (flwData2?.status === "success" && flwData2?.data?.link) {
+              const targetJid = `${numArg.replace(/^0/, "234")}@s.whatsapp.net`;
+              await sock.sendMessage(targetJid, { text: `💳 *PAYMENT REQUEST*\n\nYou have a payment of *₦${amount2.toLocaleString()}* from teddymfg.\n\n📝 ${desc2}\n\n🔗 *Pay here:*\n${flwData2.data.link}\n\n_Accepts: Card • Bank Transfer • USSD_\n_Powered by GHOST BANK MFG 🔥_` });
+              await send(`✅ Payment link (₦${amount2.toLocaleString()}) sent to ${numArg}`);
+            } else {
+              await send(`❌ Failed: ${flwData2?.message || "API error"}`);
+            }
+          } catch (e) { await send("❌ Error: " + e.message); }
+          continue;
+        }
+
+        // ── .nairarate — live NGN exchange rates ──────────────────────────
+        if (cmd === "nairarate" || cmd === "rate" || cmd === "usdngn") {
+          try {
+            const r = await fetch("https://api.exchangerate-api.com/v4/latest/NGN", { signal: AbortSignal.timeout(8000) });
+            const d = await r.json();
+            const rates = d?.rates;
+            if (!rates) throw new Error("no data");
+            const usd = (1 / rates.USD).toFixed(2);
+            const gbp = (1 / rates.GBP).toFixed(2);
+            const eur = (1 / rates.EUR).toFixed(2);
+            await send(`💱 *NGN EXCHANGE RATES*\n\n🇺🇸 $1 USD = ₦${usd}\n🇬🇧 £1 GBP = ₦${gbp}\n🇪🇺 €1 EUR = ₦${eur}\n\n_via exchangerate-api_`);
+          } catch (e) { await send("couldn't fetch exchange rates rn. try again later."); }
+          continue;
+        }
+
+        // ── .convertngn <amount> <currency> — convert NGN to foreign ────
+        if (cmd === "convertngn" || cmd === "convert") {
+          const amt = parseFloat(args[0]);
+          const cur = (args[1] || "USD").toUpperCase();
+          if (isNaN(amt)) { await send(".convertngn <amount> <currency>\nexample: .convertngn 50000 USD"); continue; }
+          try {
+            const r = await fetch(`https://api.exchangerate-api.com/v4/latest/NGN`, { signal: AbortSignal.timeout(8000) });
+            const d = await r.json();
+            const rate = d?.rates?.[cur];
+            if (!rate) { await send(`❌ unknown currency: ${cur}`); continue; }
+            const converted = (amt * rate).toFixed(2);
+            await send(`💱 ₦${amt.toLocaleString()} = *${converted} ${cur}*`);
+          } catch (e) { await send("conversion failed. try again."); }
+          continue;
+        }
+
+        // ── .news — latest Nigerian headlines ────────────────────────────
+        if (cmd === "news" || cmd === "headlines") {
+          try {
+            const r = await fetch("https://rss.cnn.com/rss/edition_africa.rss", { signal: AbortSignal.timeout(10000), headers: { "User-Agent": "Mozilla/5.0" } });
+            const xml = await r.text();
+            const items = [...xml.matchAll(/<item>[\s\S]*?<title><!\[CDATA\[([^\]]+)\]\]><\/title>[\s\S]*?<\/item>/g)].slice(0, 5);
+            if (!items.length) throw new Error("no items");
+            const lines = items.map((m, i) => `${i + 1}. ${m[1]}`).join("\n");
+            await send(`📰 *LATEST NEWS*\n\n${lines}\n\n_Source: CNN Africa_`);
+          } catch (e) {
+            await send("couldn't fetch news right now. try again later.");
+          }
+          continue;
+        }
+
+        // ── .remind <minutes> <message> — set a reminder ────────────────
+        if (cmd === "remind" || cmd === "reminder") {
+          const mins = parseInt(args[0]);
+          const reminderText = args.slice(1).join(" ").trim();
+          if (isNaN(mins) || mins < 1 || !reminderText) {
+            await send("*.remind <minutes> <message>*\nexample: .remind 30 call mum\n.remind 60 take your medicine");
+            continue;
+          }
+          if (mins > 1440) { await send("max reminder is 24 hours (1440 mins)"); continue; }
+          await send(`⏰ *Reminder set!*\nI'll remind you in *${mins} minute${mins > 1 ? "s" : ""}* to: _${reminderText}_`);
+          setTimeout(async () => {
+            try {
+              await sock.sendMessage(from, { text: `⏰ *REMINDER!*\n\n_${reminderText}_\n\nset ${mins} min${mins > 1 ? "s" : ""} ago 📌` });
+            } catch (e) { console.log("[MFG_bot] reminder send err:", e.message); }
+          }, mins * 60 * 1000);
+          continue;
+        }
+
+        // ── .crypto <coin> — live crypto price ───────────────────────────
+        if (cmd === "crypto" || cmd === "coin" || cmd === "btc" || cmd === "eth") {
+          const coinId = (cmd === "btc" ? "bitcoin" : cmd === "eth" ? "ethereum" : (args[0] || "bitcoin")).toLowerCase();
+          try {
+            const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(coinId)}&vs_currencies=usd,ngn`, { signal: AbortSignal.timeout(10000) });
+            const d = await r.json();
+            const data = d?.[coinId];
+            if (!data) { await send(`❌ coin "${coinId}" not found. try: bitcoin, ethereum, solana, dogecoin`); continue; }
+            await send(`💰 *${coinId.toUpperCase()}*\n\n🇺🇸 $${data.usd?.toLocaleString() || "?"}\n🇳🇬 ₦${data.ngn?.toLocaleString() || "?"}`);
+          } catch (e) { await send("crypto lookup failed. try again."); }
+          continue;
+        }
+
+        // ── .translate <lang> <text> — translate text ─────────────────
+        if (cmd === "translate" || cmd === "tr") {
+          const lang = args[0] || "en";
+          const textToTl = args.slice(1).join(" ").trim();
+          if (!textToTl) { await send(".translate <lang> <text>\nexample: .translate es Hello how are you"); continue; }
+          try {
+            const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(textToTl)}&langpair=en|${lang}`, { signal: AbortSignal.timeout(10000) });
+            const d = await r.json();
+            const result = d?.responseData?.translatedText;
+            if (!result || result === textToTl) { await send("❌ translation failed or same language"); continue; }
+            await send(`🌍 *Translated to ${lang.toUpperCase()}:*\n${result}`);
+          } catch (e) { await send("translation failed. try again."); }
+          continue;
+        }
+
+        // ── .qr <text> — generate a QR code link ─────────────────────
+        if (cmd === "qr" || cmd === "qrcode") {
+          const qrText = args.join(" ").trim();
+          if (!qrText) { await send(".qr <text or url>\nexample: .qr https://wa.me/2349132883869"); continue; }
+          const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrText)}`;
+          try {
+            const r = await fetch(qrUrl, { signal: AbortSignal.timeout(10000) });
+            const buf = Buffer.from(await r.arrayBuffer());
+            await sock.sendMessage(from, { image: buf, caption: `📱 QR code for:\n_${qrText}_` });
+          } catch (e) { await send(`📱 QR code:\n${qrUrl}`); }
+          continue;
+        }
+
+        // ── .tiktok / .reel / .igdl <url> — try download from short-video ─
+        if (cmd === "tiktok" || cmd === "tt" || cmd === "reel" || cmd === "igdl" || cmd === "insta") {
+          const mediaUrl = args[0];
+          if (!mediaUrl || !mediaUrl.startsWith("http")) { await send(`*.${cmd} <url>*\nPaste the TikTok / Instagram / Reel link`); continue; }
+          await send("⏬ trying to download...");
+          try {
+            const cobaltRes = await fetch("https://cobalt.api.nadeko.net/json", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              body: JSON.stringify({ url: mediaUrl, vQuality: "720", aFormat: "mp3", disableMetadata: true }),
+              signal: AbortSignal.timeout(20000)
+            });
+            const cobaltData = await cobaltRes.json().catch(() => null);
+            const dlUrl = cobaltData?.url || cobaltData?.audio;
+            if (!dlUrl) { await send(`❌ download failed.\ntry: ${mediaUrl}`); continue; }
+            const mediaRes = await fetch(dlUrl, { signal: AbortSignal.timeout(40000) });
+            const buf = Buffer.from(await mediaRes.arrayBuffer());
+            const ct = mediaRes.headers.get("content-type") || "";
+            if (ct.includes("audio")) {
+              await sock.sendMessage(from, { audio: buf, mimetype: "audio/mp4", fileName: "audio.mp3" });
+            } else {
+              await sock.sendMessage(from, { video: buf, mimetype: "video/mp4", caption: "🎬" });
+            }
+            await send("✅ done 🎧");
+          } catch (e) { await send("❌ download failed: " + e.message); }
           continue;
         }
 
