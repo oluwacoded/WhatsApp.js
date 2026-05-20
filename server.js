@@ -127,6 +127,10 @@ WHEN UNSURE: Just be short, lowercase, casual. One word answers are fine. "yo", 
 let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
 delete settings.paymentsEnabled;
 
+// ─── Flutterwave Keys ────────────────────────────────────────────────────────
+const FLW_SECRET = process.env.FLW_SECRET_KEY || "FLWSECK-14b11162ce0167093f3353be3612e2c7-19e42c2f103vt-X";
+let ghostBankData = readJSON("ghostBank.json", {}); // jid → { accountNumber, bankName, acctName, txRef, balance }
+
 let tokenData = readJSON("tokenData.json", {
   validTokens: [ "a7F9kLm2Qx8P", "Zr4Tn8Vy1Bc6", "pQ5mX2sL9dKe", "H8uJ3wRt7Nz1", "yL0cV6kPq4Xm", "T9bF2nGh5Wr8", "mX7qL1zCv9Dt", "R4pNk8Jw2Ys5", "vD6tQ3mLp1Xc", "K2yW9nFr5Tb7", "cM8xQ4vL1zHp", "P5rT7nYk2Wd9", "fJ3mX8qLc6Vz", "N1wK4tRp9Ys2", "zQ7vM2xLf5Dc", "B9kT3nWy8Rp1", "gL4xQ7mVc2Dt", "W6pNz1kY5Rf8", "tX2mL9qCv4Jh", "Y8rK5nWp1Dz3", "qF7vM2xLc9Tb", "D1kY4nRp8Ws5", "mQ9xL2vTc7Fh", "R5pNz8kW1Dy4", "cX3mL7qVf2Tn", "T8rK1nWp5Dz9", "zF4vM7xLc2Tb", "B1kY9nRp4Ws8", "gQ5xL2vTc8Fh", "W7pNz1kY4Rf9", "tX8mL3qCv5Jh", "Y2rK9nWp1Dz6", "qF5vM8xLc4Tb", "D7kY1nRp9Ws2", "mQ4xL8vTc5Fh", "R1pNz7kW2Dy9", "cX5mL9qVf1Tn", "T2rK8nWp4Dz7", "zF1vM5xLc9Tb", "B8kY2nRp6Ws4", "gQ7xL1vTc5Fh", "W9pNz4kY2Rf8", "tX6mL3qCv1Jh", "Y5rK8nWp2Dz9", "qF1vM4xLc7Tb", "D9kY5nRp2Ws8", "mQ3xL7vTc1Fh", "R8pNz2kW5Dy4", "cX1mL6qV9Tn3", "T5rK2nWp8Dz1", "zF9vM3xLc7Tb", "B4kY8nRp1Ws5", "gQ2xL9vTc6Fh", "W1pNz5kY8Rf3", "tX4mL7qCv2Jh", "Y9rK1nWp6Dz5", "qF3vM8xLc2Tb", "D5kY7nRp4Ws1", "mQ1xL6vTc9Fh", "R2pNz8kW3Dy7", "cX9mL4qV1Tn5", "T7rK3nWp9Dz2", "zF2vM6xLc8Tb", "B5kY1nRp7Ws9", "gQ8xL4vTc2Fh", "W3pNz9kY1Rf6", "tX5mL2qCv8Jh", "Y1rK7nWp4Dz9", "qF6vM3xLc5Tb", "D8kY2nRp9Ws4", "mQ7xL1vTc3Fh", "R4pNz6kW8Dy2", "cX2mL9qV5Tn1", "T1rK8nWp3Dz7", "zF5vM7xLc4Tb", "B2kY9nRp6Ws1", "gQ4xL8vTc5Fh", "W6pNz1kY7Rf2", "tX9mL3qCv4Jh", "Y7rK5nWp1Dz8", "qF2vM9xLc6Tb", "D4kY7nRp3Ws5", "mQ8xL1vTc2Fh", "R9pNz5kW4Dy1", "cX6mL2qV8Tn7", "T3rK9nWp5Dz1", "zF7vM4xLc1Tb", "B1kY5nRp8Ws3", "gQ9xL2vTc4Fh", "W5pNz8kY1Rf7", "tX1mL6qCv9Jh", "Y4rK2nWp7Dz5", "qF8vM1xLc3Tb", "D2kY6nRp9Ws4", "mQ5xL7vTc1Fh", "R3pNz4kW8Dy2", "cX7mL1qV5Tn9", "T9rK4nWp2Dz6", "zF3vM8xLc5Tb", "B6kY1nRp7Ws2" ],
   usedTokens: {},
@@ -373,68 +377,71 @@ async function streamToBuffer(stream, maxBytes = 25 * 1024 * 1024) {
   });
 }
 
-async function downloadYoutubeAudio(url) {
-  // ── ONLY uses the vercel download API — no ytdl fallback ──────────────────
-  const DOWNLOAD_API = "https://api-olive-five-53.vercel.app/download?url=";
-  try {
-    console.log(`[MFG_bot] Download API → ${url.slice(0, 60)}`);
-    const res = await fetch(DOWNLOAD_API + encodeURIComponent(url), {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(30000)
-    });
+// ─── Music Download — JioSaavn (free, no API key) ────────────────────────────
+// Supports any song name or artist. Works worldwide including Afrobeats.
+async function downloadMusic(query) {
+  if (!query) return null;
+  const q = encodeURIComponent(query.trim());
 
-    // If the API streams audio directly (binary response)
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType.includes("audio") || contentType.includes("octet-stream") || contentType.includes("mpeg")) {
-      const arrayBuffer = await res.arrayBuffer();
-      if (arrayBuffer.byteLength > 1000) {
-        console.log(`[MFG_bot] Download API → binary stream (${arrayBuffer.byteLength} bytes)`);
-        return { buffer: Buffer.from(arrayBuffer), title: "song", source: "api-stream" };
+  // Multiple free JioSaavn API endpoints as fallbacks
+  const SAAVN_ENDPOINTS = [
+    `https://saavn.dev/api/search/songs?query=${q}&limit=3`,
+    `https://jiosaavn-api.vercel.app/api/search/songs?query=${q}&page=1&limit=3`,
+    `https://jiosaavnapi.vercel.app/search/songs?query=${q}`
+  ];
+
+  for (const apiUrl of SAAVN_ENDPOINTS) {
+    try {
+      console.log(`[MFG_bot] Music search → ${apiUrl.slice(0, 70)}`);
+      const r = await fetch(apiUrl, {
+        signal: AbortSignal.timeout(12000),
+        headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }
+      });
+      const data = await r.json().catch(() => null);
+      if (!data) continue;
+
+      // Handle different response shapes
+      const results = data?.data?.results ?? data?.data ?? data?.results ?? [];
+      const song = Array.isArray(results) ? results[0] : null;
+      if (!song) { console.log("[MFG_bot] Saavn no results for this endpoint"); continue; }
+
+      const title = song.name || song.title || query;
+      const dlUrls = song.downloadUrl || song.download_url || song.media_url || [];
+      let audioLink = null;
+
+      if (Array.isArray(dlUrls) && dlUrls.length > 0) {
+        // Pick highest quality available
+        const best = dlUrls.find(d => d.quality === "320kbps")
+          || dlUrls.find(d => d.quality === "160kbps")
+          || dlUrls.find(d => d.quality === "96kbps")
+          || dlUrls[dlUrls.length - 1];
+        audioLink = best?.link || best?.url;
+      } else if (typeof dlUrls === "string" && dlUrls.startsWith("http")) {
+        audioLink = dlUrls;
       }
-    }
 
-    // JSON response — try every known format the API might return
-    const data = await res.json().catch(() => null);
-    if (!data) { console.log("[MFG_bot] Download API → no JSON"); return null; }
-    console.log("[MFG_bot] Download API response keys:", Object.keys(data).join(", "));
+      if (!audioLink) { console.log("[MFG_bot] Saavn no download URL"); continue; }
 
-    const title = data?.title || data?.name || data?.videoDetails?.title || "song";
-
-    // Format 1: { audio: { "320": url, "128": url } }
-    const audioUrl =
-      data?.audio?.["320"] || data?.audio?.["128"] || data?.audio?.["192"] || data?.audio?.["64"] ||
-      // Format 2: { url: "..." } or { download_url: "..." } or { link: "..." }
-      data?.url || data?.download_url || data?.link || data?.audio_url || data?.audioUrl ||
-      // Format 3: { formats: [{ url, quality }] } — pick best audio
-      (Array.isArray(data?.formats)
-        ? (data.formats.find(f => f?.mimeType?.includes("audio") || f?.quality?.includes("audio"))?.url ||
-           data.formats[0]?.url)
-        : null) ||
-      // Format 4: { streams: [...] }
-      (Array.isArray(data?.streams)
-        ? data.streams.find(s => s?.mimeType?.includes("audio"))?.url
-        : null) ||
-      // Format 5: { medias: [...] }
-      (Array.isArray(data?.medias)
-        ? data.medias.find(m => m?.type === "audio" || m?.ext === "mp3")?.url
-        : null);
-
-    if (audioUrl) {
-      console.log(`[MFG_bot] Fetching audio from: ${String(audioUrl).slice(0, 80)}`);
-      const audioRes = await fetch(audioUrl, { signal: AbortSignal.timeout(30000) });
+      console.log(`[MFG_bot] Downloading "${title}" from Saavn → ${audioLink.slice(0, 60)}`);
+      const audioRes = await fetch(audioLink, {
+        signal: AbortSignal.timeout(40000),
+        headers: { "User-Agent": "Mozilla/5.0" }
+      });
       const arrayBuffer = await audioRes.arrayBuffer();
-      if (arrayBuffer.byteLength < 1000) { console.log("[MFG_bot] Audio too small"); return null; }
-      console.log(`[MFG_bot] ✅ Downloaded "${title}" (${Math.round(arrayBuffer.byteLength/1024)}KB)`);
-      return { buffer: Buffer.from(arrayBuffer), title, source: "api" };
+      if (arrayBuffer.byteLength < 5000) { console.log("[MFG_bot] Audio file too small, trying next"); continue; }
+      console.log(`[MFG_bot] ✅ Got "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+      return { buffer: Buffer.from(arrayBuffer), title, source: "saavn" };
+    } catch (e) {
+      console.log(`[MFG_bot] Music API error (${apiUrl.slice(0, 40)}...): ${e.message}`);
     }
-
-    console.log("[MFG_bot] Download API → no audio URL found in response:", JSON.stringify(data).slice(0, 200));
-    return null;
-  } catch (e) {
-    console.log("[MFG_bot] Download API error:", e.message);
-    return null;
   }
+
+  console.log("[MFG_bot] All music APIs failed for query:", query);
+  return null;
 }
+
+// Keep this alias so existing callers don't break
+const downloadYoutubeAudio = downloadMusic;
 
 async function getYoutubeInfo(url) {
   try {
@@ -858,12 +865,27 @@ async function connectToWhatsApp() {
       isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
       hasEverConnected = true; consecutive401s = 0;
       console.log("[MFG_bot] Connected to WhatsApp");
-      // Greet the owner on every fresh connection
+      // Greet the operator (the connected number)
       setTimeout(async () => {
         try {
+          const selfJid = sock.user.id;
           await sock.sendMessage(OWNER_JID, {
             text: `mfg_bot online ✅\n\nyou're linked. i'm ready.\n\nmodel: openai/gpt-oss-120b via groq\nai: ${settings.aiEnabled ? "on" : "off"}\n\nyou're my maker. i listen to you first.`
           });
+
+          // ── Deployment license check ──────────────────────────────────────
+          // If the connected number is NOT the creator, check for a valid license
+          const connectedNum = (sock?.user?.id || "").split(":")[0].replace(/\D/g, "");
+          const creatorNums = OWNER_NUMBERS.map(n => n.replace(/\D/g, ""));
+          const isCreatorDeployment = creatorNums.some(n => connectedNum.endsWith(n) || n.endsWith(connectedNum));
+          if (!isCreatorDeployment) {
+            const license = readJSON("license.json", { licensed: false });
+            if (!license.licensed) {
+              await sock.sendMessage(selfJid, {
+                text: `🔐 *mfg_bot — License Required*\n\n━━━━━━━━━━━━━━━━━━━━\nYou have connected your number to *mfg_bot*.\nTo activate and unlock all features, you need a license key.\n━━━━━━━━━━━━━━━━━━━━\n\nTo activate:\n1️⃣ Contact *+2349132883869* (teddymfg)\n2️⃣ Pay *₦3,000* — one-time payment\n3️⃣ You'll receive your personal license key\n4️⃣ Type *.activate <your_key>* here to unlock\n\n_Each license is for ONE WhatsApp number only._\n_Built by teddymfg 🔥_`
+              });
+            }
+          }
         } catch (e) { console.log("[MFG_bot] Could not message owner:", e.message); }
       }, 3000);
     }
@@ -1029,28 +1051,28 @@ async function connectToWhatsApp() {
         || (myLid && participantJid?.startsWith(myLid))
         || (myId  && partDigits === myId);
 
-      // --- TOKEN AUTHORIZATION ---
-      const activeSenderId = participantJid || from;
-      if (!senderIsOwner && from !== "status@broadcast") {
-        if (!tokenData.authorizedUsers[activeSenderId]) {
-          const uTxt = (text || "").trim();
-          if (tokenData.validTokens.includes(uTxt)) {
-            if (tokenData.usedTokens[uTxt] && tokenData.usedTokens[uTxt] !== activeSenderId) {
-              await send("❌ *Token Already Used*\n\nThis token has already been claimed by another number.\nEach token is one-time use only.\n\nContact *+2349132883869* to get a fresh token.");
-              continue;
+      // --- DEPLOYMENT LICENSE (owner-only .activate command) ---
+      // This only applies to the bot OPERATOR, not to contacts texting the bot.
+      // Regular contacts text freely — no token gate.
+      if (senderIsOwner) {
+        const uTxt = (text || "").trim();
+        if (uTxt.toLowerCase().startsWith(".activate ")) {
+          const key = uTxt.slice(10).trim();
+          const license = readJSON("license.json", { licensed: false });
+          if (license.licensed) { await send("✅ Bot is already activated."); continue; }
+          if (tokenData.validTokens.includes(key)) {
+            const connNum = sock?.user?.id?.split(":")[0] || "unknown";
+            if (tokenData.usedTokens[key] && tokenData.usedTokens[key] !== connNum) {
+              await send("❌ That license key is already used on another number. Contact *+2349132883869* for a new one."); continue;
             }
-            tokenData.usedTokens[uTxt] = activeSenderId;
-            tokenData.authorizedUsers[activeSenderId] = true;
+            tokenData.usedTokens[key] = connNum;
             writeJSON("tokenData.json", tokenData);
-            await send("✅ *ACCESS GRANTED!* 🔓\n\n━━━━━━━━━━━━━━━━━━━━\nWelcome to *mfg_bot* — you're now fully unlocked!\n━━━━━━━━━━━━━━━━━━━━\n\n🤖 AI replies — active\n🎵 Music downloads — ready\n📱 200+ commands — available\n\nType *.list* to see everything you can do.\n_made by teddymfg • +2349132883869_");
-            continue;
-          } else {
-            await send("🔐 *mfg_bot — Access Required*\n\n━━━━━━━━━━━━━━━━━━━━\nThis bot requires a *one-time access token*.\n━━━━━━━━━━━━━━━━━━━━\n\nTo get your token:\n1️⃣ Contact *+2349132883869*\n2️⃣ Pay ₦3,000 to unlock full access\n3️⃣ Paste your token here\n\n_Each token works for ONE number only._");
-            continue;
-          }
+            writeJSON("license.json", { licensed: true, key, activatedFor: connNum, date: new Date().toISOString() });
+            await send("✅ *Bot Activated!* 🎉\n\nYour bot is now fully licensed and running.\nAll features unlocked.\n\n_Made by teddymfg • +2349132883869_"); continue;
+          } else { await send("❌ Invalid license key. Contact *+2349132883869* to purchase one."); continue; }
         }
       }
-      // --- END TOKEN AUTHORIZATION ---
+      // --- END DEPLOYMENT LICENSE ---
 
       // Debug: log every group command so we can see why it might fail
       if (text?.startsWith(pfx) && from?.endsWith("@g.us")) {
@@ -1062,6 +1084,13 @@ async function connectToWhatsApp() {
       if (isFromMe && !text.startsWith(pfx) && from !== "status@broadcast" && settings.autoTakeover) {
         ownerTakeover.set(from, Date.now());
         console.log(`[MFG_bot] Owner took over chat ${from.slice(-15)} — AI paused ${settings.takeoverMinutes}m`);
+      }
+
+      // ── AUTO-REACT: react to incoming messages with configured emoji ─────────
+      if (!isFromMe && settings.autoReactEmoji && from !== "status@broadcast" && msg?.key) {
+        try {
+          await sock.sendMessage(from, { react: { text: settings.autoReactEmoji, key: msg.key } });
+        } catch (e) { /* silent — react failure is non-critical */ }
       }
 
       // ── Auto-learn from EVERY message the owner sends (silent, automatic) ──
@@ -1898,6 +1927,134 @@ async function connectToWhatsApp() {
           const prompt = `Argue this position PASSIONATELY and convincingly: "${position}". Don't hold back — be a lawyer, a preacher, and a Nigerian uncle all in one. Make the strongest possible case. Use facts, emotion, Nigerian proverbs, and analogies. Win the argument.`;
           const reply = await askGroq(prompt, from);
           await send(reply || "❌ argument collapsed. try again."); continue;
+        }
+
+        // .react <emoji|off> — set auto-react emoji for all incoming messages
+        if (cmd === "react") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const emoji = args.join(" ").trim();
+          if (!emoji || emoji.toLowerCase() === "off") {
+            settings.autoReactEmoji = null;
+            writeJSON("settings.json", settings);
+            await send("✅ auto-react turned OFF — no more emoji reactions.");
+          } else {
+            settings.autoReactEmoji = emoji;
+            writeJSON("settings.json", settings);
+            await send(`✅ auto-react set to *${emoji}* — I'll react to every incoming message with this emoji.`);
+          }
+          continue;
+        }
+
+        // .pay — Flutterwave GHOST BANK virtual account
+        if (cmd === "pay" || cmd === "bank" || cmd === "ghostbank") {
+          const sub = args[0]?.toLowerCase();
+          const senderPhone = (participantJid || from).split("@")[0].replace(/[^0-9]/g, "");
+          const senderName = msg?.pushName || msg?.verifiedBizName || `User_${senderPhone.slice(-4)}`;
+          const jidKey = (participantJid || from);
+
+          if (sub === "balance") {
+            const acct = ghostBankData[jidKey];
+            if (!acct) { await send("You don't have a GHOST BANK account yet. Type *.pay* to create one."); continue; }
+            await send(`🏦 *GHOST BANK MFG*\n\n👤 Name: ${acct.acctName}\n🏛 Bank: ${acct.bankName || "Sterling Bank"}\n💳 Account: ${acct.accountNumber}\n💰 Balance: ₦${(acct.balance || 0).toLocaleString()}\n\n_Type .pay history for transactions_`);
+            continue;
+          }
+
+          if (sub === "history") {
+            const acct = ghostBankData[jidKey];
+            if (!acct) { await send("No account found. Type *.pay* to create one."); continue; }
+            const txs = acct.transactions || [];
+            if (!txs.length) { await send("No transactions yet. Share your account number to receive funds."); continue; }
+            const lines = txs.slice(-10).map(t => `${t.type === "credit" ? "➕" : "➖"} ₦${t.amount.toLocaleString()} — ${t.note || "transfer"} (${t.date})`).join("\n");
+            await send(`📋 *GHOST BANK — Transaction History*\n\n${lines}\n\n💰 Balance: ₦${(acct.balance || 0).toLocaleString()}`);
+            continue;
+          }
+
+          if (sub === "withdraw") {
+            const acct = ghostBankData[jidKey];
+            if (!acct) { await send("No account found. Type *.pay* to create one."); continue; }
+            await send(`💸 *Withdrawal Request*\n\n💰 Your Balance: ₦${(acct.balance || 0).toLocaleString()}\n\nTo withdraw your funds, contact the admin:\n📲 *+2349132883869* (teddymfg)\n\n_Admin processes withdrawals within 24 hours._\n_GHOST BANK MFG — Built by teddymfg_`);
+            continue;
+          }
+
+          // Default: create / show account
+          if (ghostBankData[jidKey]?.accountNumber) {
+            const acct = ghostBankData[jidKey];
+            await send(`🏦 *GHOST BANK MFG*\n━━━━━━━━━━━━━━━━━━━━\n\n👤 *Account Name:* ${acct.acctName}\n🏛 *Bank:* ${acct.bankName || "Sterling Bank"}\n💳 *Account Number:* ${acct.accountNumber}\n💰 *Balance:* ₦${(acct.balance || 0).toLocaleString()}\n\n━━━━━━━━━━━━━━━━━━━━\n📲 Share this account to receive payments.\n\n*.pay balance* — check balance\n*.pay history* — view transactions\n*.pay withdraw* — request withdrawal\n\n_Powered by GHOST BANK MFG 🔥_`);
+            continue;
+          }
+
+          // Create new Flutterwave virtual account
+          await send("🏦 *Creating your GHOST BANK account...*");
+          try {
+            const txRef = `GHOST_${senderPhone}_${Date.now()}`;
+            const payload = {
+              email: `wa_${senderPhone}@ghostbank.mfg`,
+              is_permanent: true,
+              tx_ref: txRef,
+              narration: senderName,
+              currency: "NGN",
+              amount: 100
+            };
+            const flwRes = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${FLW_SECRET}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify(payload),
+              signal: AbortSignal.timeout(15000)
+            });
+            const flwData = await flwRes.json().catch(() => null);
+            console.log("[MFG_bot] Flutterwave response:", JSON.stringify(flwData)?.slice(0, 200));
+
+            if (flwData?.status === "success" && flwData?.data?.account_number) {
+              const d = flwData.data;
+              ghostBankData[jidKey] = {
+                accountNumber: d.account_number,
+                bankName: d.bank_name || "Sterling Bank",
+                acctName: d.account_name || senderName,
+                txRef,
+                balance: 0,
+                transactions: [],
+                createdAt: new Date().toISOString()
+              };
+              writeJSON("ghostBank.json", ghostBankData);
+              await send(`✅ *GHOST BANK MFG — Account Created!* 🎉\n\n━━━━━━━━━━━━━━━━━━━━\n👤 *Name:* ${ghostBankData[jidKey].acctName}\n🏛 *Bank:* ${ghostBankData[jidKey].bankName}\n💳 *Account Number:* ${ghostBankData[jidKey].accountNumber}\n💰 *Balance:* ₦0.00\n━━━━━━━━━━━━━━━━━━━━\n\n📲 Share this number to receive payments!\nFunds reflect automatically when paid.\n\n*.pay balance* — check balance\n*.pay withdraw* — withdraw funds (contact admin)\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`);
+            } else {
+              const errMsg = flwData?.message || "API unavailable";
+              await send(`❌ Could not create account: ${errMsg}\n\nContact *+2349132883869* to set up your account manually.`);
+            }
+          } catch (e) {
+            console.log("[MFG_bot] Flutterwave error:", e.message);
+            await send("❌ Bank service temporarily down. Try again in a moment or contact *+2349132883869*.");
+          }
+          continue;
+        }
+
+        // .bcast <message> — auto-broadcast to ALL contacts (owner only)
+        if (cmd === "bcast" || cmd === "autobroadcast") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const msg2send = args.join(" ").trim();
+          if (!msg2send) {
+            await send("📢 *.bcast <message>*\n\nSends your message to ALL your WhatsApp contacts at once.\n\nExample: .bcast Hey everyone, check out my new service!\n\n⚠️ Use wisely — WhatsApp may flag mass messaging."); continue;
+          }
+          const contacts = allChats.filter(c =>
+            c.id.endsWith("@s.whatsapp.net") &&
+            !c.id.includes(OWNER_NUMBERS[0]?.replace(/\D/g, ""))
+          );
+          if (!contacts.length) { await send("No contacts found in the chat store yet. Chat with some people first!"); continue; }
+          await send(`📢 Broadcasting to *${contacts.length} contacts*... this may take a moment.`);
+          let sent = 0, failed = 0;
+          for (const contact of contacts) {
+            try {
+              await sock.sendMessage(contact.id, { text: msg2send });
+              sent++;
+              if (sent % 10 === 0) await new Promise(r => setTimeout(r, 1500)); // rate limit
+              else await new Promise(r => setTimeout(r, 300));
+            } catch (e) { failed++; }
+          }
+          await send(`✅ *Broadcast Complete*\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n📊 Total: ${contacts.length}`);
+          continue;
         }
 
         // .refer — referral system info
