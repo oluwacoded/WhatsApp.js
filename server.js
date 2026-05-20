@@ -3526,6 +3526,98 @@ app.delete("/api/bots/:id", (req, res) => {
   res.status(204).end();
 });
 
+// ─── PAYMENT EVENT PROCESSOR — runs on EVERY backend ────────────────────────
+// When any backend receives a payment (directly from FLW or forwarded from hub),
+// this function checks if it owns the account and updates the balance + WA notify.
+async function processPaymentEvent(payload) {
+  try {
+    const data = payload?.data || {};
+    const status = data.status;
+    if (status !== "successful") return false; // only process successful payments
+
+    const txRef       = data.tx_ref || data.txRef || "";
+    const accountNum  = data.account_number || data.meta?.account_number || "";
+    const amount      = Number(data.amount || 0);
+    const narration   = data.narration || data.meta?.narration || "";
+    const flwRef      = data.flw_ref || data.id || "";
+    const now         = new Date();
+    const dateStr     = now.toLocaleDateString("en-NG", { day: "2-digit", month: "short", year: "numeric" });
+
+    // Find which JID owns this account — match by txRef or account_number
+    let ownerJid = null;
+    for (const [jid, acct] of Object.entries(ghostBankData)) {
+      const matchTxRef  = txRef && acct.txRef === txRef;
+      const matchAccNum = accountNum && acct.accountNumber === accountNum;
+      if (matchTxRef || matchAccNum) { ownerJid = jid; break; }
+    }
+
+    if (!ownerJid) {
+      // Not our account — that's fine, another backend will handle it
+      console.log(`[Payment] Not our account — txRef:${txRef} acctNum:${accountNum}`);
+      return false;
+    }
+
+    // Duplicate guard — don't credit the same flwRef twice
+    const acct = ghostBankData[ownerJid];
+    const txList = acct.transactions || [];
+    if (flwRef && txList.some(t => t.flwRef === flwRef)) {
+      console.log(`[Payment] Duplicate event ignored — flwRef:${flwRef}`);
+      return true; // handled (already processed)
+    }
+
+    // Update balance and add transaction
+    const prevBalance = Number(acct.balance || 0);
+    const newBalance  = prevBalance + amount;
+    acct.balance = newBalance;
+    acct.transactions = [
+      ...txList,
+      { type: "credit", amount, flwRef, txRef, narration, date: dateStr, at: now.toISOString() }
+    ].slice(-50); // keep last 50 transactions
+    writeJSON("ghostBank.json", ghostBankData);
+
+    console.log(`[Payment] ✅ Balance updated for ${ownerJid}: ₦${prevBalance} → ₦${newBalance} (+₦${amount})`);
+
+    // Send WhatsApp notification to account owner
+    if (sock && isConnected) {
+      try {
+        await sock.sendMessage(ownerJid, {
+          text: `🏦 *GHOST BANK MFG — Credit Alert!* 💚\n\n━━━━━━━━━━━━━━━━━━━━\n➕ *₦${amount.toLocaleString()}* received\n📝 ${narration || "Transfer"}\n━━━━━━━━━━━━━━━━━━━━\n💰 *New Balance: ₦${newBalance.toLocaleString()}*\n📅 ${dateStr}\n🔖 Ref: ${flwRef || txRef}\n━━━━━━━━━━━━━━━━━━━━\n\n*.pay balance* — check balance\n*.pay history* — transaction history\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`
+        });
+        console.log(`[Payment] WA credit alert sent to ${ownerJid}`);
+      } catch (e) { console.log("[Payment] WA notify err:", e.message); }
+    }
+
+    // Also notify the owner's WhatsApp (the bot owner) about the inbound credit
+    if (sock && isConnected && OWNER_NUMBERS.length) {
+      const ownerPhone = OWNER_NUMBERS[0].replace(/[^0-9]/g, "");
+      const ownerWaJid = `${ownerPhone}@s.whatsapp.net`;
+      if (ownerWaJid !== ownerJid) {
+        try {
+          await sock.sendMessage(ownerWaJid, {
+            text: `💸 *GHOST BANK CREDIT*\n\n👤 ${acct.acctName}\n💳 ${acct.accountNumber}\n💰 +₦${amount.toLocaleString()}\n📝 ${narration || "Transfer"}\n🔖 ${flwRef || txRef}\n\nNew balance: ₦${newBalance.toLocaleString()}`
+          });
+        } catch {}
+      }
+    }
+    return true;
+  } catch (e) {
+    console.log("[Payment] processPaymentEvent err:", e.message);
+    return false;
+  }
+}
+
+// ── /webhook — endpoint exposed by EACH backend to receive forwarded events ──
+// The hub calls this on every backend when a payment arrives.
+// Also accepts direct Flutterwave webhooks (no verif-hash check needed here since hub already verified).
+app.post("/webhook", express.json(), async (req, res) => {
+  res.status(200).json({ status: "ok" }); // reply fast
+  const payload = req.body;
+  if (!payload) return;
+  // If forwarded from hub, payload IS the raw FLW payload
+  // If direct from FLW, same structure
+  await processPaymentEvent(payload);
+});
+
 // ─── FLUTTERWAVE WEBHOOK HUB ─────────────────────────────────────────────────
 // Single webhook URL for ALL your backends.
 // Flutterwave hits POST /webhook/flutterwave
@@ -3616,17 +3708,21 @@ app.post("/webhook/flutterwave", express.json(), async (req, res) => {
   // Acknowledge Flutterwave immediately (must reply fast)
   res.status(200).json({ status: "ok", id: eventId });
 
-  // Async: forward to all backends + notify via WhatsApp
+  // Async: process locally + forward to all backends
   setImmediate(async () => {
+    // 1. Try to handle it on THIS backend first (update balance if we own the account)
+    const handledLocally = await processPaymentEvent(payload);
+
+    // 2. Forward raw payload to all other registered backends
     await forwardToAllBackends(event);
 
-    // Notify owner on WhatsApp if payment is successful
-    if (event.status === "successful" && sock && isConnected && OWNER_NUMBERS.length) {
+    // 3. If NOT handled locally (another backend owns it) — still notify owner about inbound payment
+    if (!handledLocally && event.status === "successful" && sock && isConnected && OWNER_NUMBERS.length) {
       const ownerJid = `${OWNER_NUMBERS[0].replace(/[^0-9]/g, "")}@s.whatsapp.net`;
       const backends = readWebhookBackends();
       const fwdStatus = backends.length
-        ? `\n\n📡 Forwarded to ${backends.length} backend${backends.length > 1 ? "s" : ""}`
-        : "";
+        ? `\n📡 Forwarded to ${backends.length} backend${backends.length > 1 ? "s" : ""}`
+        : "\n⚠️ No backends registered yet";
       try {
         await sock.sendMessage(ownerJid, {
           text: `💸 *PAYMENT RECEIVED!*\n\n━━━━━━━━━━━━━━━━━━━━\n💰 Amount: *₦${(event.amount || 0).toLocaleString()}*\n👤 From: ${event.customerName || "Unknown"}\n📱 Phone: ${event.customerPhone || "—"}\n📧 ${event.customerEmail || "—"}\n🔖 Ref: ${event.txRef || "—"}\n━━━━━━━━━━━━━━━━━━━━${fwdStatus}\n\n_GHOST BANK MFG 🔥_`
@@ -3702,22 +3798,35 @@ app.delete("/webhook/backends/:id", (req, res) => {
   res.json({ success: true });
 });
 
-// ── Webhook dashboard (quick overview, no auth for GET — just shows counts) ──
+// ── Webhook dashboard (quick overview) ───────────────────────────────────────
 app.get("/webhook/status", (req, res) => {
   const events = readWebhookEvents();
   const backends = readWebhookBackends();
   const successful = events.filter(e => e.status === "successful").length;
   const totalAmount = events.filter(e => e.status === "successful").reduce((s, e) => s + (e.amount || 0), 0);
+  const domain = process.env.REPLIT_DEV_DOMAIN || req.headers.host || "your-replit-url";
+  const hubUrl = `https://${domain}/webhook/flutterwave`;
   res.json({
-    webhookUrl: `https://${process.env.REPLIT_DEV_DOMAIN || "your-replit-url"}/webhook/flutterwave`,
-    backendsRegistered: backends.length,
-    backends: backends.map(b => ({ name: b.name, url: b.url })),
-    totalEventsStored: events.length,
-    successfulPayments: successful,
-    totalAmountReceived: totalAmount,
-    latestEvent: events[0] ? { id: events[0].id, type: events[0].type, status: events[0].status, amount: events[0].amount, at: events[0].receivedAt } : null,
-    pollingEndpoint: "/webhook/events?secret=YOUR_SECRET&since=LAST_EVENT_ID",
-    note: "Register backends at POST /webhook/backends with { name, url, adminSecret }"
+    hub: {
+      webhookUrl: hubUrl,
+      instruction: `Set this as your SINGLE Flutterwave webhook URL. It forwards to all backends automatically.`,
+      flutterwaveDashboard: "flutterwave.com → Settings → Webhooks → paste the URL above"
+    },
+    backends: {
+      registered: backends.length,
+      list: backends.map(b => ({ id: b.id, name: b.name, url: b.url, addedAt: b.addedAt })),
+      howToRegister: `POST /webhook/backends with { "name": "MyBackend", "url": "https://your-backend.com/webhook", "adminSecret": "${WEBHOOK_SECRET.slice(0,8)}..." }`
+    },
+    events: {
+      totalStored: events.length,
+      successfulPayments: successful,
+      totalAmountReceived: `₦${totalAmount.toLocaleString()}`,
+      latest: events[0] ? { id: events[0].id, type: events[0].type, status: events[0].status, amount: events[0].amount, at: events[0].receivedAt } : null
+    },
+    polling: {
+      endpoint: `GET /webhook/events?secret=YOUR_SECRET&since=LAST_EVENT_ID&limit=50`,
+      use: "Call this on backend startup to catch any payments missed while offline"
+    }
   });
 });
 
