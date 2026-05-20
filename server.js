@@ -20,31 +20,6 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const pino = require("pino");
-const ytdl = require("@distube/ytdl-core");
-
-let ytdlAgent = ytdl.createAgent();
-try {
-  const cookiePath = path.join(__dirname, "youtube-cookies.txt");
-  if (fs.existsSync(cookiePath)) {
-    const cookies = fs.readFileSync(cookiePath, "utf8").split("\n").filter(l => !l.startsWith("#") && l.trim().length > 0).map(line => {
-      const parts = line.split("\t");
-      if (parts.length >= 7) {
-        return {
-          domain: parts[0],
-          path: parts[2],
-          secure: parts[3] === "TRUE",
-          expirationDate: parseInt(parts[4], 10),
-          name: parts[5],
-          value: parts[6]
-        };
-      }
-      return null;
-    }).filter(Boolean);
-    if (cookies.length > 0) ytdlAgent = ytdl.createAgent(cookies);
-  }
-} catch (e) {
-  console.log("Error loading cookies for ytdl:", e.message);
-}
 
 const app = express();
 app.use(cors());
@@ -344,52 +319,38 @@ function moodPrompt() {
   return "\n\n[MOOD: late night — sleepy energy, minimal words, maybe just 'k' or 'lol'.]";
 }
 
-// ─── YouTube search (no API key needed) ─────────────────────────────────────
-async function searchYoutube(query) {
-  // Try multiple methods to find a YouTube URL for a query
-  const methods = [
-    // Method 1: YouTube search via Invidious public instances
-    async () => {
-      const instances = [
-        "https://invidious.jing.rocks",
-        "https://inv.nadeko.net",
-        "https://invidious.privacyredirect.com"
-      ];
-      for (const base of instances) {
-        try {
-          const r = await fetch(`${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&fields=videoId`, {
-            signal: AbortSignal.timeout(8000),
-            headers: { "User-Agent": "Mozilla/5.0" }
-          });
-          const data = await r.json().catch(() => null);
-          const id = data?.[0]?.videoId;
-          if (id) return `https://www.youtube.com/watch?v=${id}`;
-        } catch {}
-      }
-      return null;
-    },
-    // Method 2: YouTube search HTML scrape
-    async () => {
-      try {
-        const r = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
-          signal: AbortSignal.timeout(10000),
-          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "en-US,en;q=0.9" }
-        });
-        const html = await r.text();
-        const m = html.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
-        if (m) return `https://www.youtube.com/watch?v=${m[1]}`;
-      } catch {}
-      return null;
-    }
-  ];
-  for (const method of methods) {
-    try {
-      const url = await method();
-      if (url) return url;
-    } catch (e) { console.log("[MFG_bot] yt search method err:", e.message); }
-  }
-  console.log("[MFG_bot] all yt search methods failed for:", query);
-  return null;
+// ─── Deezer search (free, no API key, full metadata + 30s preview fallback) ──
+async function searchDeezer(query) {
+  try {
+    const q = encodeURIComponent(query.trim());
+    const r = await fetch(`https://api.deezer.com/search?q=${q}&limit=5`, {
+      signal: AbortSignal.timeout(10000),
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+    const data = await r.json().catch(() => null);
+    return data?.data?.[0] || null;
+  } catch (e) { console.log("[MFG_bot] Deezer search err:", e.message); return null; }
+}
+
+// ─── iTunes search (free, no API key, 30s preview) ───────────────────────────
+async function downloadFromItunes(query) {
+  try {
+    const q = encodeURIComponent(query.trim());
+    const r = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&limit=5`, {
+      signal: AbortSignal.timeout(10000),
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+    const data = await r.json().catch(() => null);
+    const track = data?.results?.[0];
+    if (!track?.previewUrl) return null;
+    const title = `${track.artistName} - ${track.trackName}`;
+    console.log(`[MFG_bot] iTunes preview → "${title}"`);
+    const audioRes = await fetch(track.previewUrl, { signal: AbortSignal.timeout(30000), headers: { "User-Agent": "Mozilla/5.0" } });
+    const arrayBuffer = await audioRes.arrayBuffer();
+    if (arrayBuffer.byteLength < 5000) return null;
+    console.log(`[MFG_bot] ✅ iTunes: "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+    return { buffer: Buffer.from(arrayBuffer), title, source: "itunes", isPreview: true };
+  } catch (e) { console.log(`[MFG_bot] iTunes err: ${e.message}`); return null; }
 }
 
 function sanitizeFileName(name) {
@@ -482,93 +443,73 @@ async function downloadFromCobalt(url) {
   return null;
 }
 
-// Source 3: yt-dlp via public REST API wrappers
-async function downloadFromYtDlpApi(query) {
-  const isUrl = /https?:\/\//i.test(query);
-  const url = isUrl ? query : await searchYoutube(query);
-  if (!url) return null;
-  const APIs = [
-    `https://yt-dlp-api.herokuapp.com/download?url=${encodeURIComponent(url)}&format=mp3`,
-    `https://ytdl.freemediatools.com/api?url=${encodeURIComponent(url)}&type=audio`
-  ];
-  for (const api of APIs) {
-    try {
-      const r = await fetch(api, { signal: AbortSignal.timeout(30000), headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!r.ok) continue;
-      const ct = r.headers.get("content-type") || "";
-      if (ct.includes("audio") || ct.includes("octet-stream")) {
-        const arrayBuffer = await r.arrayBuffer();
-        if (arrayBuffer.byteLength > 5000) {
-          console.log(`[MFG_bot] ✅ ytdlp-api: ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
-          return { buffer: Buffer.from(arrayBuffer), title: "song", source: "ytdlp-api" };
-        }
-      }
-    } catch (e) { console.log(`[MFG_bot] ytdlp-api err: ${e.message}`); }
+// Main entry point: Saavn (full song) → Deezer (30s preview) → iTunes (30s preview)
+// For direct SoundCloud links: cobalt handles them
+async function downloadMusic(query) {
+  if (!query) return null;
+  const isSoundCloudUrl = /https?:\/\/(www\.)?soundcloud\.com/i.test(query);
+  const isDirectUrl = /https?:\/\//i.test(query);
+
+  if (isSoundCloudUrl) {
+    // SoundCloud direct link — cobalt handles it
+    const cobalt = await downloadFromCobalt(query);
+    if (cobalt?.buffer) return cobalt;
+    console.log("[MFG_bot] Cobalt failed for SoundCloud URL");
+    return null;
   }
+
+  if (isDirectUrl) {
+    // Unknown direct URL — try cobalt then give up (no YouTube)
+    const cobalt = await downloadFromCobalt(query);
+    if (cobalt?.buffer) return cobalt;
+    return null;
+  }
+
+  // Name-based search: Saavn (full song) → Deezer preview → iTunes preview
+  console.log(`[MFG_bot] Searching music: "${query}"`);
+  const saavn = await downloadFromSaavn(query);
+  if (saavn?.buffer) return saavn;
+
+  console.log("[MFG_bot] Saavn failed — trying Deezer preview");
+  const deezerTrack = await searchDeezer(query);
+  if (deezerTrack?.preview) {
+    try {
+      const audioRes = await fetch(deezerTrack.preview, { signal: AbortSignal.timeout(30000), headers: { "User-Agent": "Mozilla/5.0" } });
+      const arrayBuffer = await audioRes.arrayBuffer();
+      if (arrayBuffer.byteLength > 5000) {
+        const title = `${deezerTrack.artist?.name || ""} - ${deezerTrack.title || query}`.trim();
+        console.log(`[MFG_bot] ✅ Deezer: "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB (30s preview)`);
+        return { buffer: Buffer.from(arrayBuffer), title, source: "deezer", isPreview: true };
+      }
+    } catch (e) { console.log(`[MFG_bot] Deezer download err: ${e.message}`); }
+  }
+
+  console.log("[MFG_bot] Deezer failed — trying iTunes preview");
+  const itunes = await downloadFromItunes(query);
+  if (itunes?.buffer) return itunes;
+
+  console.log("[MFG_bot] All music download methods failed for:", query);
   return null;
 }
 
-// Source 4: Direct YouTube download via ytdl-core (last resort)
-async function downloadFromYtdlCore(url) {
-  try {
-    if (!ytdl.validateURL(url)) return null;
-    console.log(`[MFG_bot] ytdl-core download → ${url}`);
-    const info = await ytdl.getInfo(url, { agent: ytdlAgent });
-    const format = ytdl.chooseFormat(info.formats, { quality: "highestaudio", filter: "audioonly" });
-    if (!format) return null;
-    const stream = ytdl.downloadFromInfo(info, { format, agent: ytdlAgent });
-    const buffer = await streamToBuffer(stream);
-    const title = info.videoDetails?.title || "song";
-    console.log(`[MFG_bot] ✅ ytdl-core: "${title}" — ${Math.round(buffer.length / 1024)}KB`);
-    return { buffer, title, source: "ytdl-core" };
-  } catch (e) { console.log(`[MFG_bot] ytdl-core err: ${e.message}`); return null; }
-}
-
-// Main entry point: tries all sources in order
-async function downloadMusic(query) {
-  if (!query) return null;
-  const isUrl = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|music\.youtube\.com)/i.test(query);
-
-  if (isUrl) {
-    // For direct URLs: try cobalt → ytdl-core → saavn (with title fallback)
-    const cobalt = await downloadFromCobalt(query);
-    if (cobalt?.buffer) return cobalt;
-    const ytdlc = await downloadFromYtdlCore(query);
-    if (ytdlc?.buffer) return ytdlc;
-    console.log("[MFG_bot] All URL-based download methods failed");
-    return null;
-  } else {
-    // For song name searches: try Saavn first (best for Afrobeats), then search + download
-    const saavn = await downloadFromSaavn(query);
-    if (saavn?.buffer) return saavn;
-
-    // Fallback: find YouTube URL then download
-    console.log("[MFG_bot] Saavn failed, trying YouTube search + download");
-    const ytUrl = await searchYoutube(query);
-    if (ytUrl) {
-      const cobalt = await downloadFromCobalt(ytUrl);
-      if (cobalt?.buffer) { cobalt.title = cobalt.title || query; return cobalt; }
-      const ytdlc = await downloadFromYtdlCore(ytUrl);
-      if (ytdlc?.buffer) return ytdlc;
-    }
-
-    console.log("[MFG_bot] All music download methods failed for:", query);
-    return null;
-  }
-}
-
-// Keep this alias so existing callers don't break
+// Alias for legacy callers
 const downloadYoutubeAudio = downloadMusic;
 
-async function getYoutubeInfo(url) {
+// Song info via Deezer (replaces old getYoutubeInfo)
+async function getSongInfo(query) {
   try {
-    if (!ytdl.validateURL(url)) return null;
-    const info = await ytdl.getBasicInfo(url, { agent: ytdlAgent });
-    return info.videoDetails;
-  } catch (e) {
-    console.log("[MFG_bot] yt info err:", e.message);
-    return null;
-  }
+    const track = await searchDeezer(query);
+    if (!track) return null;
+    const seconds = Math.round(track.duration || 0);
+    const duration = seconds ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "unknown";
+    return {
+      title: track.title,
+      artist: track.artist?.name || "Unknown",
+      album: track.album?.title || "Unknown",
+      duration,
+      link: track.link || `https://www.deezer.com/track/${track.id}`
+    };
+  } catch (e) { return null; }
 }
 
 // ─── Diagnostic logs (exposed via /api/recent for live debugging) ────────────
@@ -1392,16 +1333,15 @@ async function connectToWhatsApp() {
         const startedAt = pendingDownload.get(from);
         if (Date.now() - startedAt < 60000) {
           pendingDownload.delete(from);
-          const isUrl = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|music\.youtube\.com)/i.test(text);
-          await send(isUrl ? "⏬ got the link, downloading..." : `🔍 searching for "${text}"...`);
-          const ytUrl = isUrl ? text.match(/https?:\S+/)[0] : await searchYoutube(text);
-          if (!ytUrl) { await send("❌ couldn't find that song. try again with .song <name>"); continue; }
-          if (!isUrl) await send("⏬ found it — downloading...");
-          const audio = await downloadYoutubeAudio(ytUrl);
-          if (!audio?.buffer) { await send(`❌ download failed. try the link: ${ytUrl}`); continue; }
+          const isSCUrl = /https?:\/\/(www\.)?soundcloud\.com/i.test(text);
+          const isAnyUrl = /https?:\/\//i.test(text);
+          await send(isAnyUrl ? "⏬ got the link, downloading..." : `🔍 searching for *"${text}"*...`);
+          const audio = await downloadMusic(isAnyUrl ? text.match(/https?:\S+/)[0] : text);
+          if (!audio?.buffer) { await send("❌ download failed. try again with .song <name>"); continue; }
           try {
             await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || text)}.mp3` });
-            await send("✅ enjoy 🎧");
+            const previewNote = audio.isPreview ? " _(30s preview)_" : "";
+            await send(`✅ *${audio.title || text}* — enjoy 🎧${previewNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         } else { pendingDownload.delete(from); }
@@ -2645,70 +2585,51 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // ── .download — download YouTube audio as MP3 (uses cobalt.tools) ─────
+        // ── .download / .dl / .mp3 — download music by name or SoundCloud link ──
         if (cmd === "download" || cmd === "dl" || cmd === "mp3") {
           const input = args.join(" ").trim();
           if (!input) {
-            // No argument — wait for next message
             pendingDownload.set(from, Date.now());
-            await send("🎵 *MUSIC DOWNLOADER* 🎵\n\nSend me:\n› A *YouTube link* to download directly\n› Or a *song name* to search and download\n\n_(auto-cancels in 60s if no reply)_");
+            await send("🎵 *MUSIC DOWNLOADER* 🎵\n\nSend me:\n› A *song name* to search and download\n› A *SoundCloud link* to download directly\n\n_(auto-cancels in 60s if no reply)_");
             continue;
           }
-          const isLink = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|music\.youtube\.com)/i.test(input);
-          if (isLink) {
-            await send("⏬ *downloading...* give me a few seconds 🎧");
-            const audio = await downloadYoutubeAudio(input.match(/https?:\S+/)[0]);
-            if (!audio?.buffer) { await send("❌ download failed. try .song <name> to search instead"); continue; }
-            try {
-              await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title)}.mp3` });
-              await send(`✅ *${audio.title || "Song"}* — enjoy 🎧`);
-            } catch (e) { await send("❌ send failed: " + e.message); }
-          } else {
-            // Treat as song name — search then download
-            await send(`🔍 searching for *"${input}"*...`);
-            const ytUrl = await searchYoutube(input);
-            if (!ytUrl) { await send("❌ couldn't find that. try a more specific name or paste a YouTube link"); continue; }
-            await send("⏬ found it — downloading...");
-            const audio = await downloadYoutubeAudio(ytUrl);
-            if (!audio?.buffer) { await send(`❌ download failed. try the link: ${ytUrl}`); continue; }
-            try {
-              await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || input)}.mp3` });
-              await send(`✅ *${audio.title || input}* — enjoy 🎧`);
-            } catch (e) { await send("❌ send failed: " + e.message); }
-          }
+          await send(`🔍 searching for *"${input}"*...`);
+          const audio = await downloadMusic(input);
+          if (!audio?.buffer) { await send("❌ couldn't find that song. try a different name or spelling"); continue; }
+          try {
+            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || input)}.mp3` });
+            const previewNote = audio.isPreview ? " _(30s preview)_" : "";
+            await send(`✅ *${audio.title || input}* — enjoy 🎧${previewNote}`);
+          } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         }
+
         if (cmd === "song" || cmd === "play") {
           const query = args.join(" ");
-          if (!query) { await send("🎵 *.song <song name>*\n\nExamples:\n.song Burna Boy Last Last\n.song Asake Organise\n.song Davido Unavailable"); continue; }
+          if (!query) { await send("🎵 *.song <song name>*\n\nExamples:\n.song Burna Boy Last Last\n.song Asake Organise\n.song Davido Unavailable\n.song Wizkid Essence"); continue; }
           await send(`🔍 searching for *"${query}"*...`);
-          const ytUrl = await searchYoutube(query);
-          if (!ytUrl) { await send("❌ couldn't find that song. try a different name or paste a YouTube link with .mp3 <link>"); continue; }
-          await send("⏬ found it — downloading...");
-          const audio = await downloadYoutubeAudio(ytUrl);
-          if (!audio?.buffer) { await send(`❌ download failed. try the link directly: ${ytUrl}`); continue; }
+          const audio = await downloadMusic(query);
+          if (!audio?.buffer) { await send("❌ couldn't find that song. try a different spelling or artist name"); continue; }
           try {
             await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || query)}.mp3` });
-            await send(`✅ *${audio.title || query}* — enjoy 🎧`);
+            const previewNote = audio.isPreview ? " _(30s preview)_" : "";
+            await send(`✅ *${audio.title || query}* — enjoy 🎧${previewNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         }
 
         if (cmd === "music" || cmd === "songs") {
-          await send(`🎵 *MFG MUSIC DOWNLOADER* 🎵\n_powered by mfg_bot • made by teddymfg_\n\n━━━━━━━━━━━━━━━━━━━━\n🔥 *DOWNLOAD COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n\n🎶 *.song <name>* — search YouTube + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name or link>* — search by name OR paste link\n🔗 *.download <YouTube link>* — direct link download\n⚡ *.dl <link>* — fastest alias for download\n\nℹ️ *.ytinfo <link or name>* — title, channel, duration, views\n\n━━━━━━━━━━━━━━━━━━━━\n💡 *TIPS*\n━━━━━━━━━━━━━━━━━━━━\n› Type *.mp3* alone → send song name or YouTube link next\n› Works with YouTube, YouTube Music links\n› Max file size: 25MB (WhatsApp limit)\n\n_type .mp3 to start downloading now_ 👇`);
+          await send(`🎵 *MFG MUSIC DOWNLOADER* 🎵\n_powered by mfg_bot • made by teddymfg_\n\n━━━━━━━━━━━━━━━━━━━━\n🔥 *DOWNLOAD COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n\n🎶 *.song <name>* — search + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name>* — download by song name\n🔗 *.download <SoundCloud link>* — direct link download\n⚡ *.dl <name or link>* — fastest alias\n\nℹ️ *.songinfo <name>* — title, artist, album, duration\n\n━━━━━━━━━━━━━━━━━━━━\n💡 *TIPS*\n━━━━━━━━━━━━━━━━━━━━\n› Type *.song* alone → send song name next\n› Works great for Afrobeats, Amapiano, global hits\n› Max file size: 25MB (WhatsApp limit)\n› If song is short (30s), try a more specific name\n\n_type .song <name> to start_ 👇`);
           continue;
         }
 
         if (cmd === "ytinfo" || cmd === "songinfo") {
           const input = args.join(" ");
-          if (!input) { await send(".ytinfo <YouTube link or song name>"); continue; }
-          const url = ytdl.validateURL(input) ? input : await searchYoutube(input);
-          if (!url) { await send("❌ couldn't find that video."); continue; }
-          const info = await getYoutubeInfo(url);
-          if (!info) { await send("❌ couldn't read that YouTube info."); continue; }
-          const seconds = Number(info.lengthSeconds || 0);
-          const duration = seconds ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "unknown";
-          await send(`🎵 ${info.title}\n📺 ${info.author?.name || "YouTube"}\n⏱ ${duration}\n👀 ${info.viewCount || "unknown"} views\n🔗 ${url}`);
+          if (!input) { await send("*.songinfo <song name>*\nexample: .songinfo Burna Boy Last Last"); continue; }
+          await send(`🔍 looking up *"${input}"*...`);
+          const info = await getSongInfo(input);
+          if (!info) { await send("❌ couldn't find that song info."); continue; }
+          await send(`🎵 *${info.title}*\n🎤 ${info.artist}\n💿 ${info.album}\n⏱ ${info.duration}\n🔗 ${info.link}`);
           continue;
         }
 
@@ -2905,7 +2826,7 @@ async function connectToWhatsApp() {
 
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `╔══════════════════════╗\n║  🤖 *MFG_BOT COMMANDS* 🤖  ║\n╚══════════════════════╝\n_built by teddymfg • +2349132883869_\n\n━━━━━━━━━━━━━━━━━━━━\n⭐ *TOP COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n🟢 *.online* — cover mode on (AI + stays online)\n🔴 *.offline* — turn off cover mode\n👋 *.listall* — personalized welcome\n👋 *.welcome / .intro* — greet me\n\n━━━━━━━━━━━━━━━━━━━━\n🎵 *MUSIC DOWNLOADS*\n━━━━━━━━━━━━━━━━━━━━\n🎶 *.song <name>* — search + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name or link>* — download by name OR link\n🔗 *.download <yt-link>* — direct YouTube download\n⚡ *.dl <link>* — fastest alias\n🎵 *.music* — full music menu\nℹ️ *.ytinfo <link/name>* — YouTube details\n\n━━━━━━━━━━━━━━━━━━━━\n🌐 *LIVE TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n🌤 *.weather <city>* — live weather\n📖 *.define <word>* — dictionary\n🔗 *.shorten <url>* — shrink links\n🌍 *.ip <address>* — geolocate IP\n\n━━━━━━━━━━━━━━━━━━━━\n🤖 *AI & BRAIN*\n━━━━━━━━━━━━━━━━━━━━\n*.ai on/off/status/mode/reset/prompt/delay/typing*\n*.style* — manage style mirroring\n*.learnme / .learnme view / .learnme clear*\n*.disclaimer on/off/text/reset*\n🎙 *.transcribe on/off* — voice → text\n👁 *.vision on/off* — read images\n🌗 *.mood on/off* — time-of-day tone\n🫡 *.takeover on/off/min N/clear*\n🚨 *.scam on/off/log* — scam detection\n📚 *.facts* / *.factsclear*\n🎂 *.birthdays* — tracked birthdays\n🔊 *.voice / .voicetest* — voice clone\n⚙️ *.bigshot* — all big-shot toggles\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — TAGGING*\n━━━━━━━━━━━━━━━━━━━━\n📣 *.tagall <msg>* — notify everyone\n👻 *.hidetag <msg>* — invisible mentions\n🎖 *.tagadmins <msg>*\n🔊 *.everyone / .all <msg>*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — CONTROL* _(needs admin)_\n━━━━━━━━━━━━━━━━━━━━\n🚫 *.kick @user* (or reply + .kick)\n➕ *.add <number>*\n⬆️ *.promote @user* / ⬇️ *.demote @user*\n🔇 *.mute / .unmute*\n🔒 *.lock / .unlock*\n✏️ *.setname <name>* / *.setdesc <desc>*\n🔄 *.revoke* (reset group link)\n🚪 *.leave*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — INFO*\n━━━━━━━━━━━━━━━━━━━━\n*.groupinfo / .members / .admins / .link*\n📊 *.poll Q | opt1 | opt2 | opt3*\n🗑 *.del* — reply to delete a message\n👁 *.vv* — reveal view-once photo/video`;
+          const part1 = `╔══════════════════════╗\n║  🤖 *MFG_BOT COMMANDS* 🤖  ║\n╚══════════════════════╝\n_built by teddymfg • +2349132883869_\n\n━━━━━━━━━━━━━━━━━━━━\n⭐ *TOP COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n🟢 *.online* — cover mode on (AI + stays online)\n🔴 *.offline* — turn off cover mode\n👋 *.listall* — personalized welcome\n👋 *.welcome / .intro* — greet me\n🆔 *.whoami* — bot identity\n\n━━━━━━━━━━━━━━━━━━━━\n🎵 *MUSIC DOWNLOADS*\n━━━━━━━━━━━━━━━━━━━━\n🎶 *.song <name>* — search + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name>* — download by song name\n🔗 *.download <SoundCloud link>* — direct link\n⚡ *.dl <name or link>* — fastest alias\n🎵 *.music* — full music menu\nℹ️ *.songinfo <name>* — title, artist, album, duration\n\n━━━━━━━━━━━━━━━━━━━━\n🏦 *GHOST BANK MFG*\n━━━━━━━━━━━━━━━━━━━━\n💳 *.pay* — create or view your account\n💰 *.pay balance* — check your balance\n📋 *.pay history* — last 10 transactions\n💸 *.pay withdraw* — request withdrawal\n🏦 *.bank* — quick account view (alias)\n💱 *.nairarate* — live USD/GBP/EUR → NGN rates\n\n━━━━━━━━━━━━━━━━━━━━\n🌐 *LIVE TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n🌤 *.weather <city>* — live weather\n📖 *.define <word>* — dictionary\n🔗 *.shorten <url>* — shrink links\n🌍 *.ip <address>* — geolocate IP\n\n━━━━━━━━━━━━━━━━━━━━\n🤖 *AI & BRAIN*\n━━━━━━━━━━━━━━━━━━━━\n*.ai on/off/status/mode/reset/prompt/delay/typing*\n*.style* — manage style mirroring\n*.learnme / .learnme view / .learnme clear*\n*.disclaimer on/off/text/reset*\n🎙 *.transcribe on/off* — voice → text\n👁 *.vision on/off* — read images\n🌗 *.mood on/off* — time-of-day tone\n🫡 *.takeover on/off/min N/clear*\n🚨 *.scam on/off/log* — scam detection\n📚 *.facts* / *.factsclear*\n🎂 *.birthdays* — tracked birthdays\n🔊 *.voice / .voicetest* — voice clone\n⚙️ *.bigshot* — all big-shot toggles\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — TAGGING*\n━━━━━━━━━━━━━━━━━━━━\n📣 *.tagall <msg>* — notify everyone\n👻 *.hidetag <msg>* — invisible mentions\n🎖 *.tagadmins <msg>*\n🔊 *.everyone / .all <msg>*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — CONTROL* _(needs admin)_\n━━━━━━━━━━━━━━━━━━━━\n🚫 *.kick @user* (or reply + .kick)\n➕ *.add <number>*\n⬆️ *.promote @user* / ⬇️ *.demote @user*\n🔇 *.mute / .unmute*\n🔒 *.lock / .unlock*\n✏️ *.setname <name>* / *.setdesc <desc>*\n🔄 *.revoke* (reset group link)\n🚪 *.leave*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — INFO*\n━━━━━━━━━━━━━━━━━━━━\n*.groupinfo / .members / .admins / .link*\n📊 *.poll Q | opt1 | opt2 | opt3*\n🗑 *.del* — reply to delete a message\n👁 *.vv* — reveal view-once photo/video`;
 
           const partUpgraded = `━━━━━━━━━━━━━━━━━━━━\n🆕 *NEW FEATURES (v6.7.21)*\n━━━━━━━━━━━━━━━━━━━━\n\n✏️ *EDIT MESSAGES*\n*.say <text>* — bot sends a tracked message\n*.editlast <new text>* — edit bot's last reply\n\n📌 *CHAT PIN*\n*.pin* — pin chat to top\n*.unpin* — unpin\n\n📰 *CHANNELS*\n*.channel create <name>*\n*.channel info / follow / post*\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE SEND*\n*.vvideo* — re-send as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n*.statusreact <emoji>* — react to every status\n*.statusreact off* — turn off\n_(alias: .sreact)_\n\n📊 *POLL VOTES*\n*.pollvotes* — reply to poll to see results\n_(alias: .votes)_\n\n`;
 

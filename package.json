@@ -9,7 +9,6 @@
     "build:start": "npm run build && node server.js"
   },
   "dependencies": {
-    "@distube/ytdl-core": "^4.16.12",
     "@netlify/database": "^1.0.0",
     "baileys": "^6.7.21",
     "cors": "^2.8.6",
