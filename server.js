@@ -375,86 +375,81 @@ async function streamToBuffer(stream, maxBytes = 25 * 1024 * 1024) {
 }
 
 // ─── Music Download — Multi-source with fallbacks ────────────────────────────
-// Source 1: JioSaavn (great for Afrobeats + global hits, no API key)
+// Source 1: JioSaavn direct API (no third-party mirrors needed)
 async function downloadFromSaavn(query) {
-  const q = encodeURIComponent(query.trim());
-  const SAAVN_ENDPOINTS = [
-    `https://saavn.dev/api/search/songs?query=${q}&limit=5`,
-    `https://jiosaavn-api-privatecourt.vercel.app/api/search/songs?query=${q}&page=1&limit=5`,
-    `https://jiosaavn-api.vercel.app/api/search/songs?query=${q}&page=1&limit=3`
-  ];
-  for (const apiUrl of SAAVN_ENDPOINTS) {
-    try {
-      console.log(`[MFG_bot] Saavn search → ${apiUrl.slice(0, 70)}`);
-      const r = await fetch(apiUrl, { signal: AbortSignal.timeout(12000), headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" } });
-      const data = await r.json().catch(() => null);
-      if (!data) continue;
-      const results = data?.data?.results ?? data?.data ?? data?.results ?? [];
-      const song = Array.isArray(results) ? results[0] : null;
-      if (!song) continue;
-      const title = song.name || song.title || query;
-      const dlUrls = song.downloadUrl || song.download_url || song.media_url || [];
-      let audioLink = null;
-      if (Array.isArray(dlUrls) && dlUrls.length > 0) {
-        const best = dlUrls.find(d => d.quality === "320kbps") || dlUrls.find(d => d.quality === "160kbps") || dlUrls.find(d => d.quality === "96kbps") || dlUrls[dlUrls.length - 1];
-        audioLink = best?.link || best?.url;
-      } else if (typeof dlUrls === "string" && dlUrls.startsWith("http")) {
-        audioLink = dlUrls;
+  try {
+    const q = encodeURIComponent(query.trim());
+    const apiUrl = `https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&ctx=wap6dot0&q=${q}&p=1&n=5`;
+    console.log(`[MFG_bot] Saavn direct search → "${query}"`);
+    const r = await fetch(apiUrl, { signal: AbortSignal.timeout(8000), headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15", "Accept": "application/json", "Referer": "https://www.jiosaavn.com/" } });
+    const data = await r.json().catch(() => null);
+    const results = data?.results ?? [];
+    const song = Array.isArray(results) ? results[0] : null;
+    if (!song) { console.log("[MFG_bot] Saavn: no results"); return null; }
+    const title = song.song || song.title || query;
+    // Try preview URL first (shorter but universally accessible)
+    const previewUrl = song.media_preview_url;
+    if (previewUrl) {
+      const audioRes = await fetch(previewUrl, { signal: AbortSignal.timeout(5000), headers: { "User-Agent": "Mozilla/5.0" } });
+      if (audioRes.ok) {
+        const arrayBuffer = await audioRes.arrayBuffer();
+        if (arrayBuffer.byteLength > 5000) {
+          console.log(`[MFG_bot] ✅ Saavn preview: "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+          return { buffer: Buffer.from(arrayBuffer), title, source: "saavn", isPreview: true };
+        }
       }
-      if (!audioLink) continue;
-      console.log(`[MFG_bot] Downloading from Saavn → "${title}"`);
-      const audioRes = await fetch(audioLink, { signal: AbortSignal.timeout(40000), headers: { "User-Agent": "Mozilla/5.0" } });
-      const arrayBuffer = await audioRes.arrayBuffer();
-      if (arrayBuffer.byteLength < 5000) continue;
-      console.log(`[MFG_bot] ✅ Saavn: "${title}" — ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
-      return { buffer: Buffer.from(arrayBuffer), title, source: "saavn" };
-    } catch (e) { console.log(`[MFG_bot] Saavn err: ${e.message}`); }
-  }
-  return null;
+    }
+    console.log("[MFG_bot] Saavn: audio geo-restricted, falling back");
+    return null;
+  } catch (e) { console.log(`[MFG_bot] Saavn err: ${e.message}`); return null; }
 }
 
-// Source 2: cobalt.tools API (downloads from YouTube URL)
+// Source 2: cobalt.tools API (SoundCloud direct links)
+// Uses the official cobalt API — public instances may require auth
 async function downloadFromCobalt(url) {
   const COBALT_INSTANCES = [
     "https://cobalt.api.nadeko.net",
-    "https://co.wuk.sh",
-    "https://cobalt.tools/api"
+    "https://co.wuk.sh"
   ];
   for (const base of COBALT_INSTANCES) {
     try {
-      console.log(`[MFG_bot] Cobalt download → ${base}`);
-      const r = await fetch(`${base}/json`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ url, vCodec: "h264", vQuality: "720", aFormat: "mp3", isAudioOnly: true, disableMetadata: false }),
-        signal: AbortSignal.timeout(15000)
-      });
-      const data = await r.json().catch(() => null);
-      if (!data) continue;
-      const dlUrl = data.url || data.audio;
-      if (!dlUrl) { console.log(`[MFG_bot] Cobalt no URL, status: ${data.status}`); continue; }
-      const audioRes = await fetch(dlUrl, { signal: AbortSignal.timeout(45000), headers: { "User-Agent": "Mozilla/5.0" } });
-      const arrayBuffer = await audioRes.arrayBuffer();
-      if (arrayBuffer.byteLength < 5000) continue;
-      console.log(`[MFG_bot] ✅ Cobalt: ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
-      return { buffer: Buffer.from(arrayBuffer), title: "song", source: "cobalt" };
+      console.log(`[MFG_bot] Cobalt → ${base}`);
+      // Try new v10+ format (POST to /) first, fallback to old /json
+      for (const endpoint of [`${base}/`, `${base}/json`]) {
+        const r = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
+          body: JSON.stringify({ url, aFormat: "mp3", isAudioOnly: true }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!r.ok) continue;
+        const data = await r.json().catch(() => null);
+        if (!data) continue;
+        const dlUrl = data.url || data.audio;
+        if (!dlUrl) continue;
+        const audioRes = await fetch(dlUrl, { signal: AbortSignal.timeout(40000), headers: { "User-Agent": "Mozilla/5.0" } });
+        const arrayBuffer = await audioRes.arrayBuffer();
+        if (arrayBuffer.byteLength < 5000) continue;
+        console.log(`[MFG_bot] ✅ Cobalt: ${Math.round(arrayBuffer.byteLength / 1024)}KB`);
+        return { buffer: Buffer.from(arrayBuffer), title: "song", source: "cobalt" };
+      }
     } catch (e) { console.log(`[MFG_bot] Cobalt err (${base}): ${e.message}`); }
   }
   return null;
 }
 
-// Main entry point: Saavn (full song) → Deezer (30s preview) → iTunes (30s preview)
-// For direct SoundCloud links: cobalt handles them
+// Main entry point: Saavn preview → Deezer 30s → iTunes 30s
+// SoundCloud direct links: try cobalt (may be unavailable)
 async function downloadMusic(query) {
   if (!query) return null;
   const isSoundCloudUrl = /https?:\/\/(www\.)?soundcloud\.com/i.test(query);
   const isDirectUrl = /https?:\/\//i.test(query);
 
   if (isSoundCloudUrl) {
-    // SoundCloud direct link — cobalt handles it
     const cobalt = await downloadFromCobalt(query);
     if (cobalt?.buffer) return cobalt;
-    console.log("[MFG_bot] Cobalt failed for SoundCloud URL");
+    console.log("[MFG_bot] Cobalt unavailable for SoundCloud URL");
+    // Fall through to name-based search with the URL as query (won't work great but better than null)
     return null;
   }
 
