@@ -373,31 +373,64 @@ async function streamToBuffer(stream, maxBytes = 25 * 1024 * 1024) {
 }
 
 async function downloadYoutubeAudio(url) {
+  // ── ONLY uses the vercel download API — no ytdl fallback ──────────────────
+  const DOWNLOAD_API = "https://api-olive-five-53.vercel.app/download?url=";
   try {
-    const res = await fetch("https://api-olive-five-53.vercel.app/download?url=" + encodeURIComponent(url));
-    const data = await res.json();
-    const audioUrl = data?.audio?.["320"] || data?.audio?.["128"];
-    if (audioUrl) {
-      const audioRes = await fetch(audioUrl);
-      const arrayBuffer = await audioRes.arrayBuffer();
-      return { buffer: Buffer.from(arrayBuffer), title: data?.title || "song", source: "api" };
-    }
-  } catch (e) {
-    console.log("[MFG_bot] external dl err:", e.message);
-  }
-
-  try {
-    if (!ytdl.validateURL(url)) return null;
-    const info = await ytdl.getInfo(url, { agent: ytdlAgent });
-    const stream = ytdl.downloadFromInfo(info, {
-      agent: ytdlAgent,
-      filter: "audioonly",
-      quality: "highestaudio",
-      highWaterMark: 1 << 25
+    console.log(`[MFG_bot] Download API → ${url.slice(0, 60)}`);
+    const res = await fetch(DOWNLOAD_API + encodeURIComponent(url), {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(30000)
     });
-    return { buffer: await streamToBuffer(stream), title: info?.videoDetails?.title || "song", source: "ytdl" };
+
+    // If the API streams audio directly (binary response)
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("audio") || contentType.includes("octet-stream") || contentType.includes("mpeg")) {
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer.byteLength > 1000) {
+        console.log(`[MFG_bot] Download API → binary stream (${arrayBuffer.byteLength} bytes)`);
+        return { buffer: Buffer.from(arrayBuffer), title: "song", source: "api-stream" };
+      }
+    }
+
+    // JSON response — try every known format the API might return
+    const data = await res.json().catch(() => null);
+    if (!data) { console.log("[MFG_bot] Download API → no JSON"); return null; }
+    console.log("[MFG_bot] Download API response keys:", Object.keys(data).join(", "));
+
+    const title = data?.title || data?.name || data?.videoDetails?.title || "song";
+
+    // Format 1: { audio: { "320": url, "128": url } }
+    const audioUrl =
+      data?.audio?.["320"] || data?.audio?.["128"] || data?.audio?.["192"] || data?.audio?.["64"] ||
+      // Format 2: { url: "..." } or { download_url: "..." } or { link: "..." }
+      data?.url || data?.download_url || data?.link || data?.audio_url || data?.audioUrl ||
+      // Format 3: { formats: [{ url, quality }] } — pick best audio
+      (Array.isArray(data?.formats)
+        ? (data.formats.find(f => f?.mimeType?.includes("audio") || f?.quality?.includes("audio"))?.url ||
+           data.formats[0]?.url)
+        : null) ||
+      // Format 4: { streams: [...] }
+      (Array.isArray(data?.streams)
+        ? data.streams.find(s => s?.mimeType?.includes("audio"))?.url
+        : null) ||
+      // Format 5: { medias: [...] }
+      (Array.isArray(data?.medias)
+        ? data.medias.find(m => m?.type === "audio" || m?.ext === "mp3")?.url
+        : null);
+
+    if (audioUrl) {
+      console.log(`[MFG_bot] Fetching audio from: ${String(audioUrl).slice(0, 80)}`);
+      const audioRes = await fetch(audioUrl, { signal: AbortSignal.timeout(30000) });
+      const arrayBuffer = await audioRes.arrayBuffer();
+      if (arrayBuffer.byteLength < 1000) { console.log("[MFG_bot] Audio too small"); return null; }
+      console.log(`[MFG_bot] ✅ Downloaded "${title}" (${Math.round(arrayBuffer.byteLength/1024)}KB)`);
+      return { buffer: Buffer.from(arrayBuffer), title, source: "api" };
+    }
+
+    console.log("[MFG_bot] Download API → no audio URL found in response:", JSON.stringify(data).slice(0, 200));
+    return null;
   } catch (e) {
-    console.log("[MFG_bot] ytdl err:", e.message);
+    console.log("[MFG_bot] Download API error:", e.message);
     return null;
   }
 }
