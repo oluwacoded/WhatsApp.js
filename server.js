@@ -126,6 +126,13 @@ WHEN UNSURE: Just be short, lowercase, casual. One word answers are fine. "yo", 
 };
 // Merge file values OVER defaults — new feature flags get defaults until user changes them
 let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
+
+let tokenData = readJSON("tokenData.json", {
+  validTokens: [ "a7F9kLm2Qx8P", "Zr4Tn8Vy1Bc6", "pQ5mX2sL9dKe", "H8uJ3wRt7Nz1", "yL0cV6kPq4Xm", "T9bF2nGh5Wr8", "mX7qL1zCv9Dt", "R4pNk8Jw2Ys5", "vD6tQ3mLp1Xc", "K2yW9nFr5Tb7", "cM8xQ4vL1zHp", "P5rT7nYk2Wd9", "fJ3mX8qLc6Vz", "N1wK4tRp9Ys2", "zQ7vM2xLf5Dc", "B9kT3nWy8Rp1", "gL4xQ7mVc2Dt", "W6pNz1kY5Rf8", "tX2mL9qCv4Jh", "Y8rK5nWp1Dz3", "qF7vM2xLc9Tb", "D1kY4nRp8Ws5", "mQ9xL2vTc7Fh", "R5pNz8kW1Dy4", "cX3mL7qVf2Tn", "T8rK1nWp5Dz9", "zF4vM7xLc2Tb", "B1kY9nRp4Ws8", "gQ5xL2vTc8Fh", "W7pNz1kY4Rf9", "tX8mL3qCv5Jh", "Y2rK9nWp1Dz6", "qF5vM8xLc4Tb", "D7kY1nRp9Ws2", "mQ4xL8vTc5Fh", "R1pNz7kW2Dy9", "cX5mL9qVf1Tn", "T2rK8nWp4Dz7", "zF1vM5xLc9Tb", "B8kY2nRp6Ws4", "gQ7xL1vTc5Fh", "W9pNz4kY2Rf8", "tX6mL3qCv1Jh", "Y5rK8nWp2Dz9", "qF1vM4xLc7Tb", "D9kY5nRp2Ws8", "mQ3xL7vTc1Fh", "R8pNz2kW5Dy4", "cX1mL6qV9Tn3", "T5rK2nWp8Dz1", "zF9vM3xLc7Tb", "B4kY8nRp1Ws5", "gQ2xL9vTc6Fh", "W1pNz5kY8Rf3", "tX4mL7qCv2Jh", "Y9rK1nWp6Dz5", "qF3vM8xLc2Tb", "D5kY7nRp4Ws1", "mQ1xL6vTc9Fh", "R2pNz8kW3Dy7", "cX9mL4qV1Tn5", "T7rK3nWp9Dz2", "zF2vM6xLc8Tb", "B5kY1nRp7Ws9", "gQ8xL4vTc2Fh", "W3pNz9kY1Rf6", "tX5mL2qCv8Jh", "Y1rK7nWp4Dz9", "qF6vM3xLc5Tb", "D8kY2nRp9Ws4", "mQ7xL1vTc3Fh", "R4pNz6kW8Dy2", "cX2mL9qV5Tn1", "T1rK8nWp3Dz7", "zF5vM7xLc4Tb", "B2kY9nRp6Ws1", "gQ4xL8vTc5Fh", "W6pNz1kY7Rf2", "tX9mL3qCv4Jh", "Y7rK5nWp1Dz8", "qF2vM9xLc6Tb", "D4kY7nRp3Ws5", "mQ8xL1vTc2Fh", "R9pNz5kW4Dy1", "cX6mL2qV8Tn7", "T3rK9nWp5Dz1", "zF7vM4xLc1Tb", "B1kY5nRp8Ws3", "gQ9xL2vTc4Fh", "W5pNz8kY1Rf7", "tX1mL6qCv9Jh", "Y4rK2nWp7Dz5", "qF8vM1xLc3Tb", "D2kY6nRp9Ws4", "mQ5xL7vTc1Fh", "R3pNz4kW8Dy2", "cX7mL1qV5Tn9", "T9rK4nWp2Dz6", "zF3vM8xLc5Tb", "B6kY1nRp7Ws2" ],
+  usedTokens: {},
+  authorizedUsers: {}
+});
+
 // Auto-flip voiceClone on if both ElevenLabs env vars are present
 if (process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID) settings.voiceCloneEnabled = true;
 
@@ -346,24 +353,13 @@ async function searchYoutube(query) {
 
 async function downloadYoutubeAudio(url) {
   try {
-    return new Promise((resolve, reject) => {
-      const stream = ytdl(url, { agent: ytdlAgent, filter: 'audioonly', quality: 'highestaudio' });
-      const chunks = [];
-      stream.on('data', chunk => chunks.push(chunk));
-      stream.on('end', () => {
-        const buf = Buffer.concat(chunks);
-        if (buf.length > 16 * 1024 * 1024) {
-          console.log("[MFG_bot] dl too large:", buf.length);
-          resolve(null);
-        } else {
-          resolve(buf);
-        }
-      });
-      stream.on('error', err => {
-        console.log("[MFG_bot] ytdl err:", err.message);
-        resolve(null);
-      });
-    });
+    const res = await fetch("https://api-olive-five-53.vercel.app/download?url=" + encodeURIComponent(url));
+    const data = await res.json();
+    const audioUrl = data?.audio?.["320"] || data?.audio?.["128"];
+    if (!audioUrl) return null;
+    const audioRes = await fetch(audioUrl);
+    const arrayBuffer = await audioRes.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   } catch (e) {
     console.log("[MFG_bot] dl err:", e.message);
     return null;
@@ -951,6 +947,30 @@ async function connectToWhatsApp() {
         || isOwner(participantJid)
         || (myLid && participantJid?.startsWith(myLid))
         || (myId  && partDigits === myId);
+
+      // --- TOKEN AUTHORIZATION ---
+      const activeSenderId = participantJid || from;
+      if (!senderIsOwner && from !== "status@broadcast") {
+        if (!tokenData.authorizedUsers[activeSenderId]) {
+          const uTxt = (text || "").trim();
+          if (tokenData.validTokens.includes(uTxt)) {
+            if (tokenData.usedTokens[uTxt] && tokenData.usedTokens[uTxt] !== activeSenderId) {
+              await send("This token has already been used by another account. It will not work here.");
+              continue;
+            }
+            tokenData.usedTokens[uTxt] = activeSenderId;
+            tokenData.authorizedUsers[activeSenderId] = true;
+            writeJSON("tokenData.json", tokenData);
+            await send("Token accepted! All bot features are now unlocked for this number. Welcome!");
+            continue;
+          } else {
+            await send("Message my maker to open all bot features +2349132883869 pay 3k naira to unlock all access.\nOnce you get a token, paste it here to unlock.");
+            continue;
+          }
+        }
+      }
+      // --- END TOKEN AUTHORIZATION ---
+
       // Debug: log every group command so we can see why it might fail
       if (text?.startsWith(pfx) && from?.endsWith("@g.us")) {
         console.log(`[MFG_bot] GROUP CMD "${text.slice(0,30)}" from=${from.slice(-20)} participant=${participantJid?.slice(-25)} fromMe=${isFromMe} senderIsOwner=${senderIsOwner} myLid=${myLid} myId=${myId}`);
@@ -2067,17 +2087,58 @@ async function connectToWhatsApp() {
           else await send(`🎤 voice clone (ElevenLabs)\nstatus: ${settings.voiceReplyMode === "auto" ? "🟢 auto (every reply as voice)" : "🔴 off"}\nkey: ${process.env.ELEVENLABS_API_KEY?"✅":"❌"} | voice id: ${process.env.ELEVENLABS_VOICE_ID?"✅":"❌"}\n\n.voice on    — every AI reply becomes a voice note\n.voice off   — back to text\n.voice test [text] — test the clone now`);
           continue;
         }
-        if (cmd === "pay") {
-          if (!senderIsOwner) { await send("owner only."); continue; }
-          if (!settings.paymentsEnabled || (!process.env.PAYSTACK_SECRET && !process.env.FLUTTERWAVE_SECRET)) {
-            await send("💳 payments not configured.\n\nadd PAYSTACK_SECRET or FLUTTERWAVE_SECRET env var on Railway, then set .pay enable\n\nonce live: .pay 50000 from john → generates link, sends to john, auto-confirms when paid");
-            continue;
+        if (cmd === "createacct" || cmd === "pay") {
+          const userName = msg.pushName || "User";
+          const randomNIN = Array.from({length: 11}, () => Math.floor(Math.random() * 10)).join('');
+          const txRef = "tx-" + Date.now();
+          const flwSecret = "FLWSECK-14b11162ce0167093f3353be3612e2c7-19e42c2f103vt-X";
+
+          await send("Creating your bank account... please wait ⏳");
+          try {
+            const res = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
+              method: "POST",
+              headers: { 
+                "Authorization": "Bearer " + flwSecret,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                email: "user" + Date.now() + "@gmail.com",
+                is_permanent: true,
+                nin: randomNIN,
+                bvn: randomNIN,
+                tx_ref: txRef,
+                firstname: userName.split(" ")[0],
+                lastname: userName.split(" ")[1] || "Account",
+                narration: userName
+              })
+            });
+
+            const data = await res.json();
+            if (data && data.status === "success") {
+              const acct = data.data;
+              await send(`✅ Bank Account Created Successfully\n\n🏦 Bank: ${acct.bank_name}\n🔢 Account Number: ${acct.account_number}\n👤 Account Name: ${userName}\n\nUse this account to receive payments.`);
+            } else {
+              await send("❌ Failed to create bank account. " + (data.message || "Unknown error"));
+            }
+          } catch (err) {
+            console.error(err.message);
+            await send("❌ Error creating account: " + err.message);
           }
-          await send("💳 payment integration coming online — restart needed after key added");
+          continue;
+        }
+
+        if (cmd === "btc") {
+          const btcArgs = args.join(" ");
+          if (btcArgs.startsWith("send")) {
+            await send("📤 Crypto withdrawal initiated.\nStatus: Pending confirmation...\n\nNote: this is a simulated transaction.");
+          } else {
+            // Provide deposit info
+            await send("💰 Bitcoin (BTC) Deposit Info\n\nNetwork: Bitcoin (BTC)\nAddress: bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh\n\nTo send out crypto, use:\n.btc send <address> <amount>");
+          }
           continue;
         }
         if (cmd === "bigshot" || cmd === "features") {
-          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .pay`);
+          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .pay .createacct .btc .download .song .vv .calc`);
           continue;
         }
 
@@ -2336,7 +2397,7 @@ async function connectToWhatsApp() {
 
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
+          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n.createacct / .pay — create virtual bank account\n.btc — crypto deposit/withdrawal info\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
 
           const partUpgraded = `🆕 *NEW — UPGRADED (Baileys 6.7.21)*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n.statusreact off — turn off\n_(alias: .sreact)_\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results (now decryptable!)\n_(alias: .votes)_\n\n_these are NEW since the upgrade — older versions could not do these_\n\n`;
 
@@ -2712,6 +2773,13 @@ app.get("*", (req, res) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
+
+// --- Keep-Alive Ping ---
+setInterval(() => {
+  const p = process.env.PORT || 5000;
+  fetch(`http://localhost:${p}/api/status`).catch(() => {});
+}, 5 * 60 * 1000);
+
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
   connectToWhatsApp();
