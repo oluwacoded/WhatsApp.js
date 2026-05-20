@@ -3526,6 +3526,201 @@ app.delete("/api/bots/:id", (req, res) => {
   res.status(204).end();
 });
 
+// ─── FLUTTERWAVE WEBHOOK HUB ─────────────────────────────────────────────────
+// Single webhook URL for ALL your backends.
+// Flutterwave hits POST /webhook/flutterwave
+// This server: 1) verifies the signature, 2) stores the event, 3) forwards to
+//              all registered backend URLs instantly, 4) retries any that failed
+//              5) exposes a polling endpoint so offline backends can catch up
+
+const WEBHOOK_SECRET = process.env.FLW_WEBHOOK_SECRET || FLW_SECRET.slice(0, 20);
+const WEBHOOK_EVENTS_FILE = "webhookEvents.json";
+const WEBHOOK_BACKENDS_FILE = "webhookBackends.json";
+const MAX_STORED_EVENTS = 500; // rolling window
+
+function readWebhookEvents() { return readJSON(WEBHOOK_EVENTS_FILE, []); }
+function writeWebhookEvents(events) { writeJSON(WEBHOOK_EVENTS_FILE, events); }
+function readWebhookBackends() { return readJSON(WEBHOOK_BACKENDS_FILE, []); }
+function writeWebhookBackends(backends) { writeJSON(WEBHOOK_BACKENDS_FILE, backends); }
+
+// Forward a single event to a single backend URL, returns true/false
+async function forwardToBackend(url, event) {
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-MFG-Forwarded": "1", "X-Event-Id": event.id },
+      body: JSON.stringify(event.payload),
+      signal: AbortSignal.timeout(10000)
+    });
+    return r.ok;
+  } catch (e) {
+    console.log(`[Webhook] Forward failed → ${url}: ${e.message}`);
+    return false;
+  }
+}
+
+// Forward to ALL registered backends, record per-backend delivery status
+async function forwardToAllBackends(event) {
+  const backends = readWebhookBackends();
+  if (!backends.length) return;
+  const results = await Promise.allSettled(backends.map(b => forwardToBackend(b.url, event)));
+  const events = readWebhookEvents();
+  const ev = events.find(e => e.id === event.id);
+  if (ev) {
+    ev.deliveries = backends.map((b, i) => ({
+      url: b.url,
+      name: b.name,
+      ok: results[i].status === "fulfilled" && results[i].value === true,
+      at: new Date().toISOString()
+    }));
+    writeWebhookEvents(events);
+    console.log(`[Webhook] Forwarded to ${backends.length} backends:`, ev.deliveries.map(d => `${d.name}:${d.ok ? "✅" : "❌"}`).join(" "));
+  }
+}
+
+// ── Receive webhook from Flutterwave ────────────────────────────────────────
+app.post("/webhook/flutterwave", express.json(), async (req, res) => {
+  // Verify Flutterwave signature hash
+  const hash = req.headers["verif-hash"];
+  if (hash && WEBHOOK_SECRET && hash !== WEBHOOK_SECRET) {
+    console.log("[Webhook] ❌ Invalid signature hash");
+    return res.status(401).json({ error: "invalid signature" });
+  }
+
+  const payload = req.body;
+  const eventId = `flw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const event = {
+    id: eventId,
+    receivedAt: new Date().toISOString(),
+    type: payload?.event || "unknown",
+    status: payload?.data?.status || "unknown",
+    amount: payload?.data?.amount,
+    currency: payload?.data?.currency,
+    txRef: payload?.data?.tx_ref || payload?.data?.txRef,
+    flwRef: payload?.data?.flw_ref,
+    customerEmail: payload?.data?.customer?.email,
+    customerName: payload?.data?.customer?.name,
+    customerPhone: payload?.data?.customer?.phone_number,
+    payload,
+    deliveries: []
+  };
+
+  // Store event (rolling window of MAX_STORED_EVENTS)
+  let events = readWebhookEvents();
+  events.unshift(event);
+  if (events.length > MAX_STORED_EVENTS) events = events.slice(0, MAX_STORED_EVENTS);
+  writeWebhookEvents(events);
+
+  console.log(`[Webhook] ✅ Received: ${event.type} | ${event.status} | ₦${event.amount} | ref:${event.txRef}`);
+
+  // Acknowledge Flutterwave immediately (must reply fast)
+  res.status(200).json({ status: "ok", id: eventId });
+
+  // Async: forward to all backends + notify via WhatsApp
+  setImmediate(async () => {
+    await forwardToAllBackends(event);
+
+    // Notify owner on WhatsApp if payment is successful
+    if (event.status === "successful" && sock && isConnected && OWNER_NUMBERS.length) {
+      const ownerJid = `${OWNER_NUMBERS[0].replace(/[^0-9]/g, "")}@s.whatsapp.net`;
+      const backends = readWebhookBackends();
+      const fwdStatus = backends.length
+        ? `\n\n📡 Forwarded to ${backends.length} backend${backends.length > 1 ? "s" : ""}`
+        : "";
+      try {
+        await sock.sendMessage(ownerJid, {
+          text: `💸 *PAYMENT RECEIVED!*\n\n━━━━━━━━━━━━━━━━━━━━\n💰 Amount: *₦${(event.amount || 0).toLocaleString()}*\n👤 From: ${event.customerName || "Unknown"}\n📱 Phone: ${event.customerPhone || "—"}\n📧 ${event.customerEmail || "—"}\n🔖 Ref: ${event.txRef || "—"}\n━━━━━━━━━━━━━━━━━━━━${fwdStatus}\n\n_GHOST BANK MFG 🔥_`
+        });
+      } catch (e) { console.log("[Webhook] WA notify err:", e.message); }
+    }
+  });
+});
+
+// ── Polling endpoint — backends call this to fetch events they missed ────────
+// GET /webhook/events?since=<ISO timestamp or event id>&limit=50&secret=<key>
+app.get("/webhook/events", (req, res) => {
+  const secret = req.query.secret || req.headers["x-webhook-secret"];
+  if (secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "invalid secret" });
+
+  const events = readWebhookEvents();
+  const since = req.query.since;
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+
+  let filtered = events;
+  if (since) {
+    // since can be an ISO timestamp or an event ID
+    if (since.startsWith("flw_")) {
+      const idx = events.findIndex(e => e.id === since);
+      filtered = idx === -1 ? [] : events.slice(0, idx);
+    } else {
+      const sinceDate = new Date(since).getTime();
+      filtered = events.filter(e => new Date(e.receivedAt).getTime() > sinceDate);
+    }
+  }
+
+  res.json({
+    events: filtered.slice(0, limit),
+    total: filtered.length,
+    latest: events[0]?.id || null
+  });
+});
+
+// ── Webhook backends registry ────────────────────────────────────────────────
+// GET /webhook/backends — list all registered backends
+app.get("/webhook/backends", (req, res) => {
+  const secret = req.query.secret || req.headers["x-webhook-secret"];
+  if (secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "invalid secret" });
+  res.json({ backends: readWebhookBackends() });
+});
+
+// POST /webhook/backends — register a new backend
+// Body: { name, url, secret? }
+app.post("/webhook/backends", (req, res) => {
+  const secret = req.query.secret || req.headers["x-webhook-secret"] || req.body?.adminSecret;
+  if (secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "invalid secret" });
+
+  const { name, url } = req.body || {};
+  if (!name || !url) return res.status(400).json({ error: "name and url required" });
+  try { new URL(url); } catch { return res.status(400).json({ error: "invalid url" }); }
+
+  const backends = readWebhookBackends();
+  if (backends.find(b => b.url === url)) return res.status(409).json({ error: "url already registered" });
+
+  const backend = { id: require("crypto").randomUUID(), name, url, addedAt: new Date().toISOString() };
+  backends.push(backend);
+  writeWebhookBackends(backends);
+  console.log(`[Webhook] Backend registered: ${name} → ${url}`);
+  res.status(201).json({ backend, webhookUrl: `https://${process.env.REPLIT_DEV_DOMAIN || "your-replit-url"}/webhook/flutterwave` });
+});
+
+// DELETE /webhook/backends/:id — remove a backend
+app.delete("/webhook/backends/:id", (req, res) => {
+  const secret = req.query.secret || req.headers["x-webhook-secret"];
+  if (secret !== WEBHOOK_SECRET) return res.status(401).json({ error: "invalid secret" });
+  const backends = readWebhookBackends().filter(b => b.id !== req.params.id);
+  writeWebhookBackends(backends);
+  res.json({ success: true });
+});
+
+// ── Webhook dashboard (quick overview, no auth for GET — just shows counts) ──
+app.get("/webhook/status", (req, res) => {
+  const events = readWebhookEvents();
+  const backends = readWebhookBackends();
+  const successful = events.filter(e => e.status === "successful").length;
+  const totalAmount = events.filter(e => e.status === "successful").reduce((s, e) => s + (e.amount || 0), 0);
+  res.json({
+    webhookUrl: `https://${process.env.REPLIT_DEV_DOMAIN || "your-replit-url"}/webhook/flutterwave`,
+    backendsRegistered: backends.length,
+    backends: backends.map(b => ({ name: b.name, url: b.url })),
+    totalEventsStored: events.length,
+    successfulPayments: successful,
+    totalAmountReceived: totalAmount,
+    latestEvent: events[0] ? { id: events[0].id, type: events[0].type, status: events[0].status, amount: events[0].amount, at: events[0].receivedAt } : null,
+    pollingEndpoint: "/webhook/events?secret=YOUR_SECRET&since=LAST_EVENT_ID",
+    note: "Register backends at POST /webhook/backends with { name, url, adminSecret }"
+  });
+});
+
 // Serve React for all non-API routes
 app.get("*", (req, res) => {
   const indexPath = path.join(__dirname, "client/dist/index.html");
