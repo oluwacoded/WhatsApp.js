@@ -2,14 +2,64 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
-    <script type="module" crossorigin src="/assets/index-346ed4c9.js"></script>
-    <link rel="stylesheet" href="/assets/index-014bbc0a.css">
+    <meta name="theme-color" content="#101512" />
+    <title>MFG Bot Control</title>
+    <link rel="stylesheet" href="/assets/mfg-control.css" />
+    <script type="module" src="/assets/mfg-control.js"></script>
   </head>
   <body>
-    <div id="root"></div>
-    
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Netlify frontend + backend</p>
+          <h1>MFG Bot Control</h1>
+          <p class="lede">Manage bot endpoints, track operating status, and keep deployment notes in one place.</p>
+        </div>
+        <div class="hero-panel">
+          <span class="metric-label">Saved bots</span>
+          <strong id="bot-count">0</strong>
+          <span id="sync-state">Syncing with backend</span>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <form id="bot-form" class="editor">
+          <div class="section-heading">
+            <span>Add backend target</span>
+            <button type="submit">Save bot</button>
+          </div>
+          <label>
+            Name
+            <input id="bot-name" name="name" autocomplete="off" placeholder="Primary WhatsApp bot" required />
+          </label>
+          <label>
+            Endpoint URL
+            <input id="bot-url" name="url" type="url" placeholder="https://example.netlify.app" required />
+          </label>
+          <label>
+            Status
+            <select id="bot-status" name="status">
+              <option value="idle">Idle</option>
+              <option value="online">Online</option>
+              <option value="maintenance">Maintenance</option>
+            </select>
+          </label>
+          <label>
+            Notes
+            <textarea id="bot-notes" name="notes" rows="4" placeholder="What this bot handles, deploy notes, or owner reminders"></textarea>
+          </label>
+          <p id="form-message" class="form-message" role="status"></p>
+        </form>
+
+        <section class="list-panel">
+          <div class="section-heading">
+            <span>Backend records</span>
+            <button id="refresh" type="button">Refresh</button>
+          </div>
+          <div id="bot-list" class="bot-list"></div>
+        </section>
+      </section>
+    </main>
   </body>
 </html>
