@@ -4,6 +4,8 @@ if (!globalThis.crypto) {
   globalThis.crypto = webcrypto;
 }
 
+const { execFile } = require("child_process");
+
 const {
   default: makeWASocket,
   DisconnectReason,
@@ -438,7 +440,49 @@ async function downloadFromCobalt(url) {
   return null;
 }
 
-// Main entry point: Saavn preview → Deezer 30s → iTunes 30s
+// Source 3: yt-dlp (full songs via YouTube — no API key, requires yt-dlp binary)
+const YT_DLP_BIN = path.join(__dirname, "bin", "yt-dlp");
+const NODE_BIN = process.execPath;
+
+async function downloadFromYtDlp(query) {
+  try {
+    const tmpId = `ytdlp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const tmpBase = `/tmp/${tmpId}`;
+    const outPath = `${tmpBase}.mp3`;
+
+    const args = [
+      "--js-runtimes", `node:${NODE_BIN}`,
+      "--no-warnings",
+      "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
+      "--no-playlist", "--max-filesize", "15m",
+      "-o", `${tmpBase}.%(ext)s`,
+      "--print", "before_dl:%(title)s",
+      "--quiet",
+      `ytsearch1:${query}`
+    ];
+
+    console.log(`[MFG_bot] yt-dlp searching: "${query}"`);
+    return await new Promise((resolve) => {
+      let titleOut = "";
+      const proc = execFile(YT_DLP_BIN, args, { timeout: 90000 }, (err) => {
+        if (err?.killed) { console.log("[MFG_bot] yt-dlp timeout"); resolve(null); return; }
+        if (!fs.existsSync(outPath)) {
+          console.log("[MFG_bot] yt-dlp: no output file", err?.message?.slice(0, 80) || "");
+          resolve(null); return;
+        }
+        const buffer = fs.readFileSync(outPath);
+        try { fs.unlinkSync(outPath); } catch {}
+        if (buffer.byteLength < 10000) { resolve(null); return; }
+        const title = titleOut.trim() || query;
+        console.log(`[MFG_bot] ✅ yt-dlp: "${title}" — ${Math.round(buffer.byteLength / 1024)}KB`);
+        resolve({ buffer, title, source: "ytdlp" });
+      });
+      proc.stdout?.on("data", (d) => { titleOut += d.toString(); });
+    });
+  } catch (e) { console.log("[MFG_bot] yt-dlp err:", e.message); return null; }
+}
+
+// Main entry point: yt-dlp (full song) → Saavn preview → Deezer 30s → iTunes 30s
 // SoundCloud direct links: try cobalt (may be unavailable)
 async function downloadMusic(query) {
   if (!query) return null;
@@ -460,8 +504,12 @@ async function downloadMusic(query) {
     return null;
   }
 
-  // Name-based search: Saavn (full song) → Deezer preview → iTunes preview
+  // Name-based search: yt-dlp (full song) → Saavn → Deezer preview → iTunes preview
   console.log(`[MFG_bot] Searching music: "${query}"`);
+  const ytdlp = await downloadFromYtDlp(query);
+  if (ytdlp?.buffer) return ytdlp;
+
+  console.log("[MFG_bot] yt-dlp failed — trying Saavn");
   const saavn = await downloadFromSaavn(query);
   if (saavn?.buffer) return saavn;
 
@@ -2029,6 +2077,17 @@ async function connectToWhatsApp() {
           }
 
           // Default: create / show account
+          // Auto-renew if account expired (temporary accounts expire after ~1hr)
+          if (ghostBankData[jidKey]?.accountNumber && ghostBankData[jidKey]?.expiresAt) {
+            if (new Date() > new Date(ghostBankData[jidKey].expiresAt)) {
+              console.log(`[GhostBank] Account expired for ${jidKey} — will auto-renew`);
+              // Keep balance and transaction history, but clear account number to trigger re-creation
+              ghostBankData[jidKey]._oldBalance = ghostBankData[jidKey].balance || 0;
+              ghostBankData[jidKey]._oldTxs = ghostBankData[jidKey].transactions || [];
+              delete ghostBankData[jidKey].accountNumber;
+            }
+          }
+
           if (ghostBankData[jidKey]?.accountNumber) {
             const acct = ghostBankData[jidKey];
             await send(`🏦 *GHOST BANK MFG*\n━━━━━━━━━━━━━━━━━━━━\n\n👤 *Account Name:* ${acct.acctName}\n🏛 *Bank:* ${acct.bankName || "Sterling Bank"}\n💳 *Account Number:* ${acct.accountNumber}\n💰 *Balance:* ₦${(acct.balance || 0).toLocaleString()}\n\n━━━━━━━━━━━━━━━━━━━━\n📲 Share this account to receive payments.\n\n*.pay balance* — check balance\n*.pay history* — view transactions\n*.pay withdraw* — request withdrawal\n\n_Powered by GHOST BANK MFG 🔥_`);
@@ -2039,26 +2098,26 @@ async function connectToWhatsApp() {
           await send("🏦 *Creating your GHOST BANK account...*");
           try {
             const txRef = `GHOST_${senderPhone}_${Date.now()}`;
-            // Generate a random valid-looking BVN and NIN for accounts that don't have one
-            const fakeBvn = `2${String(Math.floor(Math.random() * 9000000000) + 1000000000)}`;
-            const fakeNin = `${String(Math.floor(Math.random() * 90000000) + 10000000)}`;
 
-            // Attempt 1: no BVN/NIN (some Flutterwave accounts support this)
+            // is_permanent: false works without BVN/NIN verification
+            // duration: 525600 = 365 days in minutes (1 year)
+            // is_permanent: true as a fallback (may work on fully-verified Flutterwave accounts)
             const basePayload = {
               email: `wa_${senderPhone}@ghostbank.mfg`,
-              is_permanent: true,
+              is_permanent: false,
               tx_ref: txRef,
               narration: senderName,
               currency: "NGN",
-              amount: 100
+              amount: 100,
+              frequency: 1000,
+              duration: 525600
             };
 
             let flwData = null;
             let attempt = 0;
             const payloads = [
               basePayload,
-              { ...basePayload, bvn: fakeBvn },
-              { ...basePayload, bvn: fakeBvn, nin: fakeNin }
+              { ...basePayload, is_permanent: true, frequency: undefined, duration: undefined }
             ];
 
             for (const payload of payloads) {
@@ -2080,20 +2139,28 @@ async function connectToWhatsApp() {
 
             if (flwData?.status === "success" && flwData?.data?.account_number) {
               const d = flwData.data;
+              // Restore balance/transactions if this is a renewal of an expired account
+              const prevBalance = ghostBankData[jidKey]?._oldBalance || 0;
+              const prevTxs    = ghostBankData[jidKey]?._oldTxs    || [];
+              // Store expiry so auto-renewal knows when to refresh the account number
+              const expiresAt = d.expiry_date ? new Date(d.expiry_date.replace(" ", "T") + "Z").toISOString() : null;
               ghostBankData[jidKey] = {
                 accountNumber: d.account_number,
                 bankName: d.bank_name || "Sterling Bank",
                 acctName: d.account_name || senderName,
                 txRef,
-                balance: 0,
-                transactions: [],
-                createdAt: new Date().toISOString()
+                balance: prevBalance,
+                transactions: prevTxs,
+                createdAt: new Date().toISOString(),
+                ...(expiresAt && { expiresAt })
               };
               writeJSON("ghostBank.json", ghostBankData);
-              await send(`✅ *GHOST BANK MFG — Account Created!* 🎉\n\n━━━━━━━━━━━━━━━━━━━━\n👤 *Name:* ${ghostBankData[jidKey].acctName}\n🏛 *Bank:* ${ghostBankData[jidKey].bankName}\n💳 *Account Number:* ${ghostBankData[jidKey].accountNumber}\n💰 *Balance:* ₦0.00\n━━━━━━━━━━━━━━━━━━━━\n\n📲 Share this number to receive payments!\nFunds reflect automatically when paid.\n\n*.pay balance* — check balance\n*.pay withdraw* — withdraw funds (contact admin)\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`);
+              const isRenewal = prevBalance > 0 || prevTxs.length > 0;
+              const balanceText = isRenewal ? `₦${prevBalance.toLocaleString()} (carried over)` : "₦0.00";
+              await send(`✅ *GHOST BANK MFG — Account ${isRenewal ? "Renewed" : "Created"}!* 🎉\n\n━━━━━━━━━━━━━━━━━━━━\n👤 *Name:* ${ghostBankData[jidKey].acctName}\n🏛 *Bank:* ${ghostBankData[jidKey].bankName}\n💳 *Account Number:* ${ghostBankData[jidKey].accountNumber}\n💰 *Balance:* ${balanceText}\n━━━━━━━━━━━━━━━━━━━━\n\n📲 Share this number to receive payments!\nFunds reflect automatically when paid.\n\n*.pay balance* — check balance\n*.pay withdraw* — withdraw funds (contact admin)\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`);
             } else {
               const errMsg = flwData?.message || "API unavailable";
-              await send(`❌ Could not create account: ${errMsg}\n\nThis usually means your Flutterwave account needs BVN/NIN verification enabled.\nContact *+2349132883869* for manual setup.`);
+              await send(`❌ Could not create account: ${errMsg}\n\nContact *+2349132883869* for manual setup.`);
             }
           } catch (e) {
             console.log("[MFG_bot] Flutterwave error:", e.message);
@@ -2594,7 +2661,8 @@ async function connectToWhatsApp() {
           try {
             await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || input)}.mp3` });
             const previewNote = audio.isPreview ? " _(30s preview)_" : "";
-            await send(`✅ *${audio.title || input}* — enjoy 🎧${previewNote}`);
+            const fullNote = audio.source === "ytdlp" ? " 🎵" : "";
+            await send(`✅ *${audio.title || input}* — enjoy 🎧${previewNote}${fullNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         }
@@ -2608,13 +2676,14 @@ async function connectToWhatsApp() {
           try {
             await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || query)}.mp3` });
             const previewNote = audio.isPreview ? " _(30s preview)_" : "";
-            await send(`✅ *${audio.title || query}* — enjoy 🎧${previewNote}`);
+            const fullNote = audio.source === "ytdlp" ? " 🎵" : "";
+            await send(`✅ *${audio.title || query}* — enjoy 🎧${previewNote}${fullNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         }
 
         if (cmd === "music" || cmd === "songs") {
-          await send(`🎵 *MFG MUSIC DOWNLOADER* 🎵\n_powered by mfg_bot • made by teddymfg_\n\n━━━━━━━━━━━━━━━━━━━━\n🔥 *DOWNLOAD COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n\n🎶 *.song <name>* — search + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name>* — download by song name\n🔗 *.download <SoundCloud link>* — direct link download\n⚡ *.dl <name or link>* — fastest alias\n\nℹ️ *.songinfo <name>* — title, artist, album, duration\n\n━━━━━━━━━━━━━━━━━━━━\n💡 *TIPS*\n━━━━━━━━━━━━━━━━━━━━\n› Type *.song* alone → send song name next\n› Works great for Afrobeats, Amapiano, global hits\n› Max file size: 25MB (WhatsApp limit)\n› If song is short (30s), try a more specific name\n\n_type .song <name> to start_ 👇`);
+          await send(`🎵 *MFG MUSIC DOWNLOADER* 🎵\n_powered by mfg_bot • made by teddymfg_\n\n━━━━━━━━━━━━━━━━━━━━\n🔥 *DOWNLOAD COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n\n🎶 *.song <name>* — full song MP3\n▶️ *.play <name>* — same as .song\n⏬ *.download <name>* — download by song name\n⚡ *.dl <name>* — fastest alias\n\nℹ️ *.songinfo <name>* — title, artist, album, duration\n\n━━━━━━━━━━━━━━━━━━━━\n💡 *TIPS*\n━━━━━━━━━━━━━━━━━━━━\n› Works great for Afrobeats, Amapiano, global hits\n› Full song sent as audio file (MP3)\n› Takes 15-20 seconds to download\n› Max file size: 15MB\n\n_type .song <name> to start_ 👇`);
           continue;
         }
 
