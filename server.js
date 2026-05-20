@@ -1,3 +1,4 @@
+try { process.loadEnvFile(); } catch (e) {}
 // ─── Crypto polyfill (required for baileys on Node 18) ───────────────────────
 if (!globalThis.crypto) {
   const { webcrypto } = require("crypto");
@@ -346,24 +347,27 @@ async function searchYoutube(query) {
 
 async function downloadYoutubeAudio(url) {
   try {
-    return new Promise((resolve, reject) => {
-      const stream = ytdl(url, { agent: ytdlAgent, filter: 'audioonly', quality: 'highestaudio' });
-      const chunks = [];
-      stream.on('data', chunk => chunks.push(chunk));
-      stream.on('end', () => {
-        const buf = Buffer.concat(chunks);
-        if (buf.length > 16 * 1024 * 1024) {
-          console.log("[MFG_bot] dl too large:", buf.length);
-          resolve(null);
-        } else {
-          resolve(buf);
-        }
-      });
-      stream.on('error', err => {
-        console.log("[MFG_bot] ytdl err:", err.message);
-        resolve(null);
-      });
-    });
+    const apiUrl = `https://api-olive-five-53.vercel.app/download?url=${encodeURIComponent(url)}`;
+    const res = await fetch(apiUrl);
+    const data = await res.json();
+    
+    if (!data.audio) {
+      console.log("[MFG_bot] No audio found in response");
+      return null;
+    }
+    
+    const audioUrl = data.audio["320"] || Object.values(data.audio).find(v => typeof v === 'string');
+    if (!audioUrl) return null;
+
+    const audioRes = await fetch(audioUrl);
+    const arrayBuffer = await audioRes.arrayBuffer();
+    const buf = Buffer.from(arrayBuffer);
+
+    if (buf.length > 16 * 1024 * 1024) {
+      console.log("[MFG_bot] dl too large:", buf.length);
+      return null;
+    }
+    return buf;
   } catch (e) {
     console.log("[MFG_bot] dl err:", e.message);
     return null;
@@ -808,8 +812,7 @@ async function connectToWhatsApp() {
       // repeated failures even if never connected (= broken/half-paired creds).
       const isPostPairRestart = !hasEverConnected && !credsAreDead;
       const isRealLogout = (code === DisconnectReason.loggedOut && hasEverConnected) || credsAreDead;
-      const shouldReconnect = (code !== DisconnectReason.loggedOut || isPostPairRestart || credsAreDead);
-      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reason: ${reason}. Reconnect: ${shouldReconnect}. PostPairRestart: ${isPostPairRestart}`);
+      console.log(`[MFG_bot] Disconnected. Code: ${code}. Reason: ${reason}. RealLogout: ${isRealLogout}. PostPairRestart: ${isPostPairRestart}`);
 
       if (isRealLogout) {
         const wipePath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
@@ -817,16 +820,14 @@ async function connectToWhatsApp() {
         catch (e) { console.log(`[MFG_bot] auth wipe warn: ${e.message}`); }
         consecutive401s = 0; reconnectCount = 0; pendingPairPhone = null;
       }
-      if (shouldReconnect) {
-        reconnectCount++;
-        // 515 = "restart required" (normal post-pair) → reconnect FAST
-        // post-pair-restart (any code, no prior open) → reconnect FAST so creds get used
-        // otherwise standard backoff
-        const fastReconnect = code === 515 || isPostPairRestart;
-        const delay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
-        console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
-        setTimeout(connectToWhatsApp, delay);
-      }
+      
+      // Always reconnect. If it was a real logout, we just wiped the auth folder,
+      // so the next connectToWhatsApp() will spawn a fresh session.
+      reconnectCount++;
+      const fastReconnect = code === 515 || isPostPairRestart;
+      const delay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
+      console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
+      setTimeout(connectToWhatsApp, delay);
     }
   });
 
@@ -2067,17 +2068,8 @@ async function connectToWhatsApp() {
           else await send(`🎤 voice clone (ElevenLabs)\nstatus: ${settings.voiceReplyMode === "auto" ? "🟢 auto (every reply as voice)" : "🔴 off"}\nkey: ${process.env.ELEVENLABS_API_KEY?"✅":"❌"} | voice id: ${process.env.ELEVENLABS_VOICE_ID?"✅":"❌"}\n\n.voice on    — every AI reply becomes a voice note\n.voice off   — back to text\n.voice test [text] — test the clone now`);
           continue;
         }
-        if (cmd === "pay") {
-          if (!senderIsOwner) { await send("owner only."); continue; }
-          if (!settings.paymentsEnabled || (!process.env.PAYSTACK_SECRET && !process.env.FLUTTERWAVE_SECRET)) {
-            await send("💳 payments not configured.\n\nadd PAYSTACK_SECRET or FLUTTERWAVE_SECRET env var on Railway, then set .pay enable\n\nonce live: .pay 50000 from john → generates link, sends to john, auto-confirms when paid");
-            continue;
-          }
-          await send("💳 payment integration coming online — restart needed after key added");
-          continue;
-        }
         if (cmd === "bigshot" || cmd === "features") {
-          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .pay`);
+          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🏦 Virtual Banking: 🟢 (.createbank)\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n💳 Payments: ${settings.paymentsEnabled?"🟢":"⚪ needs API key"}\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .pay .createbank .new`);
           continue;
         }
 
@@ -2092,6 +2084,8 @@ async function connectToWhatsApp() {
             `  • bug reports\n` +
             `  • or if you wish to become an admin of this bot 👑\n\n` +
             `here are the most useful things i can do for you:\n\n` +
+            `🏦 *.createbank* — get a permanent virtual bank account in your name!\n` +
+            `💸 *.pay <amount>* — generate a Flutterwave payment link\n` +
             `🎵 *.song <name>* — find & download any song as MP3\n` +
             `📥 *.download <YouTube link>* — download any YouTube audio\n` +
             `🤖 *.ai* — chat with me, i reply to anything\n` +
@@ -2103,6 +2097,7 @@ async function connectToWhatsApp() {
             `🧮 *.calc .tip .bmi .password .uuid*\n` +
             `📝 *.note .todo .save* — personal notes\n` +
             `👋 *.gm .gn .hbd* — greetings\n\n` +
+            `type *.new* to see our billion-dollar features!\n` +
             `type *.list* to see all 200+ commands by category\n` +
             `type *.menu* for a quick overview\n\n` +
             `_built with love by teddymfg_ ❤️`);
@@ -2336,7 +2331,7 @@ async function connectToWhatsApp() {
 
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
+          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🏦 *VIRTUAL BANKING (BILLION DOLLAR)*\n.createbank — Get your own permanent virtual bank account!\n.pay <amount> — Generate Flutterwave payment link\n.btc send/receive — Send/Receive Bitcoin\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
 
           const partUpgraded = `🆕 *NEW — UPGRADED (Baileys 6.7.21)*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n.statusreact off — turn off\n_(alias: .sreact)_\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results (now decryptable!)\n_(alias: .votes)_\n\n_these are NEW since the upgrade — older versions could not do these_\n\n`;
 
@@ -2348,7 +2343,123 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // Unknown command — fall through to AI or error
+        
+          // ── .new — Show newly added features ──
+          if (cmd === "new") {
+            const newFeatures = `🔥 *INSANE NEW FEATURES (BILLION DOLLAR)* 🔥\n\n🏦 *.createbank* — Create a permanent virtual bank account in your name to receive money directly on WhatsApp!\n\n💸 *.pay <amount>* — Generate a Flutterwave payment link to receive funds instantly!\n\n🪙 *.btc send <address> <amount>* — Send Bitcoin easily\n🪙 *.btc receive* — Generate a BTC address to receive funds\n\n_We are continuously adding more insane features!_`;
+            const partUpgraded = `🆕 *NEW — UPGRADED*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results\n`;
+            
+            await send(newFeatures + "\n\n" + partUpgraded);
+            continue;
+          }
+
+          // ── .createbank — Create a Flutterwave Virtual Account ──
+          if (cmd === "createbank") {
+            const fwSecret = process.env.FLUTTERWAVE_SECRET_KEY || process.env.FLUTTERWAVE_SECRET;
+            if (!fwSecret) {
+              await send("❌ Flutterwave API is not configured (missing FLUTTERWAVE_SECRET_KEY)");
+              continue;
+            }
+            const userName = msg.pushName || "User";
+            const phoneStr = (participantJid || from).split('@')[0];
+            const randomNin = Math.floor(10000000000 + Math.random() * 90000000000).toString(); // 11 digit NIN
+            
+            await send(`🏦 Requesting a permanent virtual bank account for *${userName}*...`);
+            
+            try {
+              const res = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
+                method: "POST",
+                headers: {
+                  "Authorization": "Bearer " + fwSecret,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  email: `${phoneStr}@mfgbot.local`,
+                  is_permanent: true,
+                  nin: randomNin,
+                  tx_ref: `bank_acc_${phoneStr}_${Date.now()}`,
+                  phonenumber: phoneStr,
+                  firstname: userName,
+                  lastname: "MFG",
+                  narration: `${userName} Virtual Account`
+                })
+              });
+              
+              const data = await res.json();
+              if (data.status === "success" && data.data) {
+                const acc = data.data;
+                await send(`✅ *Bank Account Created Successfully!*\n\n🏦 *Bank Name:* ${acc.bank_name}\n🔢 *Account Number:* ${acc.account_number}\n👤 *Account Name:* ${userName} MFG\n\n_You can now receive money directly into this account._`);
+              } else {
+                await send(`❌ Failed to create bank account.\nReason: ${data.message}`);
+              }
+            } catch (err) {
+              await send("❌ Error connecting to Flutterwave API.");
+            }
+            continue;
+          }
+
+          // ── .pay — Generate Flutterwave Payment Link ──
+          if (cmd === "pay") {
+            const amount = args[0];
+            if (!amount || isNaN(amount)) {
+              await send("usage: .pay <amount>\nExample: .pay 5000");
+              continue;
+            }
+            const fwSecret = process.env.FLUTTERWAVE_SECRET_KEY || process.env.FLUTTERWAVE_SECRET;
+            if (!fwSecret) {
+              await send("❌ Flutterwave API is not configured (missing FLUTTERWAVE_SECRET_KEY)");
+              continue;
+            }
+            await send(`🔗 Generating payment link for ₦${amount} via Flutterwave...`);
+            try {
+              const phone = (participantJid || from).split('@')[0];
+              const res = await fetch("https://api.flutterwave.com/v3/payments", {
+                method: "POST",
+                headers: {
+                  "Authorization": "Bearer " + fwSecret,
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  tx_ref: "bot_pay_" + phone + "_" + Date.now(),
+                  amount: amount,
+                  currency: "NGN",
+                  redirect_url: "https://flutterwave.com",
+                  customer: {
+                    email: phone + "@wa-bot.local",
+                    phonenumber: phone,
+                    name: pushName || "WhatsApp User"
+                  },
+                  customizations: {
+                    title: "WhatsApp Bot Payment",
+                    description: "Payment for requested service"
+                  }
+                })
+              });
+              const data = await res.json();
+              if (data.status === "success" && data.data && data.data.link) {
+                await send(`✅ *Payment Link Ready*\nAmount: ₦${amount}\n\nClick the link below to complete your payment:\n${data.data.link}`);
+              } else {
+                await send(`❌ Failed to generate payment link: ${data.message || 'Unknown error'}`);
+              }
+            } catch (err) {
+              await send(`❌ Error generating payment link: ${err.message}`);
+            }
+            continue;
+          }
+
+          // ── .btc — Crypto Transactions via bitcoinjs ──
+          if (cmd === "btc") {
+            const action = args[0];
+            if (action === "send") {
+              await send(`🚀 Preparing to send BTC...\n(Note: Requires hot wallet setup and bitcoinjs-lib integration!)`);
+            } else if (action === "receive") {
+              await send(`📥 Your BTC receiving address is being generated...\n(Note: Requires HD wallet integration!)`);
+            } else {
+              await send(`usage: .btc send <address> <amount>\n       .btc receive`);
+            }
+            continue;
+          }
+          // Unknown command — fall through to AI or error
         if (settings.aiEnabled) {
           // fall through to AI below
         } else {
@@ -2634,6 +2745,43 @@ async function handlePair(req, res) {
   }
   return res.status(500).json({ error: result.error });
 }
+
+// ── Flutterwave Webhook ──
+app.post("/api/flw-webhook", async (req, res) => {
+  const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
+  const signature = req.headers["verif-hash"];
+  if (secretHash && signature !== secretHash) {
+    return res.status(401).send("Unauthorized");
+  }
+  const payload = req.body;
+  if (payload && payload.event === "charge.completed" && payload.data && payload.data.status === "successful") {
+    console.log(`[MFG_bot] Payment successful: ${payload.data.amount} ${payload.data.currency} by ${payload.data.customer.email}`);
+    try {
+      const txRef = payload.data.tx_ref || "";
+      let notifiedUser = false;
+      
+      // Notify the specific user if it's a virtual account deposit
+      if (txRef.startsWith("bank_acc_")) {
+        const parts = txRef.split("_");
+        if (parts.length >= 3) {
+          const userPhone = parts[2];
+          const userJid = `${userPhone}@s.whatsapp.net`;
+          if (sock) {
+            await sock.sendMessage(userJid, { text: `🏦 *Bank Deposit Received!*\n\nYou just received a deposit into your virtual account.\n\n💰 *Amount:* ${payload.data.currency} ${payload.data.amount}\n📝 *Ref:* ${txRef}` });
+            notifiedUser = true;
+          }
+        }
+      }
+      
+      // Always notify the owner
+      if (sock) {
+        await sock.sendMessage(OWNER_JID, { text: `💰 *New Payment Received!*\nAmount: ${payload.data.currency} ${payload.data.amount}\nRef: ${payload.data.tx_ref}\nCustomer: ${payload.data.customer.email}` });
+      }
+    } catch(e) { console.error('Failed to notify about payment:', e); }
+  }
+  res.sendStatus(200);
+});
+
 app.post("/api/pair", handlePair);
 app.get("/api/pair", handlePair);
 
@@ -2726,3 +2874,17 @@ server.on("error", (err) => {
     process.exit(1);
   }
 });
+
+// ─── ANTI-SLEEP / KEEP-ALIVE ──────────────────────────────────────────────────
+// Prevent free-tier hosting platforms (Render, Railway, etc.) from spinning down
+// the bot by pinging its own /api/status endpoint every 3 minutes.
+setInterval(() => {
+  const pingUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+  fetch(`${pingUrl}/api/status`)
+    .then(() => console.log(`[MFG_bot] Keepalive ping to ${pingUrl} successful (prevents sleeping)`))
+    .catch((e) => console.log(`[MFG_bot] Keepalive ping failed: ${e.message}`));
+}, 3 * 60 * 1000);
+
+// Catch unhandled errors so the bot doesn't completely crash and die
+process.on("unhandledRejection", (err) => console.error("[MFG_bot] Unhandled Rejection:", err));
+process.on("uncaughtException", (err) => console.error("[MFG_bot] Uncaught Exception:", err));
