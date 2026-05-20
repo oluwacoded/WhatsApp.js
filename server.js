@@ -2547,7 +2547,7 @@ async function connectToWhatsApp() {
           else await send(`🎤 voice clone (ElevenLabs)\nstatus: ${settings.voiceReplyMode === "auto" ? "🟢 auto (every reply as voice)" : "🔴 off"}\nkey: ${process.env.ELEVENLABS_API_KEY?"✅":"❌"} | voice id: ${process.env.ELEVENLABS_VOICE_ID?"✅":"❌"}\n\n.voice on    — every AI reply becomes a voice note\n.voice off   — back to text\n.voice test [text] — test the clone now`);
           continue;
         }
-        if (cmd === "createacct" || cmd === "pay" || cmd === "btc") {
+        if (cmd === "createacct" || cmd === "btc") {
           await send("that payment/crypto command has been removed. use .song, .download, .music, or .list for the active bot features.");
           continue;
         }
@@ -3455,6 +3455,11 @@ async function processPaymentEvent(payload) {
     const data = payload?.data || {};
     const status = data.status;
     if (status !== "successful") return false; // only process successful payments
+
+    // Always reload from disk so newly-created accounts are visible
+    const liveGhostBank = readJSON("ghostBank.json", {});
+    // Sync into the in-memory global so commands see the same data
+    Object.assign(ghostBankData, liveGhostBank);
 
     const txRef       = data.tx_ref || data.txRef || "";
     const accountNum  = data.account_number || data.meta?.account_number || "";
