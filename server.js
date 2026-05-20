@@ -1002,16 +1002,16 @@ async function connectToWhatsApp() {
           const uTxt = (text || "").trim();
           if (tokenData.validTokens.includes(uTxt)) {
             if (tokenData.usedTokens[uTxt] && tokenData.usedTokens[uTxt] !== activeSenderId) {
-              await send("This token has already been used by another account. It will not work here.");
+              await send("❌ *Token Already Used*\n\nThis token has already been claimed by another number.\nEach token is one-time use only.\n\nContact *+2349132883869* to get a fresh token.");
               continue;
             }
             tokenData.usedTokens[uTxt] = activeSenderId;
             tokenData.authorizedUsers[activeSenderId] = true;
             writeJSON("tokenData.json", tokenData);
-            await send("Token accepted! All bot features are now unlocked for this number. Welcome!");
+            await send("✅ *ACCESS GRANTED!* 🔓\n\n━━━━━━━━━━━━━━━━━━━━\nWelcome to *mfg_bot* — you're now fully unlocked!\n━━━━━━━━━━━━━━━━━━━━\n\n🤖 AI replies — active\n🎵 Music downloads — ready\n📱 200+ commands — available\n\nType *.list* to see everything you can do.\n_made by teddymfg • +2349132883869_");
             continue;
           } else {
-            await send("Message my maker to open all bot features +2349132883869 pay 3k naira to unlock all access.\nOnce you get a token, paste it here to unlock.");
+            await send("🔐 *mfg_bot — Access Required*\n\n━━━━━━━━━━━━━━━━━━━━\nThis bot requires a *one-time access token*.\n━━━━━━━━━━━━━━━━━━━━\n\nTo get your token:\n1️⃣ Contact *+2349132883869*\n2️⃣ Pay ₦3,000 to unlock full access\n3️⃣ Paste your token here\n\n_Each token works for ONE number only._");
             continue;
           }
         }
@@ -2174,40 +2174,55 @@ async function connectToWhatsApp() {
 
         // ── .download — download YouTube audio as MP3 (uses cobalt.tools) ─────
         if (cmd === "download" || cmd === "dl" || cmd === "mp3") {
-          const url = args[0];
-          if (!url) {
-            // Save state — wait for next message to be the song name/url
+          const input = args.join(" ").trim();
+          if (!input) {
+            // No argument — wait for next message
             pendingDownload.set(from, Date.now());
-            await send("🎵 wetin you wan download?\nsend me the *YouTube link* OR *song name* in your next message.\n(i'll auto-cancel in 60s if no reply)");
+            await send("🎵 *MUSIC DOWNLOADER* 🎵\n\nSend me:\n› A *YouTube link* to download directly\n› Or a *song name* to search and download\n\n_(auto-cancels in 60s if no reply)_");
             continue;
           }
-          await send("⏬ downloading... give me a few seconds");
-          const audio = await downloadYoutubeAudio(url);
-          if (!audio?.buffer) { await send("❌ couldn't download that. make sure it's a valid YouTube link or try .song <name> instead"); continue; }
-          try {
-            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title)}.mp3` });
-            await send("✅ enjoy 🎧");
-          } catch (e) { await send("❌ send failed: " + e.message); }
+          const isLink = /https?:\/\/(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|music\.youtube\.com)/i.test(input);
+          if (isLink) {
+            await send("⏬ *downloading...* give me a few seconds 🎧");
+            const audio = await downloadYoutubeAudio(input.match(/https?:\S+/)[0]);
+            if (!audio?.buffer) { await send("❌ download failed. try .song <name> to search instead"); continue; }
+            try {
+              await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title)}.mp3` });
+              await send(`✅ *${audio.title || "Song"}* — enjoy 🎧`);
+            } catch (e) { await send("❌ send failed: " + e.message); }
+          } else {
+            // Treat as song name — search then download
+            await send(`🔍 searching for *"${input}"*...`);
+            const ytUrl = await searchYoutube(input);
+            if (!ytUrl) { await send("❌ couldn't find that. try a more specific name or paste a YouTube link"); continue; }
+            await send("⏬ found it — downloading...");
+            const audio = await downloadYoutubeAudio(ytUrl);
+            if (!audio?.buffer) { await send(`❌ download failed. try the link: ${ytUrl}`); continue; }
+            try {
+              await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || input)}.mp3` });
+              await send(`✅ *${audio.title || input}* — enjoy 🎧`);
+            } catch (e) { await send("❌ send failed: " + e.message); }
+          }
           continue;
         }
         if (cmd === "song" || cmd === "play") {
           const query = args.join(" ");
-          if (!query) { await send(".song <song name> — i'll find it on YouTube and send the MP3"); continue; }
-          await send(`🔍 searching for "${query}"...`);
+          if (!query) { await send("🎵 *.song <song name>*\n\nExamples:\n.song Burna Boy Last Last\n.song Asake Organise\n.song Davido Unavailable"); continue; }
+          await send(`🔍 searching for *"${query}"*...`);
           const ytUrl = await searchYoutube(query);
-          if (!ytUrl) { await send("❌ couldn't find that song. try a different name or paste a YouTube link with .download <link>"); continue; }
+          if (!ytUrl) { await send("❌ couldn't find that song. try a different name or paste a YouTube link with .mp3 <link>"); continue; }
           await send("⏬ found it — downloading...");
           const audio = await downloadYoutubeAudio(ytUrl);
           if (!audio?.buffer) { await send(`❌ download failed. try the link directly: ${ytUrl}`); continue; }
           try {
             await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || query)}.mp3` });
-            await send("✅ enjoy 🎧");
+            await send(`✅ *${audio.title || query}* — enjoy 🎧`);
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         }
 
         if (cmd === "music" || cmd === "songs") {
-          await send(`🎵 music commands\n\n.song <artist - title> — search YouTube and send MP3\n.play <artist - title> — same as .song\n.download <YouTube link> — download a direct YouTube link\n.dl <YouTube link> — short alias\n.mp3 <YouTube link> — short alias\n.ytinfo <YouTube link> — show title, channel, duration, and views\n\nTip: type .download alone, then send the song name or YouTube link in your next message.`);
+          await send(`🎵 *MFG MUSIC DOWNLOADER* 🎵\n_powered by mfg_bot • made by teddymfg_\n\n━━━━━━━━━━━━━━━━━━━━\n🔥 *DOWNLOAD COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n\n🎶 *.song <name>* — search YouTube + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name or link>* — search by name OR paste link\n🔗 *.download <YouTube link>* — direct link download\n⚡ *.dl <link>* — fastest alias for download\n\nℹ️ *.ytinfo <link or name>* — title, channel, duration, views\n\n━━━━━━━━━━━━━━━━━━━━\n💡 *TIPS*\n━━━━━━━━━━━━━━━━━━━━\n› Type *.mp3* alone → send song name or YouTube link next\n› Works with YouTube, YouTube Music links\n› Max file size: 25MB (WhatsApp limit)\n\n_type .mp3 to start downloading now_ 👇`);
           continue;
         }
 
@@ -2415,16 +2430,16 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
+        // ── .command / .list / .work / .teddy / .menu / .help — ALL commands ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.play <name> — song download alias\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.music — show all music commands\n.ytinfo <link/name> — show youtube details\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg>\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute / .unmute\n.lock / .unlock\n.setname <new name>\n.setdesc <new description>\n.revoke\n.leave\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
+          const part1 = `╔══════════════════════╗\n║  🤖 *MFG_BOT COMMANDS* 🤖  ║\n╚══════════════════════╝\n_built by teddymfg • +2349132883869_\n\n━━━━━━━━━━━━━━━━━━━━\n⭐ *TOP COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n🟢 *.online* — cover mode on (AI + stays online)\n🔴 *.offline* — turn off cover mode\n👋 *.listall* — personalized welcome\n👋 *.welcome / .intro* — greet me\n\n━━━━━━━━━━━━━━━━━━━━\n🎵 *MUSIC DOWNLOADS*\n━━━━━━━━━━━━━━━━━━━━\n🎶 *.song <name>* — search + send MP3\n▶️ *.play <name>* — same as .song\n⏬ *.mp3 <name or link>* — download by name OR link\n🔗 *.download <yt-link>* — direct YouTube download\n⚡ *.dl <link>* — fastest alias\n🎵 *.music* — full music menu\nℹ️ *.ytinfo <link/name>* — YouTube details\n\n━━━━━━━━━━━━━━━━━━━━\n🌐 *LIVE TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n🌤 *.weather <city>* — live weather\n📖 *.define <word>* — dictionary\n🔗 *.shorten <url>* — shrink links\n🌍 *.ip <address>* — geolocate IP\n\n━━━━━━━━━━━━━━━━━━━━\n🤖 *AI & BRAIN*\n━━━━━━━━━━━━━━━━━━━━\n*.ai on/off/status/mode/reset/prompt/delay/typing*\n*.style* — manage style mirroring\n*.learnme / .learnme view / .learnme clear*\n*.disclaimer on/off/text/reset*\n🎙 *.transcribe on/off* — voice → text\n👁 *.vision on/off* — read images\n🌗 *.mood on/off* — time-of-day tone\n🫡 *.takeover on/off/min N/clear*\n🚨 *.scam on/off/log* — scam detection\n📚 *.facts* / *.factsclear*\n🎂 *.birthdays* — tracked birthdays\n🔊 *.voice / .voicetest* — voice clone\n⚙️ *.bigshot* — all big-shot toggles\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — TAGGING*\n━━━━━━━━━━━━━━━━━━━━\n📣 *.tagall <msg>* — notify everyone\n👻 *.hidetag <msg>* — invisible mentions\n🎖 *.tagadmins <msg>*\n🔊 *.everyone / .all <msg>*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — CONTROL* _(needs admin)_\n━━━━━━━━━━━━━━━━━━━━\n🚫 *.kick @user* (or reply + .kick)\n➕ *.add <number>*\n⬆️ *.promote @user* / ⬇️ *.demote @user*\n🔇 *.mute / .unmute*\n🔒 *.lock / .unlock*\n✏️ *.setname <name>* / *.setdesc <desc>*\n🔄 *.revoke* (reset group link)\n🚪 *.leave*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — INFO*\n━━━━━━━━━━━━━━━━━━━━\n*.groupinfo / .members / .admins / .link*\n📊 *.poll Q | opt1 | opt2 | opt3*\n🗑 *.del* — reply to delete a message\n👁 *.vv* — reveal view-once photo/video`;
 
-          const partUpgraded = `🆕 *NEW — UPGRADED (Baileys 6.7.21)*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n.statusreact off — turn off\n_(alias: .sreact)_\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results (now decryptable!)\n_(alias: .votes)_\n\n_these are NEW since the upgrade — older versions could not do these_\n\n`;
+          const partUpgraded = `━━━━━━━━━━━━━━━━━━━━\n🆕 *NEW FEATURES (v6.7.21)*\n━━━━━━━━━━━━━━━━━━━━\n\n✏️ *EDIT MESSAGES*\n*.say <text>* — bot sends a tracked message\n*.editlast <new text>* — edit bot's last reply\n\n📌 *CHAT PIN*\n*.pin* — pin chat to top\n*.unpin* — unpin\n\n📰 *CHANNELS*\n*.channel create <name>*\n*.channel info / follow / post*\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE SEND*\n*.vvideo* — re-send as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n*.statusreact <emoji>* — react to every status\n*.statusreact off* — turn off\n_(alias: .sreact)_\n\n📊 *POLL VOTES*\n*.pollvotes* — reply to poll to see results\n_(alias: .votes)_\n\n`;
 
-          const part2 = partUpgraded + `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n😤 *VIBE CHECKS*\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio link\n.call on/off — block calls\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n_total: 200+ commands • type any command to use it_`;
+          const part2 = partUpgraded + `━━━━━━━━━━━━━━━━━━━━\n📝 *TEXT TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n━━━━━━━━━━━━━━━━━━━━\n🔢 *MATH & CALC*\n━━━━━━━━━━━━━━━━━━━━\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n━━━━━━━━━━━━━━━━━━━━\n🎮 *FUN & GAMES*\n━━━━━━━━━━━━━━━━━━━━\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n━━━━━━━━━━━━━━━━━━━━\n😤 *VIBE CHECKS*\n━━━━━━━━━━━━━━━━━━━━\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n━━━━━━━━━━━━━━━━━━━━\n🤝 *SOCIAL ACTIONS*\n━━━━━━━━━━━━━━━━━━━━\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n━━━━━━━━━━━━━━━━━━━━\n🛠 *UTILITY*\n━━━━━━━━━━━━━━━━━━━━\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio\n.call on/off — block calls\n\n━━━━━━━━━━━━━━━━━━━━\n👑 *OWNER ONLY*\n━━━━━━━━━━━━━━━━━━━━\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n╔══════════════════════╗\n║  200+ commands total 🚀  ║\n╚══════════════════════╝\n_type any command to use it_`;
 
           await send(part1);
-          await new Promise(r => setTimeout(r, 600));
+          await new Promise(r => setTimeout(r, 700));
           await send(part2);
           continue;
         }
@@ -2867,11 +2882,29 @@ app.get("*", (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 
-// --- Keep-Alive Ping ---
+// ─── Anti-Sleep Keep-Alive (Railway / Replit) ────────────────────────────────
+// Ping ourselves every 2 minutes so the process never idles out on Railway.
+// Railway free tier sleeps after ~30min of no traffic — this prevents that.
 setInterval(() => {
   const p = process.env.PORT || 5000;
   fetch(`http://localhost:${p}/api/status`).catch(() => {});
-}, 5 * 60 * 1000);
+}, 2 * 60 * 1000);
+
+// ─── WhatsApp Connection Watchdog ────────────────────────────────────────────
+// If we know the socket exists but isConnected has been false for >3 min,
+// the connection silently died (Railway network blip, WA server timeout, etc.).
+// Force a fresh reconnect rather than waiting forever.
+let lastConnectedAt = Date.now();
+setInterval(() => {
+  if (isConnected) { lastConnectedAt = Date.now(); return; }
+  const gapMs = Date.now() - lastConnectedAt;
+  if (gapMs > 3 * 60 * 1000) {
+    console.log(`[MFG_bot] Watchdog: disconnected for ${Math.round(gapMs/1000)}s — forcing reconnect`);
+    lastConnectedAt = Date.now(); // reset so we don't spam
+    try { if (sock) sock.end(new Error("watchdog_reconnect")); } catch {}
+    setTimeout(connectToWhatsApp, 2000);
+  }
+}, 60 * 1000);
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
