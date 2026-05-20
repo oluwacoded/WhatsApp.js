@@ -128,9 +128,9 @@ let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
 delete settings.paymentsEnabled;
 
 // ─── Flutterwave Keys ────────────────────────────────────────────────────────
-const FLW_SECRET = process.env.FLW_SECRET_KEY || "FLWSECK-14b11162ce0167093f3353be3612e2c7-19e42c2f103vt-X";
-const FLW_PUBLIC = process.env.FLW_PUBLIC_KEY || "FLWPUBK-c50bfc109a473aef9ad745be88a1c63b-X";
-const FLW_ENCRYPT = process.env.FLW_ENCRYPTION_KEY || "14b11162ce01da697e03d47b";
+const FLW_SECRET = process.env.FLW_SECRET_KEY || "";
+const FLW_PUBLIC = process.env.FLW_PUBLIC_KEY || "";
+const FLW_ENCRYPT = process.env.FLW_ENCRYPTION_KEY || "";
 let ghostBankData = readJSON("ghostBank.json", {}); // jid → { accountNumber, bankName, acctName, txRef, balance }
 
 let tokenData = readJSON("tokenData.json", {
