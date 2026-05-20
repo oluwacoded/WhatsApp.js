@@ -1,5 +1,9 @@
 [build]
+  command = "npm run build"
   publish = "client/dist"
 
 [functions]
   directory = "netlify/functions"
+
+[build.environment]
+  NETLIFY_FRAMEWORK = "static"
