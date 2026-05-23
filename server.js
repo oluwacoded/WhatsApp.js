@@ -47,7 +47,8 @@ const SETTINGS_DEFAULTS = {
   autoCallReject: false,
   callBlock: true,
   autoReadStatus: false,
-  aiEnabled: true,
+  aiEnabled: false,
+  smmMarkup: 20,
   aiMode: "chill",
   aiDelay: 0,
   aiTyping: false,
@@ -237,7 +238,8 @@ let savedNotes = readJSON("notes.json", {});
 let savedTodos = readJSON("todos.json", {});
 let savedKV = readJSON("kv.json", {});
 let convHistory = readJSON("conv_history.json", {});
-let contactFacts = readJSON("contact_facts.json", {});  // Long-term memory: per-JID extracted facts
+let contactFacts = readJSON("contact_facts.json", {});
+const answerSessions = new Map(); // jid -> last active timestamp for .answer sessions
 let scamAlerts = readJSON("scam_alerts.json", []);      // Log of detected scam attempts
 let birthdayMemory = readJSON("birthdays.json", {});    // jid → "MM-DD"
 
@@ -843,6 +845,33 @@ function fallbackReply(userText, jid) {
   return bank[Math.floor(Math.random() * bank.length)];
 }
 
+// ─── SMM Panel (reallysimplesocial.com) ──────────────────────────────────────
+const SMM_API_URL = "https://reallysimplesocial.com/api/v2";
+function getSMMKey() { return process.env.SMM_API_KEY || ""; }
+function getSMMMarkup() { return parseFloat(settings.smmMarkup || 0) / 100; }
+
+async function smmRequest(data) {
+  const key = getSMMKey();
+  if (!key) return { error: "SMM_API_KEY not configured. Ask the owner to set it up." };
+  const params = new URLSearchParams({ key, ...data });
+  try {
+    const res = await fetch(SMM_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+      signal: AbortSignal.timeout(15000)
+    });
+    return await res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function smmGetServices() { return await smmRequest({ action: "services" }); }
+async function smmPlaceOrder(service, link, quantity) { return await smmRequest({ action: "add", service, link, quantity }); }
+async function smmGetStatus(orderId) { return await smmRequest({ action: "status", order: orderId }); }
+async function smmGetBalance() { return await smmRequest({ action: "balance" }); }
+
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
 async function connectToWhatsApp() {
   console.log("[MFG_bot] Attempting connection...");
@@ -875,7 +904,7 @@ async function connectToWhatsApp() {
     },
     logger: pino({ level: "silent" }),
     // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
-    browser: usingPairingCode ? Browsers.ubuntu("Chrome") : Browsers.macOS("Desktop"),
+    browser: Browsers.ubuntu("Chrome"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
@@ -3074,11 +3103,220 @@ async function connectToWhatsApp() {
           continue;
         }
 
+        // ── .smm — Social Media Marketing Panel ─────────────────────────
+        if (cmd === "smm") {
+          const sub = args[0]?.toLowerCase();
+          const smmKey = process.env.SMM_API_KEY;
+          if (!smmKey) { await send("❌ SMM panel not configured yet. Contact the owner."); continue; }
+
+          if (!sub || sub === "list" || sub === "menu" || sub === "services") {
+            await send("⏳ Loading SMM services...");
+            try {
+              const services = await smmGetServices();
+              if (services.error || !Array.isArray(services)) {
+                await send("❌ Failed to load services. Try again later.\n" + (services.error || ""));
+                continue;
+              }
+              const markup = getSMMMarkup();
+              const categories = {};
+              for (const s of services) {
+                const cat = s.category || "Other";
+                if (!categories[cat]) categories[cat] = [];
+                categories[cat].push(s);
+              }
+              const catNames = Object.keys(categories);
+              const lines = [
+                "🛒 *SMM PANEL — Service Categories*",
+                `_(${services.length} total services available)_\n`
+              ];
+              catNames.forEach((cat, i) => {
+                lines.push(`${i + 1}. *${cat}* — ${categories[cat].length} services`);
+              });
+              lines.push("\n📌 *Type .smm cat <number> to browse a category*");
+              lines.push("📦 *.smm buy <id> <link> <qty>* — Place order");
+              lines.push("🔍 *.smm status <order_id>* — Check order");
+              lines.push("📋 *.smm myorders* — View your orders");
+              lines.push("💰 *.smm balance* — Check panel balance");
+              // store categories in memory for quick lookup
+              settings._smmCategoryCache = catNames;
+              await send(lines.join("\n"));
+            } catch (e) {
+              await send("❌ SMM error: " + e.message);
+            }
+            continue;
+          }
+
+          if (sub === "cat" || sub === "category") {
+            const catIdx = parseInt(args[1]);
+            if (isNaN(catIdx) || catIdx < 1) { await send("Usage: *.smm cat <number>*\nGet the list from *.smm list*"); continue; }
+            await send("⏳ Loading services...");
+            try {
+              const services = await smmGetServices();
+              if (!Array.isArray(services)) { await send("❌ Failed to load. Try again."); continue; }
+              const markup = getSMMMarkup();
+              const categories = {};
+              for (const s of services) {
+                const cat = s.category || "Other";
+                if (!categories[cat]) categories[cat] = [];
+                categories[cat].push(s);
+              }
+              const catNames = Object.keys(categories);
+              const cat = catNames[catIdx - 1];
+              if (!cat) { await send(`❌ Category ${catIdx} not found. Use .smm list to see all.`); continue; }
+              const svcs = categories[cat];
+              const lines = [`📌 *${cat}* (${svcs.length} services)\n`];
+              for (const s of svcs) {
+                const price = (parseFloat(s.rate) * (1 + markup)).toFixed(4);
+                const refill = s.refill ? "♻️" : "";
+                const cancel = s.cancel ? "❌" : "";
+                lines.push(`[*${s.service}*] ${s.name}\n  💲${price}/1000 • Min: ${s.min} • Max: ${s.max} ${refill}${cancel}`);
+              }
+              lines.push(`\n📦 Order: *.smm buy <id> <link> <qty>*`);
+              // Split if too long
+              let chunk = "";
+              for (const line of lines) {
+                if ((chunk + "\n" + line).length > 3800) {
+                  await send(chunk.trim());
+                  await new Promise(r => setTimeout(r, 500));
+                  chunk = line;
+                } else {
+                  chunk += (chunk ? "\n" : "") + line;
+                }
+              }
+              if (chunk.trim()) await send(chunk.trim());
+            } catch (e) { await send("❌ " + e.message); }
+            continue;
+          }
+
+          if (sub === "buy" || sub === "order") {
+            const serviceId = args[1];
+            const link = args[2];
+            const qty = parseInt(args[3]);
+            if (!serviceId || !link || !link.startsWith("http") || isNaN(qty) || qty < 1) {
+              await send("📦 *Place an SMM Order:*\n\n*.smm buy <service_id> <link> <quantity>*\n\nExample:\n.smm buy 1 https://instagram.com/yourpage 500\n\nType *.smm list* to browse services & IDs.");
+              continue;
+            }
+            await send("⏳ Placing your order...");
+            try {
+              const result = await smmPlaceOrder(serviceId, link, qty);
+              if (result.error) {
+                await send(`❌ Order failed: ${result.error}`);
+              } else if (result.order) {
+                let userOrders = readJSON("smm_orders.json", {});
+                if (!userOrders[from]) userOrders[from] = [];
+                userOrders[from].push({ orderId: result.order, serviceId, link, qty, ts: Date.now() });
+                if (userOrders[from].length > 50) userOrders[from] = userOrders[from].slice(-50);
+                writeJSON("smm_orders.json", userOrders);
+                await send(`✅ *Order Placed!*\n\n📋 Order ID: *${result.order}*\n🔗 Link: ${link}\n📊 Qty: ${qty.toLocaleString()}\n\nTrack it: *.smm status ${result.order}*`);
+              } else {
+                await send("❌ Unexpected response: " + JSON.stringify(result).slice(0, 200));
+              }
+            } catch (e) { await send("❌ Error: " + e.message); }
+            continue;
+          }
+
+          if (sub === "status" || sub === "check" || sub === "track") {
+            const orderId = args[1];
+            if (!orderId) { await send("📊 *.smm status <order_id>*\nExample: .smm status 12345"); continue; }
+            await send("⏳ Checking...");
+            try {
+              const result = await smmGetStatus(orderId);
+              if (result.error) { await send(`❌ ${result.error}`); continue; }
+              const emoji = { "Completed": "✅", "In progress": "🔄", "Pending": "⏳", "Partial": "⚠️", "Processing": "⚙️", "Canceled": "❌" }[result.status] || "📊";
+              await send(`${emoji} *Order #${orderId}*\n\n📌 Status: *${result.status}*\n📊 Start count: ${result.start_count || "N/A"}\n📉 Remaining: ${result.remains || "0"}\n💰 Charged: ${result.charge || "N/A"} ${result.currency || "USD"}`);
+            } catch (e) { await send("❌ " + e.message); }
+            continue;
+          }
+
+          if (sub === "myorders" || sub === "orders" || sub === "history") {
+            const userOrders = readJSON("smm_orders.json", {});
+            const orders = userOrders[from] || [];
+            if (!orders.length) { await send("📋 You have no orders yet.\n\nType *.smm list* to browse available services."); continue; }
+            const lines = [`📋 *Your Recent Orders* (${orders.length} total)\n`];
+            for (const o of orders.slice(-10).reverse()) {
+              const date = new Date(o.ts).toLocaleDateString();
+              lines.push(`🔹 Order *#${o.orderId}* — ${date}\n   Service: ${o.serviceId} | Qty: ${o.qty?.toLocaleString() || o.qty}`);
+            }
+            lines.push("\n🔍 *.smm status <order_id>* to check progress");
+            await send(lines.join("\n"));
+            continue;
+          }
+
+          if (sub === "balance") {
+            if (!senderIsOwner) { await send("❌ Only the owner can check SMM balance."); continue; }
+            try {
+              const result = await smmGetBalance();
+              if (result.error) { await send("❌ " + result.error); continue; }
+              await send(`💰 *SMM Panel Balance*\n\n${result.currency || "USD"} ${parseFloat(result.balance || 0).toFixed(4)}`);
+            } catch (e) { await send("❌ " + e.message); }
+            continue;
+          }
+
+          if (sub === "markup") {
+            if (!senderIsOwner) { await send("❌ Owner only."); continue; }
+            const pct = parseFloat(args[1]);
+            if (isNaN(pct) || pct < 0 || pct > 1000) { await send("*.smm markup <percentage>*\nExample: .smm markup 20 (adds 20% to all prices)"); continue; }
+            settings.smmMarkup = pct;
+            writeJSON("settings.json", settings);
+            await send(`✅ SMM markup set to *${pct}%*\nAll displayed prices now include a ${pct}% markup.`);
+            continue;
+          }
+
+          // Default SMM help
+          await send(`🛒 *SMM PANEL*\n\n*.smm list* — Browse all service categories\n*.smm cat <#>* — View services in a category\n*.smm buy <id> <link> <qty>* — Place order\n*.smm status <order_id>* — Track order\n*.smm myorders* — Your order history\n*.smm balance* — Panel balance (owner only)\n*.smm markup <pct>* — Set price markup (owner only)\n\n_Powered by reallysimplesocial.com_`);
+          continue;
+        }
+
+        // ── .answer / .ask / .ai — On-demand AI Q&A ─────────────────────
+        if (cmd === "answer" || cmd === "ask" || cmd === "ai") {
+          const question = args.join(" ").trim();
+          if (!question) {
+            await send("💬 *.answer <your question>*\n\nAsk me anything and I'll give you a proper answer.\nExample: .answer what is blockchain?\n\n_Session stays active for 5 min — just reply to continue the conversation._");
+            continue;
+          }
+          const groqKey = process.env.GROQ_API_KEY;
+          if (!groqKey) { await send("❌ AI Q&A requires a Groq API key. Contact the owner."); continue; }
+          await send("🤔 _thinking..._");
+          try {
+            const history = (convHistory[from] || []).slice(-6);
+            const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+              body: JSON.stringify({
+                model: "llama-3.3-70b-versatile",
+                messages: [
+                  { role: "system", content: "You are a highly knowledgeable AI assistant responding via WhatsApp. Be accurate, clear, and genuinely helpful. Use *bold* for emphasis where appropriate. Keep answers focused and under 400 words. If the question is complex, structure your answer clearly. Never say you're an AI unless directly asked." },
+                  ...history,
+                  { role: "user", content: question }
+                ],
+                max_tokens: 600,
+                temperature: 0.65
+              }),
+              signal: AbortSignal.timeout(25000)
+            });
+            const data = await resp.json();
+            const answer = data.choices?.[0]?.message?.content?.trim();
+            if (answer) {
+              answerSessions.set(from, Date.now());
+              if (!convHistory[from]) convHistory[from] = [];
+              convHistory[from].push({ role: "user", content: question });
+              convHistory[from].push({ role: "assistant", content: answer });
+              if (convHistory[from].length > 12) convHistory[from] = convHistory[from].slice(-12);
+              setImmediate(() => writeJSON("conv_history.json", convHistory));
+              await send(`🤖 ${answer}\n\n_💬 Reply to continue — session active for 5 min_`);
+              logTag("answer:groq");
+            } else {
+              await send("❌ Couldn't get an answer right now. Try again.");
+            }
+          } catch (e) { await send("❌ AI error: " + e.message); }
+          continue;
+        }
+
         // Unknown command — fall through to AI or error
         if (settings.aiEnabled) {
           // fall through to AI below
         } else {
-          await send(`unknown command. type .list for all 200+ commands`);
+          await send(`unknown command. type .list for all commands`);
           continue;
         }
       }
@@ -3090,77 +3328,50 @@ async function connectToWhatsApp() {
         writeJSON("style_samples.json", styleSamples);
       }
 
-      // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
-      if (!settings.aiEnabled) { logTag("skip:ai_disabled"); continue; }
-      if (isFromMe) { logTag("skip:fromMe"); continue; }
-      // Stale guard: don't AI-reply to messages from a re-delivered backlog
-      if (isStale) { logTag(`skip:stale_${Math.round(ageMs/1000)}s`); continue; }
-      if (text && text.startsWith(pfx)) { logTag("skip:command"); continue; }
-      if (from?.endsWith("@g.us")) { logTag("skip:group"); continue; }
-      if (from?.endsWith("@broadcast")) { logTag("skip:broadcast"); continue; }
-      if (aiContactDisabled.has(from)) { logTag("skip:contact_off"); continue; }
-      // Owner takeover — stay quiet for X min after owner types in this chat
-      if (ownerTakeover.has(from)) {
-        const takeoverAt = ownerTakeover.get(from);
-        if (Date.now() - takeoverAt < settings.takeoverMinutes * 60 * 1000) { logTag("skip:owner_takeover"); continue; }
-        else ownerTakeover.delete(from);
-      }
-      if (aiPaused.has(from)) {
-        const pausedAt = aiPaused.get(from);
-        if (Date.now() - pausedAt < 30 * 60 * 1000) { logTag("skip:paused"); continue; }
-        else aiPaused.delete(from);
-      }
-      try {
-        logTag("calling_groq");
-        // ── Persona mode: wrap the query so AI responds AS the active persona ──
-        let groqInput = effectiveText;
-        if (activePersona.has(from)) {
-          const persona = activePersona.get(from);
-          groqInput = `[PERSONA MODE: You are now responding AS ${persona}. Match their EXACT voice, slang, energy, and speaking style. Stay fully in character. Do NOT break character or add any disclaimer.]\n\nUser says: ${effectiveText}`;
-        }
-        let reply = await askGroq(groqInput, from);
-        if (!reply) { logTag("err:groq_empty"); continue; }
-        if (reply.startsWith("[STOP]")) {
-          aiPaused.set(from, Date.now());
-          logTag("paused:escalation");
-          console.log(`[MFG_bot] AI paused for ${from} — escalation detected`);
-          continue;
-        }
-        // ── AI Disclaimer: once per contact per day, prepend the "I'm his mirror AI" notice ──
-        const today = new Date().toISOString().slice(0, 10);
-        if (settings.aiDisclaimer && disclaimerSent.get(from) !== today) {
-          disclaimerSent.set(from, today);
-          await send(settings.disclaimerText);
-          // Small spacing so the disclaimer + reply don't merge in WhatsApp
-          await new Promise(r => setTimeout(r, 800));
-        }
-        // ── Voice reply mode: synth via ElevenLabs and send as voice note ──
-        let sentAsVoice = false;
-        if (settings.voiceCloneEnabled && settings.voiceReplyMode === "auto" && reply.length <= 300) {
-          const audio = await synthesizeVoice(reply);
-          if (audio) {
+      // ── .answer session follow-up — continue AI conversation for 5 min ──
+      if (!isFromMe && !isStale && text && !text.startsWith(pfx) && !from?.endsWith("@g.us") && answerSessions.has(from)) {
+        const sessionTs = answerSessions.get(from);
+        if (Date.now() - sessionTs < 5 * 60 * 1000) {
+          answerSessions.set(from, Date.now());
+          const groqKey = process.env.GROQ_API_KEY;
+          if (groqKey) {
             try {
-              await sock.sendMessage(from, { audio, mimetype: "audio/mpeg", ptt: true });
-              sentAsVoice = true;
-              logTag("REPLIED (voice): " + reply.slice(0, 40));
-            } catch (e) { logTag("voice_send_err:" + e.message.slice(0,30)); }
+              const history = (convHistory[from] || []).slice(-8);
+              const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+                body: JSON.stringify({
+                  model: "llama-3.3-70b-versatile",
+                  messages: [
+                    { role: "system", content: "You are a knowledgeable AI assistant on WhatsApp. Continue this conversation helpfully and accurately. Keep responses under 400 words." },
+                    ...history,
+                    { role: "user", content: text }
+                  ],
+                  max_tokens: 600,
+                  temperature: 0.65
+                }),
+                signal: AbortSignal.timeout(20000)
+              });
+              const d = await resp.json();
+              const reply = d.choices?.[0]?.message?.content?.trim();
+              if (reply) {
+                await send(reply);
+                if (!convHistory[from]) convHistory[from] = [];
+                convHistory[from].push({ role: "user", content: text });
+                convHistory[from].push({ role: "assistant", content: reply });
+                if (convHistory[from].length > 12) convHistory[from] = convHistory[from].slice(-12);
+                setImmediate(() => writeJSON("conv_history.json", convHistory));
+                logTag("answer_session_reply");
+              }
+            } catch (e) { console.log("[MFG_bot] answer session err:", e.message); }
           }
+          continue;
+        } else {
+          answerSessions.delete(from);
         }
-        if (!sentAsVoice) {
-          await send(reply);
-          logTag("REPLIED: " + reply.slice(0, 40));
-        }
-        // Async fact extraction — fire-and-forget, builds long-term memory
-        if (text && text.length > 15) {
-          const recentTexts = (convHistory[from] || []).filter(m => m.role === "user").map(m => m.content);
-          setImmediate(() => extractFacts(from, recentTexts));
-        }
-        // Birthday detection
-        if (text) maybeRecordBirthday(from, text);
-      } catch (err) {
-        logTag("err:" + err.message.slice(0, 40));
-        console.error("[MFG_bot] AI error:", err.message);
       }
+      // Auto-AI replies disabled — use .answer for on-demand AI
+      logTag("skip:auto_ai_off");
     }
   });
 

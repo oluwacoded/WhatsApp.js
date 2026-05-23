@@ -1,0 +1,131 @@
+{
+  "colorScheme": "light",
+  "fonts": [
+    {
+      "family": "Alegreya Sans",
+      "role": "body"
+    },
+    {
+      "family": "Alegreya Sans SC",
+      "role": "heading"
+    }
+  ],
+  "colors": {
+    "primary": "#32C7CE",
+    "accent": "#32C7CE",
+    "background": "#EBF9FA",
+    "textPrimary": "#145052",
+    "link": "#145052"
+  },
+  "typography": {
+    "fontFamilies": {
+      "primary": "Alegreya Sans",
+      "heading": "Alegreya Sans SC"
+    },
+    "fontStacks": {
+      "heading": [
+        "Alegreya Sans",
+        "sans-serif"
+      ],
+      "body": [
+        "Alegreya Sans",
+        "sans-serif"
+      ],
+      "paragraph": [
+        "Alegreya Sans",
+        "sans-serif"
+      ]
+    },
+    "fontSizes": {
+      "h1": "42px",
+      "h2": "31.5px",
+      "body": "14px"
+    }
+  },
+  "spacing": {
+    "baseUnit": 4,
+    "borderRadius": "0px"
+  },
+  "components": {
+    "input": {
+      "background": "#E5F9FA",
+      "textColor": "#053B3E",
+      "borderColor": null,
+      "borderRadius": "0px",
+      "borderRadiusCorners": {
+        "topLeft": "0px",
+        "topRight": "0px",
+        "bottomRight": "0px",
+        "bottomLeft": "0px"
+      },
+      "shadow": "none"
+    },
+    "buttonPrimary": {
+      "background": "#32C7CE",
+      "textColor": "#FFFFFF",
+      "borderRadius": "0px",
+      "borderRadiusCorners": {
+        "topLeft": "0px",
+        "topRight": "0px",
+        "bottomRight": "0px",
+        "bottomLeft": "0px"
+      },
+      "shadow": "none"
+    }
+  },
+  "images": {
+    "logo": "File saved at: attached_assets/logo.png",
+    "favicon": "File saved at: attached_assets/favicon.ico",
+    "ogImage": null,
+    "logoHref": "File saved at: attached_assets/logoHref.html"
+  },
+  "__llm_logo_reasoning": {
+    "selectedIndex": 0,
+    "reasoning": "Selected #0 because it is located in the header, is visible, and links to the homepage, which are strong indicators of a primary brand logo.",
+    "confidence": 0.9,
+    "source": "llm"
+  },
+  "__llm_button_reasoning": {
+    "primary": {
+      "index": 0,
+      "text": "Get started",
+      "reasoning": "Button #0 with text 'Get started' is the primary CTA due to its action-oriented text and vibrant brand color (#32C7CE), which is typical for primary actions."
+    },
+    "secondary": {
+      "index": -1,
+      "text": "N/A",
+      "reasoning": "Both buttons share the same background color, making it impossible to select a secondary button with a different color."
+    },
+    "confidence": 0.9
+  },
+  "personality": {
+    "tone": "modern",
+    "energy": "medium",
+    "targetAudience": "social media managers and marketers"
+  },
+  "designSystem": {
+    "framework": "bootstrap",
+    "componentLibrary": ""
+  },
+  "confidence": {
+    "buttons": 0.9,
+    "colors": 0.9,
+    "overall": 0.9
+  },
+  "__llm_metadata": {
+    "logoSelection": {
+      "llmCalled": true,
+      "llmSucceeded": true,
+      "finalSource": "llm",
+      "rawLogoSelection": {
+        "selectedLogoIndex": 0,
+        "selectedLogoReasoning": "Selected #0 because it is located in the header, is visible, and links to the homepage, which are strong indicators of a primary brand logo.",
+        "confidence": 0.9
+      }
+    },
+    "buttonClassification": {
+      "llmCalled": true,
+      "llmSucceeded": true
+    }
+  }
+}
