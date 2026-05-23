@@ -3214,7 +3214,8 @@ async function connectToWhatsApp() {
             continue;
           }
 
-          if (sub === "credit" && senderIsOwner) {
+          if (sub === "credit") {
+            if (!senderIsOwner) { await send("❌ Owner only."); continue; }
             const rawTarget = args[1]?.replace(/\D/g, "");
             const amount = parseInt(args[2]);
             if (!rawTarget || isNaN(amount) || amount < 1) { await send("*.wallet credit <phone> <amount>*\nExample: .wallet credit 08012345678 5000"); continue; }
