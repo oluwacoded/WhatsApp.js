@@ -4450,6 +4450,9 @@ setInterval(() => {
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
+  console.log(`[MFG_bot] SMM key: ${process.env.SMM_API_KEY ? "✅ loaded (" + process.env.SMM_API_KEY.length + " chars)" : "❌ NOT SET — .smm commands will fail"}`);
+  console.log(`[MFG_bot] Groq key: ${process.env.GROQ_API_KEY ? "✅ loaded" : "⚠️ not set — .answer disabled"}`);
+  console.log(`[MFG_bot] Flutterwave: ${process.env.FLW_SECRET_KEY ? "✅ loaded" : "⚠️ not set — wallet topup via link disabled"}`);
   connectToWhatsApp();
 
   // ─── Hub Self-Registration ────────────────────────────────────────────────
