@@ -3,6 +3,7 @@
   "callBlock": true,
   "autoReadStatus": false,
   "aiEnabled": true,
+  "smmMarkup": 20,
   "aiMode": "chill",
   "aiDelay": 0,
   "aiTyping": false,
