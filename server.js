@@ -49,6 +49,7 @@ const SETTINGS_DEFAULTS = {
   autoReadStatus: false,
   aiEnabled: false,
   smmMarkup: 20,
+  smmNGNRate: 1600,
   aiMode: "chill",
   aiDelay: 0,
   aiTyping: false,
@@ -240,6 +241,11 @@ let savedKV = readJSON("kv.json", {});
 let convHistory = readJSON("conv_history.json", {});
 let contactFacts = readJSON("contact_facts.json", {});
 const answerSessions = new Map(); // jid -> last active timestamp for .answer sessions
+let walletData = readJSON("wallets.json", {});
+let autoReplies = readJSON("autoreplies.json", {});
+let pendingOrders = readJSON("pending_orders.json", {});
+let registeredUsers = readJSON("registered_users.json", {});
+const rateLimitMap = new Map(); // jid -> { count, windowStart }
 let scamAlerts = readJSON("scam_alerts.json", []);      // Log of detected scam attempts
 let birthdayMemory = readJSON("birthdays.json", {});    // jid → "MM-DD"
 
@@ -872,6 +878,49 @@ async function smmPlaceOrder(service, link, quantity) { return await smmRequest(
 async function smmGetStatus(orderId) { return await smmRequest({ action: "status", order: orderId }); }
 async function smmGetBalance() { return await smmRequest({ action: "balance" }); }
 
+// ─── Wallet System ────────────────────────────────────────────────────────────
+function getWallet(jid) {
+  if (!walletData[jid]) walletData[jid] = { balance: 0, currency: "NGN", topups: [], spends: [] };
+  return walletData[jid];
+}
+function saveWallets() { setImmediate(() => writeJSON("wallets.json", walletData)); }
+function walletCredit(jid, amountNGN, note) {
+  const w = getWallet(jid);
+  w.balance += amountNGN;
+  w.topups.push({ amount: amountNGN, note, at: Date.now() });
+  if (w.topups.length > 30) w.topups = w.topups.slice(-30);
+  saveWallets();
+}
+function walletDebit(jid, amountNGN, note) {
+  const w = getWallet(jid);
+  if (w.balance < amountNGN) return false;
+  w.balance -= amountNGN;
+  w.spends.push({ amount: amountNGN, note, at: Date.now() });
+  if (w.spends.length > 50) w.spends = w.spends.slice(-50);
+  saveWallets();
+  return true;
+}
+function smmPriceNGN(rateUSD, qty) {
+  const markup = getSMMMarkup();
+  const rate = parseFloat(settings.smmNGNRate || 1600);
+  return Math.ceil((parseFloat(rateUSD) * qty / 1000) * rate * (1 + markup));
+}
+
+// ─── Rate Limiting ────────────────────────────────────────────────────────────
+const RATE_LIMIT_MAX = 15;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+function checkRateLimit(jid) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(jid) || { count: 0, windowStart: now };
+  if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry.count = 1; entry.windowStart = now;
+    rateLimitMap.set(jid, entry); return true;
+  }
+  entry.count++;
+  rateLimitMap.set(jid, entry);
+  return entry.count <= RATE_LIMIT_MAX;
+}
+
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
 async function connectToWhatsApp() {
   console.log("[MFG_bot] Attempting connection...");
@@ -1419,6 +1468,18 @@ async function connectToWhatsApp() {
         } else { pendingDownload.delete(from); }
       }
 
+      // ── Keyword Auto-Reply — passive lead capture ─────────────────────
+      if (!isFromMe && text && !text.startsWith(pfx) && !isStale && Object.keys(autoReplies).length > 0) {
+        const lT = text.toLowerCase();
+        for (const [trigger, response] of Object.entries(autoReplies)) {
+          if (lT.includes(trigger.toLowerCase())) {
+            await send(response);
+            logTag("autoreply:" + trigger.slice(0, 20));
+            break;
+          }
+        }
+      }
+
       // ── Commands ────────────────────────────────────────────────────────
       if (text.startsWith(pfx)) {
         // Stale command guard: never re-execute a command from a re-delivered
@@ -1427,6 +1488,14 @@ async function connectToWhatsApp() {
         const [rawCmd, ...args] = text.slice(pfx.length).trim().split(/\s+/);
         const cmd = rawCmd.toLowerCase();
         trackCommand(cmd);
+
+        // Rate limit — prevent command spam from getting the bot flagged (non-owners)
+        if (!senderIsOwner && !checkRateLimit(from)) {
+          if (rateLimitMap.get(from)?.count === RATE_LIMIT_MAX + 1) {
+            await send(`⏳ *Slow down!* You're sending commands too fast.\n\nMax ${RATE_LIMIT_MAX} commands per minute. Please wait a moment.`);
+          }
+          continue;
+        }
 
         // .vv — reveal a view-once photo/video (reply to it with .vv)
         if (cmd === "vv") {
@@ -3103,6 +3172,186 @@ async function connectToWhatsApp() {
           continue;
         }
 
+        // ── .wallet — User NGN Wallet ────────────────────────────────────
+        if (cmd === "wallet" || cmd === "bal") {
+          const sub = args[0]?.toLowerCase();
+          const w = getWallet(from);
+
+          if (!sub || sub === "balance" || sub === "bal") {
+            const FLW_SECRET = process.env.FLW_SECRET_KEY;
+            const topupHint = FLW_SECRET ? "\n\n💳 *.wallet topup <amount>* — Add NGN funds" : "\n\n📞 Contact owner to top up your wallet";
+            await send(`💰 *Your Wallet*\n\n━━━━━━━━━━━━━━━━\n Balance: *₦${w.balance.toLocaleString()}*\n━━━━━━━━━━━━━━━━${topupHint}\n📋 *.wallet history* — View transactions`);
+            continue;
+          }
+
+          if (sub === "topup" || sub === "fund" || sub === "add") {
+            const amount = parseInt(args[1]);
+            if (isNaN(amount) || amount < 100) { await send("💳 *.wallet topup <amount>*\nMinimum top-up: ₦100\n\nExample: .wallet topup 5000"); continue; }
+            const FLW_SECRET = process.env.FLW_SECRET_KEY;
+            if (!FLW_SECRET) { await send(`💳 *Wallet Top-Up: ₦${amount.toLocaleString()}*\n\nOnline payment not yet configured.\n\n📞 Contact the owner to manually credit your wallet.\n\nOwner: *+${OWNER_NUMBER}*`); continue; }
+            try {
+              const txRef = `WALLET_${from.split("@")[0]}_${Date.now()}`;
+              const flwRes = await fetch("https://api.flutterwave.com/v3/payments", {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  tx_ref: txRef, amount, currency: "NGN",
+                  redirect_url: `https://${process.env.REPLIT_DEV_DOMAIN || "localhost:5000"}/wallet/callback`,
+                  customer: { email: `wa_${from.split("@")[0]}@mfgbot.ng`, name: from.split("@")[0] },
+                  customizations: { title: "MFG Bot Wallet", description: `Top up ₦${amount.toLocaleString()}` },
+                  payment_options: "card,banktransfer,ussd",
+                  meta: { jid: from, type: "wallet_topup", amount }
+                }),
+                signal: AbortSignal.timeout(15000)
+              });
+              const flwData = await flwRes.json().catch(() => null);
+              if (flwData?.status === "success" && flwData?.data?.link) {
+                await send(`💳 *Wallet Top-Up*\n\nAmount: *₦${amount.toLocaleString()}*\n\n🔗 Pay here:\n${flwData.data.link}\n\n_Your wallet will be credited automatically after payment._\n_Accepts: Card • Bank Transfer • USSD_`);
+              } else {
+                await send(`❌ Could not generate payment link.\n\nContact owner to manually credit ₦${amount.toLocaleString()}: *+${OWNER_NUMBER}*`);
+              }
+            } catch (e) { await send("❌ Payment error: " + e.message); }
+            continue;
+          }
+
+          if (sub === "credit" && senderIsOwner) {
+            const rawTarget = args[1]?.replace(/\D/g, "");
+            const amount = parseInt(args[2]);
+            if (!rawTarget || isNaN(amount) || amount < 1) { await send("*.wallet credit <phone> <amount>*\nExample: .wallet credit 08012345678 5000"); continue; }
+            const targetJid = `${rawTarget.replace(/^0/, "234")}@s.whatsapp.net`;
+            walletCredit(targetJid, amount, "owner credit");
+            await send(`✅ Credited *₦${amount.toLocaleString()}* to ${rawTarget}`);
+            try {
+              await sock.sendMessage(targetJid, { text: `💰 *Wallet Credited!*\n\nAmount: *₦${amount.toLocaleString()}*\n\nYour MFG Bot wallet has been topped up.\nNew balance: *₦${getWallet(targetJid).balance.toLocaleString()}*\n\n🛒 Use *.smm list* to browse services!` });
+            } catch {}
+            continue;
+          }
+
+          if (sub === "history" || sub === "log" || sub === "txn") {
+            const all = [
+              ...(w.topups || []).map(t => ({ ...t, dir: "+" })),
+              ...(w.spends || []).map(s => ({ ...s, dir: "-" }))
+            ].sort((a, b) => b.at - a.at);
+            if (!all.length) { await send("📋 No wallet transactions yet.\n\n*.wallet topup <amount>* — Add funds"); continue; }
+            const lines = [`📋 *Wallet History* (last 10)\n`];
+            for (const t of all.slice(0, 10)) {
+              const d = new Date(t.at).toLocaleDateString("en-NG");
+              lines.push(`${t.dir === "+" ? "🟢 +" : "🔴 -"}₦${t.amount.toLocaleString()} — ${t.note || "transaction"} (${d})`);
+            }
+            lines.push(`\n💰 Current balance: *₦${w.balance.toLocaleString()}*`);
+            await send(lines.join("\n"));
+            continue;
+          }
+
+          await send(`💰 *WALLET COMMANDS*\n\n*.wallet* — Check balance\n*.wallet topup <amount>* — Add funds\n*.wallet history* — Transaction log\n\n_Owner only:_\n*.wallet credit <phone> <amount>* — Manually credit a user`);
+          continue;
+        }
+
+        // ── .autoreply — Keyword Auto-Reply Manager (owner only) ─────────
+        if (cmd === "autoreply" || cmd === "ar") {
+          if (!senderIsOwner) { await send("❌ Only the owner can manage auto-replies."); continue; }
+          const sub = args[0]?.toLowerCase();
+
+          if (sub === "set" || sub === "add") {
+            const keyword = args[1]?.toLowerCase();
+            const response = args.slice(2).join(" ").trim();
+            if (!keyword || !response) { await send(`*.autoreply set <keyword> <response>*\n\nExample:\n.autoreply set followers 📊 Want more followers? Type *.smm list* to see our Instagram packages!`); continue; }
+            autoReplies[keyword] = response;
+            writeJSON("autoreplies.json", autoReplies);
+            await send(`✅ Auto-reply set!\nKeyword: *${keyword}*\nResponse saved (${response.length} chars)`);
+            continue;
+          }
+
+          if (sub === "del" || sub === "remove" || sub === "delete") {
+            const keyword = args[1]?.toLowerCase();
+            if (!keyword) { await send("*.autoreply del <keyword>*"); continue; }
+            if (!autoReplies[keyword]) { await send(`❌ No auto-reply set for "${keyword}"`); continue; }
+            delete autoReplies[keyword];
+            writeJSON("autoreplies.json", autoReplies);
+            await send(`✅ Auto-reply removed for: *${keyword}*`);
+            continue;
+          }
+
+          if (sub === "list" || !sub) {
+            const keys = Object.keys(autoReplies);
+            if (!keys.length) { await send("📋 No auto-replies set yet.\n\n*.autoreply set <keyword> <response>* — Add one"); continue; }
+            const lines = [`📋 *Auto-Reply Triggers* (${keys.length})\n`];
+            keys.forEach((k, i) => lines.push(`${i + 1}. *${k}* → ${autoReplies[k].slice(0, 60)}${autoReplies[k].length > 60 ? "..." : ""}`));
+            lines.push("\n*.autoreply set <keyword> <response>*\n*.autoreply del <keyword>*\n*.autoreply clear* — Remove all");
+            await send(lines.join("\n"));
+            continue;
+          }
+
+          if (sub === "clear") {
+            autoReplies = {};
+            writeJSON("autoreplies.json", autoReplies);
+            await send("✅ All auto-replies cleared.");
+            continue;
+          }
+
+          await send(`📋 *AUTO-REPLY COMMANDS*\n\n*.autoreply list* — See all triggers\n*.autoreply set <keyword> <response>* — Add trigger\n*.autoreply del <keyword>* — Remove trigger\n*.autoreply clear* — Remove all\n\n_Auto-replies fire when anyone texts a matching keyword to the bot._`);
+          continue;
+        }
+
+        // ── .register — User Registration ─────────────────────────────────
+        if (cmd === "register" || cmd === "signup") {
+          if (registeredUsers[from]) {
+            await send(`✅ *Already registered!*\n\nName: *${registeredUsers[from].name}*\nJoined: ${new Date(registeredUsers[from].registeredAt).toLocaleDateString("en-NG")}\n\n🛒 *.smm list* — Browse services\n💰 *.wallet* — Check balance`);
+            continue;
+          }
+          const name = args.join(" ").trim() || from.split("@")[0];
+          registeredUsers[from] = { name, phone: from.split("@")[0], registeredAt: Date.now() };
+          writeJSON("registered_users.json", registeredUsers);
+          await send(`✅ *Welcome to MFG Bot!*\n\nName: *${name}* 🎉\n\nYou now have full access:\n🛒 SMM Panel — *.smm list*\n💰 Wallet — *.wallet topup <amount>*\n🤖 AI Q&A — *.answer <question>*\n📦 All commands — *.menu*\n\n_Start by browsing our social media services!_`);
+          try { await sock.sendMessage(OWNER_JID, { text: `🔔 New user registered: *${name}* (+${from.split("@")[0]})` }); } catch {}
+          continue;
+        }
+
+        // ── .users — Registered user list (owner only) ─────────────────
+        if (cmd === "users" || cmd === "customers") {
+          if (!senderIsOwner) { await send("❌ Owner only."); continue; }
+          const all = Object.entries(registeredUsers);
+          if (!all.length) { await send("📋 No registered users yet.\n\nUsers register with: *.register*"); continue; }
+          const lines = [`👥 *Registered Users* (${all.length} total)\n`];
+          for (const [jid, u] of all.slice(-20).reverse()) {
+            const bal = getWallet(jid).balance;
+            lines.push(`• *${u.name}* (+${u.phone}) — ₦${bal.toLocaleString()} wallet — ${new Date(u.registeredAt).toLocaleDateString("en-NG")}`);
+          }
+          const totalBal = Object.values(walletData).reduce((s, w) => s + (w.balance || 0), 0);
+          lines.push(`\n💰 Total across all wallets: *₦${totalBal.toLocaleString()}*`);
+          await send(lines.join("\n"));
+          continue;
+        }
+
+        // ── .revenue — Business Revenue Stats (owner only) ───────────────
+        if (cmd === "revenue" || cmd === "income") {
+          if (!senderIsOwner) { await send("❌ Owner only."); continue; }
+          const allOrders = readJSON("smm_orders.json", {});
+          let totalOrders = 0;
+          const serviceCounts = {};
+          for (const orders of Object.values(allOrders)) {
+            totalOrders += orders.length;
+            for (const o of orders) { serviceCounts[o.serviceId] = (serviceCounts[o.serviceId] || 0) + 1; }
+          }
+          const totalWalletSpend = Object.values(walletData).reduce((s, w) => s + (w.spends || []).reduce((a, t) => a + t.amount, 0), 0);
+          const totalWalletBal = Object.values(walletData).reduce((s, w) => s + (w.balance || 0), 0);
+          const topServices = Object.entries(serviceCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+          const lines = [
+            `📊 *Business Dashboard*\n`,
+            `👥 Registered users: *${Object.keys(registeredUsers).length}*`,
+            `📦 Total SMM orders: *${totalOrders}*`,
+            `💰 Total wallet balances: *₦${totalWalletBal.toLocaleString()}*`,
+            `💸 Total wallet spend: *₦${totalWalletSpend.toLocaleString()}*`,
+            `⏳ Pending order trackers: *${Object.keys(pendingOrders).length}*`,
+          ];
+          if (topServices.length) {
+            lines.push(`\n🏆 *Top Services Ordered:*`);
+            topServices.forEach(([id, count]) => lines.push(`  Service #${id}: ${count} order(s)`));
+          }
+          await send(lines.join("\n"));
+          continue;
+        }
+
         // ── .smm — Social Media Marketing Panel ─────────────────────────
         if (cmd === "smm") {
           const sub = args[0]?.toLowerCase();
@@ -3193,25 +3442,66 @@ async function connectToWhatsApp() {
             const link = args[2];
             const qty = parseInt(args[3]);
             if (!serviceId || !link || !link.startsWith("http") || isNaN(qty) || qty < 1) {
-              await send("📦 *Place an SMM Order:*\n\n*.smm buy <service_id> <link> <quantity>*\n\nExample:\n.smm buy 1 https://instagram.com/yourpage 500\n\nType *.smm list* to browse services & IDs.");
+              await send("📦 *Place an SMM Order:*\n\n*.smm buy <service_id> <link> <quantity>*\n\nExample:\n.smm buy 1 https://instagram.com/yourpage 500\n\nType *.smm list* to browse services & IDs.\n💰 *.wallet* — Check balance for instant checkout");
               continue;
             }
-            await send("⏳ Placing your order...");
+            // Try to find service rate for wallet deduction
+            let priceNGN = null;
+            let serviceInfo = null;
             try {
-              const result = await smmPlaceOrder(serviceId, link, qty);
-              if (result.error) {
-                await send(`❌ Order failed: ${result.error}`);
-              } else if (result.order) {
-                let userOrders = readJSON("smm_orders.json", {});
-                if (!userOrders[from]) userOrders[from] = [];
-                userOrders[from].push({ orderId: result.order, serviceId, link, qty, ts: Date.now() });
-                if (userOrders[from].length > 50) userOrders[from] = userOrders[from].slice(-50);
-                writeJSON("smm_orders.json", userOrders);
-                await send(`✅ *Order Placed!*\n\n📋 Order ID: *${result.order}*\n🔗 Link: ${link}\n📊 Qty: ${qty.toLocaleString()}\n\nTrack it: *.smm status ${result.order}*`);
-              } else {
-                await send("❌ Unexpected response: " + JSON.stringify(result).slice(0, 200));
+              const svcs = await smmGetServices();
+              if (Array.isArray(svcs)) {
+                serviceInfo = svcs.find(s => String(s.service) === String(serviceId));
+                if (serviceInfo) priceNGN = smmPriceNGN(serviceInfo.rate, qty);
               }
-            } catch (e) { await send("❌ Error: " + e.message); }
+            } catch {}
+
+            const wallet = getWallet(from);
+            if (priceNGN !== null && wallet.balance >= priceNGN) {
+              // Wallet has enough — auto-deduct and place order
+              await send(`⏳ Placing order...\n💰 Charging *₦${priceNGN.toLocaleString()}* from your wallet...`);
+              try {
+                const result = await smmPlaceOrder(serviceId, link, qty);
+                if (result.error) {
+                  await send(`❌ Order failed: ${result.error}\n\n_Your wallet was NOT charged._`);
+                } else if (result.order) {
+                  walletDebit(from, priceNGN, `SMM order #${result.order} (svc ${serviceId} × ${qty})`);
+                  let userOrders = readJSON("smm_orders.json", {});
+                  if (!userOrders[from]) userOrders[from] = [];
+                  userOrders[from].push({ orderId: result.order, serviceId, link, qty, ts: Date.now() });
+                  if (userOrders[from].length > 50) userOrders[from] = userOrders[from].slice(-50);
+                  writeJSON("smm_orders.json", userOrders);
+                  pendingOrders[result.order] = { jid: from, serviceId, link, qty, lastStatus: "Pending", ts: Date.now() };
+                  writeJSON("pending_orders.json", pendingOrders);
+                  await send(`✅ *Order Placed!*\n\n📋 Order ID: *${result.order}*\n🔗 Link: ${link}\n📊 Qty: ${qty.toLocaleString()}\n💸 Charged: *₦${priceNGN.toLocaleString()}*\n💰 Remaining balance: *₦${getWallet(from).balance.toLocaleString()}*\n\n📩 _You'll be notified when your order completes._\n🔍 *.smm status ${result.order}* — Check progress`);
+                } else {
+                  await send("❌ Unexpected response: " + JSON.stringify(result).slice(0, 200));
+                }
+              } catch (e) { await send("❌ Error: " + e.message); }
+            } else {
+              // No wallet or insufficient balance — place order without wallet deduction
+              const balanceMsg = priceNGN !== null
+                ? `\n\n💡 _Tip: Top up *.wallet topup ${priceNGN}* for instant checkout next time!_`
+                : "";
+              await send("⏳ Placing your order...");
+              try {
+                const result = await smmPlaceOrder(serviceId, link, qty);
+                if (result.error) {
+                  await send(`❌ Order failed: ${result.error}`);
+                } else if (result.order) {
+                  let userOrders = readJSON("smm_orders.json", {});
+                  if (!userOrders[from]) userOrders[from] = [];
+                  userOrders[from].push({ orderId: result.order, serviceId, link, qty, ts: Date.now() });
+                  if (userOrders[from].length > 50) userOrders[from] = userOrders[from].slice(-50);
+                  writeJSON("smm_orders.json", userOrders);
+                  pendingOrders[result.order] = { jid: from, serviceId, link, qty, lastStatus: "Pending", ts: Date.now() };
+                  writeJSON("pending_orders.json", pendingOrders);
+                  await send(`✅ *Order Placed!*\n\n📋 Order ID: *${result.order}*\n🔗 Link: ${link}\n📊 Qty: ${qty.toLocaleString()}\n\n📩 _You'll be notified when your order completes._\n🔍 *.smm status ${result.order}* — Check progress${balanceMsg}`);
+                } else {
+                  await send("❌ Unexpected response: " + JSON.stringify(result).slice(0, 200));
+                }
+              } catch (e) { await send("❌ Error: " + e.message); }
+            }
             continue;
           }
 
@@ -3252,6 +3542,34 @@ async function connectToWhatsApp() {
             continue;
           }
 
+          if (sub === "search" || sub === "find") {
+            const query = args.slice(1).join(" ").toLowerCase().trim();
+            if (!query) { await send("🔍 *.smm search <keyword>*\n\nExample: .smm search instagram followers"); continue; }
+            await send("🔍 Searching...");
+            try {
+              const services = await smmGetServices();
+              if (!Array.isArray(services)) { await send("❌ Failed to load services. Try again."); continue; }
+              const markup = getSMMMarkup();
+              const results = services.filter(s => s.name?.toLowerCase().includes(query) || s.category?.toLowerCase().includes(query));
+              if (!results.length) { await send(`❌ No services found for "*${query}*"\n\nTry a broader search like: .smm search instagram`); continue; }
+              const lines = [`🔍 *"${query}"* — ${results.length} service(s) found\n`];
+              for (const s of results.slice(0, 15)) {
+                const price = (parseFloat(s.rate) * (1 + markup)).toFixed(4);
+                const priceNGN = smmPriceNGN(s.rate, 1000);
+                lines.push(`[*${s.service}*] ${s.name}\n  💲${price}/1000 (₦${priceNGN.toLocaleString()}) • Min: ${s.min} • Max: ${s.max}`);
+              }
+              if (results.length > 15) lines.push(`\n_...and ${results.length - 15} more. Refine your search._`);
+              lines.push(`\n📦 Order: *.smm buy <id> <link> <qty>*`);
+              let chunk = "";
+              for (const line of lines) {
+                if ((chunk + "\n" + line).length > 3800) { await send(chunk.trim()); await new Promise(r => setTimeout(r, 400)); chunk = line; }
+                else { chunk += (chunk ? "\n" : "") + line; }
+              }
+              if (chunk.trim()) await send(chunk.trim());
+            } catch (e) { await send("❌ Search error: " + e.message); }
+            continue;
+          }
+
           if (sub === "markup") {
             if (!senderIsOwner) { await send("❌ Owner only."); continue; }
             const pct = parseFloat(args[1]);
@@ -3262,8 +3580,18 @@ async function connectToWhatsApp() {
             continue;
           }
 
+          if (sub === "rate") {
+            if (!senderIsOwner) { await send("❌ Owner only."); continue; }
+            const rate = parseInt(args[1]);
+            if (isNaN(rate) || rate < 100) { await send(`*.smm rate <ngn_per_usd>*\n\nSets the USD→NGN exchange rate used to price services.\nCurrent rate: *₦${settings.smmNGNRate || 1600}/$1*\n\nExample: .smm rate 1700`); continue; }
+            settings.smmNGNRate = rate;
+            writeJSON("settings.json", settings);
+            await send(`✅ Exchange rate set to *₦${rate} per $1 USD*\nAll NGN prices will now reflect this rate.`);
+            continue;
+          }
+
           // Default SMM help
-          await send(`🛒 *SMM PANEL*\n\n*.smm list* — Browse all service categories\n*.smm cat <#>* — View services in a category\n*.smm buy <id> <link> <qty>* — Place order\n*.smm status <order_id>* — Track order\n*.smm myorders* — Your order history\n*.smm balance* — Panel balance (owner only)\n*.smm markup <pct>* — Set price markup (owner only)\n\n_Powered by reallysimplesocial.com_`);
+          await send(`🛒 *SMM PANEL*\n\n*.smm list* — Browse all service categories\n*.smm cat <#>* — View services in a category\n*.smm search <keyword>* — Search services\n*.smm buy <id> <link> <qty>* — Place order\n*.smm status <order_id>* — Track order\n*.smm myorders* — Your order history\n\n_Owner commands:_\n*.smm balance* — Panel balance\n*.smm markup <pct>* — Set price markup\n*.smm rate <ngn/usd>* — Set exchange rate\n\n💰 *.wallet* — Top up for instant checkout\n\n_Powered by reallysimplesocial.com_`);
           continue;
         }
 
@@ -3456,6 +3784,63 @@ function scheduleRandomText() {
   }, delay);
 }
 scheduleRandomText();
+
+// ─── Auto Order Status Notifications ─────────────────────────────────────────
+// Checks pending SMM orders every 15 minutes, notifies users when status changes
+setInterval(async () => {
+  if (!isConnected || !sock) return;
+  if (!process.env.SMM_API_KEY) return;
+  const entries = Object.entries(pendingOrders);
+  if (!entries.length) return;
+  console.log(`[SMM] Checking ${entries.length} pending order(s)...`);
+  for (const [orderId, order] of entries) {
+    try {
+      const result = await smmGetStatus(orderId);
+      if (result.error) continue;
+      const newStatus = result.status;
+      if (newStatus && newStatus !== order.lastStatus) {
+        pendingOrders[orderId].lastStatus = newStatus;
+        writeJSON("pending_orders.json", pendingOrders);
+        const emoji = { "Completed": "✅", "In progress": "🔄", "Partial": "⚠️", "Canceled": "❌", "Processing": "⚙️" }[newStatus] || "📊";
+        const extraMsg = newStatus === "Completed" ? "\n\n_Your order is complete! Thank you for using MFG Bot SMM._" :
+                         newStatus === "Partial" ? "\n\n_Order partially delivered. Contact owner if needed._" : "";
+        try {
+          await sock.sendMessage(order.jid, { text: `${emoji} *Order Update!*\n\nOrder: *#${orderId}*\nStatus: *${newStatus}*\nRemaining: ${result.remains || "0"}${extraMsg}\n\n🔍 *.smm status ${orderId}* — Full details` });
+        } catch {}
+        if (newStatus === "Completed" || newStatus === "Canceled") {
+          delete pendingOrders[orderId];
+          writeJSON("pending_orders.json", pendingOrders);
+        }
+        console.log(`[SMM] Order #${orderId}: ${order.lastStatus} → ${newStatus}`);
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 600)); // space out API calls
+  }
+}, 15 * 60 * 1000);
+
+// ─── Wallet Payment Webhook (Flutterwave callback) ────────────────────────────
+app.get("/wallet/callback", (req, res) => {
+  res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>✅ Payment Received!</h2><p>Your MFG Bot wallet is being credited. Return to WhatsApp and type <b>.wallet</b> to check your balance.</p></body></html>`);
+});
+app.post("/webhook/wallet", async (req, res) => {
+  const FLW_SECRET = process.env.FLW_SECRET_KEY;
+  if (!FLW_SECRET) return res.sendStatus(400);
+  try {
+    const { status, meta, amount, currency } = req.body?.data || {};
+    if (status !== "successful" || currency !== "NGN") return res.sendStatus(200);
+    const jid = meta?.jid;
+    const amt = parseInt(meta?.amount || amount || 0);
+    if (!jid || !amt) return res.sendStatus(200);
+    walletCredit(jid, amt, `Flutterwave top-up ₦${amt.toLocaleString()}`);
+    console.log(`[Wallet] Credited ₦${amt} to ${jid}`);
+    if (isConnected && sock) {
+      try {
+        await sock.sendMessage(jid, { text: `💰 *Wallet Credited!*\n\nAmount: *₦${amt.toLocaleString()}*\nNew balance: *₦${getWallet(jid).balance.toLocaleString()}*\n\n🛒 *.smm list* — Browse services\n📦 *.smm search <keyword>* — Find a service` });
+      } catch {}
+    }
+    res.sendStatus(200);
+  } catch (e) { console.log("[Wallet webhook error]", e.message); res.sendStatus(500); }
+});
 
 // ─── Presence Heartbeat — keep WhatsApp showing "online" when .online mode is on ──
 setInterval(async () => {

@@ -4,6 +4,7 @@
   "autoReadStatus": false,
   "aiEnabled": true,
   "smmMarkup": 20,
+  "smmNGNRate": 1600,
   "aiMode": "chill",
   "aiDelay": 0,
   "aiTyping": false,
