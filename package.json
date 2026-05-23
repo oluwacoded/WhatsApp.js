@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@netlify/database": "^1.0.0",
-    "baileys": "^6.7.21",
+    "baileys": "^7.0.0-rc13",
     "cors": "^2.8.6",
     "express": "^4.22.2",
     "form-data": "^4.0.5",
