@@ -3877,20 +3877,31 @@ function writeContacts(list) {
 
 // ── Daily send cap tracking ─────────────────────────────────────────────────
 const DAILY_SEND_CAP      = 200; // max total messages per 24-hour window
-const COLD_DAILY_CAP      = 20;  // separate hard cap for cold contacts (never messaged you before)
+// Cold contacts: 20 per rolling 2-hour window (resets every 2 hrs, runs all day = up to 240/day)
+const COLD_WINDOW_CAP = 20;
+const COLD_WINDOW_MS  = 2 * 60 * 60 * 1000; // 2 hours in ms
 
-function getDailyColdCount() {
-  const rec = readJSON("daily_cold_sends.json", { date: "", count: 0 });
-  const today = new Date().toISOString().slice(0, 10);
-  if (rec.date !== today) return 0;
-  return rec.count || 0;
+function getColdWindowCount() {
+  const timestamps = readJSON("cold_sends_log.json", []);
+  const cutoff = Date.now() - COLD_WINDOW_MS;
+  return timestamps.filter(t => t > cutoff).length;
 }
 function incrementDailyCold() {
-  const today = new Date().toISOString().slice(0, 10);
-  const rec = readJSON("daily_cold_sends.json", { date: today, count: 0 });
-  const count = rec.date === today ? (rec.count || 0) + 1 : 1;
-  writeJSON("daily_cold_sends.json", { date: today, count });
-  return count;
+  const timestamps = readJSON("cold_sends_log.json", []);
+  const cutoff = Date.now() - COLD_WINDOW_MS;
+  // Prune old entries (keep only last 24h to avoid file bloat)
+  const pruned = timestamps.filter(t => t > Date.now() - 24 * 60 * 60 * 1000);
+  pruned.push(Date.now());
+  writeJSON("cold_sends_log.json", pruned);
+  return pruned.filter(t => t > cutoff).length;
+}
+function coldWindowResetMs() {
+  const timestamps = readJSON("cold_sends_log.json", []);
+  const cutoff = Date.now() - COLD_WINDOW_MS;
+  const inWindow = timestamps.filter(t => t > cutoff).sort();
+  if (inWindow.length < COLD_WINDOW_CAP) return 0;
+  // Time until the oldest entry in the window falls out
+  return (inWindow[0] + COLD_WINDOW_MS) - Date.now();
 }
 function getDailySendCount() {
   const rec = readJSON("daily_sends.json", { date: "", count: 0 });
@@ -4050,7 +4061,7 @@ async function runCampaign(contacts, message) {
     ...warm.sort(() => Math.random() - 0.5),
     ...cold.sort(() => Math.random() - 0.5)
   ];
-  campaignLog({ status: 'info', text: `Contacts: ${warm.length} warm (safe) + ${cold.length} cold (capped at ${COLD_DAILY_CAP}/day)` });
+  campaignLog({ status: 'info', text: `Contacts: ${warm.length} warm (safe) + ${cold.length} cold (20 per 2-hr window, up to 240/day)` });
 
   let sentInBatch = 0;
   let currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
@@ -4078,10 +4089,20 @@ async function runCampaign(contacts, message) {
     const warm  = isWarmContact(phone);
 
     // Cold contact hard cap
-    if (!warm && getDailyColdCount() >= COLD_DAILY_CAP) {
-      campaignLog({ status: "skipped", phone, name, error: `Cold daily cap (${COLD_DAILY_CAP}) reached — skipping stranger` });
-      campaignState.skipped++;
-      continue;
+    if (!warm && getColdWindowCount() >= COLD_WINDOW_CAP) {
+      const waitMs = coldWindowResetMs();
+      const waitMin = Math.ceil(waitMs / 60000);
+      campaignLog({ status: "cooldown", text: `Cold window full (${COLD_WINDOW_CAP} sent) — waiting ${waitMin}m for window to reset` });
+      campaignState.cooldown = true;
+      campaignState.cooldownEndsAt = new Date(Date.now() + waitMs).toISOString();
+      // Wait for the window to reset, then continue (don't skip — resume automatically)
+      const deadline = Date.now() + waitMs + 5000;
+      while (Date.now() < deadline && campaignState.running) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      campaignState.cooldown = false;
+      campaignState.cooldownEndsAt = null;
+      if (!campaignState.running) break;
     }
 
     campaignState.current  = name;
