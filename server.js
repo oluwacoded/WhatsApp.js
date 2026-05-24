@@ -3964,12 +3964,12 @@ async function runCampaign(contacts, message) {
   // Gap between opener and main message within same contact: 12–30 s
   const MIN_INNER_DELAY = 12 * 1000;
   const MAX_INNER_DELAY = 30 * 1000;
-  // Batch size: 1–2 contacts before a long cooldown
-  const minBatch = 1;
-  const maxBatch = 2;
-  // Long cooldown after each batch: 12–25 minutes
-  const MIN_COOLDOWN = 12 * 60 * 1000;
-  const MAX_COOLDOWN = 25 * 60 * 1000;
+  // Batch size: fixed at 3 contacts before a cooldown
+  const minBatch = 3;
+  const maxBatch = 3;
+  // Cooldown after every 3 contacts: exactly 2 minutes
+  const MIN_COOLDOWN = 2 * 60 * 1000;
+  const MAX_COOLDOWN = 2 * 60 * 1000;
 
   // Shuffle contacts so there's no detectable order pattern
   const shuffled = [...contacts].sort(() => Math.random() - 0.5);
