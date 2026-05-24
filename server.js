@@ -854,7 +854,10 @@ function fallbackReply(userText, jid) {
 
 // ─── SMM Panel (reallysimplesocial.com) ──────────────────────────────────────
 const SMM_API_URL = "https://reallysimplesocial.com/api/v2";
-function getSMMKey() { return process.env.SMM_API_KEY || settings.smmApiKey || ""; }
+// Cache the key at module load time — process.env may not be reliably
+// accessible inside deep async callbacks on some Replit environments
+const _SMM_KEY_AT_STARTUP = process.env.SMM_API_KEY || "";
+function getSMMKey() { return _SMM_KEY_AT_STARTUP || process.env.SMM_API_KEY || settings.smmApiKey || ""; }
 function getSMMMarkup() { return parseFloat(settings.smmMarkup || 0) / 100; }
 
 async function smmRequest(data) {
@@ -1711,27 +1714,26 @@ async function connectToWhatsApp() {
 
         // .owner — anyone can check
         if (cmd === "owner") {
-          const ownerArt = `╔══════════════════════════════════╗
-║                                  ║
-║  ████████╗███████╗██████╗██████╗ ║
-║     ██╔═╝██╔════╝██╔══██╗██╔══╗ ║
-║     ██║  █████╗  ██║  ██║██║  ║ ║
-║     ██║  ██╔══╝  ██║  ██║██║  ║ ║
-║     ██║  ███████╗██████╔╝██████╝ ║
-║     ╚═╝  ╚══════╝╚═════╝ ╚═════╝ ║
-║                                  ║
-║  ███╗   ███╗███████╗ ██████╗     ║
-║  ████╗ ████║██╔════╝██╔════╝     ║
-║  ██╔████╔██║█████╗  ██║  ███╗   ║
-║  ██║╚██╔╝██║██╔══╝  ██║   ██║   ║
-║  ██║ ╚═╝ ██║██║      ╚██████╔╝   ║
-║  ╚═╝     ╚═╝╚═╝       ╚═════╝   ║
-║                                  ║
-║  👑 *THE OWNER*                  ║
-║  📲 +2349132883869               ║
-║  ⚡ building different           ║
-║  🔥 mfg_bot — made by teddymfg   ║
-╚══════════════════════════════════╝`;
+          const ownerArt = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                               ┃
+┃   𝕿𝖊𝖉𝖉𝖞𝕸𝖋𝖌                  ┃
+┃   ▔▔▔▔▔▔▔▔▔▔▔▔               ┃
+┃                               ┃
+┃   ꜰ ᴜ ʟ ʟ   ɴ ᴀ ᴍ ᴇ          ┃
+┃   𝐓𝐞𝐝𝐝𝐲 𝐌𝐟𝐠                  ┃
+┃                               ┃
+┃   ʀ ᴏ ʟ ᴇ                    ┃
+┃   👑 𝗕𝗼𝘁 𝗢𝘄𝗻𝗲𝗿 & 𝗖𝗿𝗲𝗮𝘁𝗼𝗿      ┃
+┃                               ┃
+┃   ᴄ ᴏ ɴ ᴛ ᴀ ᴄ ᴛ               ┃
+┃   📲 +2349132883869           ┃
+┃                               ┃
+┃   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒   ┃
+┃   ⚡ 𝘣𝘶𝘪𝘭𝘥𝘪𝘯𝘨 𝘥𝘪𝘧𝘧𝘦𝘳𝘦𝘯𝘵        ┃
+┃   🔥 𝘮𝘧𝘨_𝘣𝘰𝘵 — 𝘮𝘢𝘥𝘦 𝘣𝘺 𝘵𝘦𝘥𝘥𝘺  ┃
+┃   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒   ┃
+┃                               ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛`;
           const ownerPhotoPath = path.join(__dirname, "data", "owner_photo.jpg");
           try {
             if (fs.existsSync(ownerPhotoPath)) {
