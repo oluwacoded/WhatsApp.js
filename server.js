@@ -3878,7 +3878,9 @@ let campaignState = {
   log: [],
   startedAt: null,
   stoppedAt: null,
-  message: ""
+  message: "",
+  cooldown: false,
+  cooldownEndsAt: null
 };
 
 function campaignLog(entry) {
@@ -3896,6 +3898,19 @@ async function runCampaign(contacts, message) {
   campaignState.startedAt = new Date().toISOString();
   campaignState.stoppedAt = null;
   campaignState.message   = message;
+  campaignState.cooldown  = false;
+  campaignState.cooldownEndsAt = null;
+
+  // How many messages to send before a long cooldown
+  const BATCH_SIZE = 3;
+  // Short delay between every message: 8–15 seconds (randomised)
+  const MIN_MSG_DELAY = 8000;
+  const MAX_MSG_DELAY = 15000;
+  // Long cooldown after every BATCH_SIZE messages: 60–90 seconds (randomised)
+  const MIN_COOLDOWN  = 60000;
+  const MAX_COOLDOWN  = 90000;
+
+  let sentInBatch = 0;
 
   for (let i = 0; i < contacts.length; i++) {
     if (!campaignState.running) {
@@ -3907,6 +3922,8 @@ async function runCampaign(contacts, message) {
     const phone = (c.phone || c).replace(/\D/g, "");
     const name  = c.name || phone;
     campaignState.current = name;
+    campaignState.cooldown = false;
+    campaignState.cooldownEndsAt = null;
 
     const jid = phone + "@s.whatsapp.net";
     const personalised = message.replace(/\{name\}/gi, name);
@@ -3915,19 +3932,46 @@ async function runCampaign(contacts, message) {
       if (!sock || !isConnected) throw new Error("Bot not connected");
       await sock.sendMessage(jid, { text: personalised });
       campaignState.sent++;
+      sentInBatch++;
       campaignLog({ status: "sent", phone, name });
     } catch (err) {
       campaignState.failed++;
       campaignLog({ status: "failed", phone, name, error: err.message });
     }
 
-    // Random delay 4–9 seconds between messages to avoid spam detection
-    const delay = 4000 + Math.floor(Math.random() * 5000);
-    await new Promise(r => setTimeout(r, delay));
+    // If this isn't the last contact, apply delays
+    if (i < contacts.length - 1 && campaignState.running) {
+
+      // After every BATCH_SIZE messages, take a long cooldown break
+      if (sentInBatch >= BATCH_SIZE) {
+        sentInBatch = 0;
+        const cooldownMs = MIN_COOLDOWN + Math.floor(Math.random() * (MAX_COOLDOWN - MIN_COOLDOWN));
+        campaignState.cooldown = true;
+        campaignState.cooldownEndsAt = new Date(Date.now() + cooldownMs).toISOString();
+        campaignLog({ status: "cooldown", text: `Cooling down for ${Math.round(cooldownMs / 1000)}s to keep the account safe` });
+
+        // Wait out the cooldown, checking every second so Stop works immediately
+        const deadline = Date.now() + cooldownMs;
+        while (Date.now() < deadline && campaignState.running) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+
+        campaignState.cooldown = false;
+        campaignState.cooldownEndsAt = null;
+      }
+
+      // Short random delay between every individual message
+      if (campaignState.running) {
+        const msgDelay = MIN_MSG_DELAY + Math.floor(Math.random() * (MAX_MSG_DELAY - MIN_MSG_DELAY));
+        await new Promise(r => setTimeout(r, msgDelay));
+      }
+    }
   }
 
   campaignState.running = false;
   campaignState.current = null;
+  campaignState.cooldown = false;
+  campaignState.cooldownEndsAt = null;
   campaignState.stoppedAt = new Date().toISOString();
   campaignLog({ status: "done", text: `Finished: ${campaignState.sent} sent, ${campaignState.failed} failed` });
 }

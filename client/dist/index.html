@@ -372,6 +372,7 @@
     .log-failed { color: var(--danger); }
     .log-stopped { color: var(--warn); }
     .log-done { color: var(--accent); font-weight: 700; }
+    .log-cooldown { color: #f5c400; font-style: italic; }
     #start-btn { min-width: 130px; }
     #stop-btn  { background: var(--danger); color: #fff; }
 
@@ -555,7 +556,7 @@
       <div class="tab-panel" id="tab-campaign">
         <p class="hint" style="margin-bottom:10px;">Write the message below or <strong>pick a saved template</strong>. Use <strong>{name}</strong> for personalisation.</p>
         <textarea id="camp-message" placeholder="Hey {name}! 👋 I just wanted to reach out..." style="min-height:160px;"></textarea>
-        <div class="hint" style="margin-top:6px;">Messages sent with 4–9 second random delay to keep the account safe.</div>
+        <div class="hint" style="margin-top:6px;">Sends in batches of 3 with 8–15s between each message, then a 60–90s cooldown — keeps your account safe from WhatsApp bans.</div>
         <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center;">
           <button id="start-btn" onclick="startCampaign()">▶ Start Campaign</button>
           <button id="stop-btn"  onclick="stopCampaign()" style="display:none;">⏹ Stop</button>
@@ -589,6 +590,9 @@
           <div class="progress-bar" id="p-bar" style="width:0%"></div>
         </div>
         <div class="hint" style="margin-bottom:10px;" id="p-current"></div>
+        <div id="p-cooldown" style="display:none;background:rgba(255,200,0,0.1);border:1px solid rgba(255,200,0,0.3);border-radius:8px;padding:10px 14px;font-size:13px;color:#f5c400;margin-bottom:10px;">
+          ⏸ Cooldown active — waiting <strong id="p-cooldown-secs"></strong>s before next batch to protect your WhatsApp account.
+        </div>
         <div class="camp-log" id="camp-log"><div style="color:var(--muted);font-style:italic;">No campaign run yet.</div></div>
       </div>
     </div>
@@ -1001,13 +1005,28 @@
       document.getElementById("p-total").textContent  = d.total;
       document.getElementById("p-sent").textContent   = d.sent;
       document.getElementById("p-failed").textContent = d.failed;
-      document.getElementById("p-status").textContent = d.running ? "Running ▶" : (d.stoppedAt ? "Finished ✅" : "Idle");
+      const statusLabel = d.running
+        ? (d.cooldown ? "Cooling Down ⏸" : "Running ▶")
+        : (d.stoppedAt ? "Finished ✅" : "Idle");
+      document.getElementById("p-status").textContent = statusLabel;
       document.getElementById("p-bar").style.width = pct + "%";
-      document.getElementById("p-current").textContent = d.running && d.current ? "Now sending to: " + d.current : "";
+      document.getElementById("p-current").textContent = d.running && d.current && !d.cooldown ? "Now sending to: " + d.current : "";
+
+      // Cooldown banner with live countdown
+      const cooldownEl = document.getElementById("p-cooldown");
+      const cooldownSecs = document.getElementById("p-cooldown-secs");
+      if (d.cooldown && d.cooldownEndsAt) {
+        const secsLeft = Math.max(0, Math.round((new Date(d.cooldownEndsAt) - Date.now()) / 1000));
+        cooldownEl.style.display = "block";
+        cooldownSecs.textContent = secsLeft;
+      } else {
+        cooldownEl.style.display = "none";
+      }
+
       if (d.log?.length) {
         document.getElementById("camp-log").innerHTML = d.log.map(entry => {
-          const cls  = { sent:"log-sent", failed:"log-failed", stopped:"log-stopped", done:"log-done" }[entry.status] || "";
-          const icon = { sent:"✓", failed:"✗", done:"★" }[entry.status] || "•";
+          const cls  = { sent:"log-sent", failed:"log-failed", stopped:"log-stopped", done:"log-done", cooldown:"log-cooldown" }[entry.status] || "";
+          const icon = { sent:"✓", failed:"✗", done:"★", cooldown:"⏸" }[entry.status] || "•";
           const label = entry.name || entry.text || entry.phone || "";
           return `<div class="log-row ${cls}">${icon} ${label}${entry.error ? " — " + entry.error : ""}</div>`;
         }).join("");
