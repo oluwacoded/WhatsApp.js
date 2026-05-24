@@ -3876,7 +3876,22 @@ function writeContacts(list) {
 }
 
 // ── Daily send cap tracking ─────────────────────────────────────────────────
-const DAILY_SEND_CAP = 200; // max messages per 24-hour window (kept low to avoid WA ban)
+const DAILY_SEND_CAP      = 200; // max total messages per 24-hour window
+const COLD_DAILY_CAP      = 20;  // separate hard cap for cold contacts (never messaged you before)
+
+function getDailyColdCount() {
+  const rec = readJSON("daily_cold_sends.json", { date: "", count: 0 });
+  const today = new Date().toISOString().slice(0, 10);
+  if (rec.date !== today) return 0;
+  return rec.count || 0;
+}
+function incrementDailyCold() {
+  const today = new Date().toISOString().slice(0, 10);
+  const rec = readJSON("daily_cold_sends.json", { date: today, count: 0 });
+  const count = rec.date === today ? (rec.count || 0) + 1 : 1;
+  writeJSON("daily_cold_sends.json", { date: today, count });
+  return count;
+}
 function getDailySendCount() {
   const rec = readJSON("daily_sends.json", { date: "", count: 0 });
   const today = new Date().toISOString().slice(0, 10);
@@ -3934,11 +3949,66 @@ function spinText(template) {
   });
 }
 
-// ── Personalise + spin a message ─────────────────────────────────────────────
+// ── Invisible Unicode injection — makes every message byte-for-byte unique ───
+// WhatsApp's duplicate/cluster detection works on message content hashes.
+// Injecting 1–3 invisible zero-width characters at random positions means no
+// two sends ever share the same hash, even when the visible text is identical.
+const _ZWS = ['\u200B', '\u200C', '\u200D', '\u2060'];
+function injectInvisible(text) {
+  const count = 1 + Math.floor(Math.random() * 3);
+  const arr = [...text]; // split by code-point so emoji don't break
+  for (let i = 0; i < count; i++) {
+    const pos = 1 + Math.floor(Math.random() * Math.max(arr.length - 1, 1));
+    arr.splice(pos, 0, _ZWS[Math.floor(Math.random() * _ZWS.length)]);
+  }
+  return arr.join('');
+}
+
+// ── Personalise + spin + fingerprint a message ────────────────────────────────
 function buildCampaignMessage(template, name) {
   let msg = template.replace(/\{name\}/gi, name);
   msg = spinText(msg);
+  msg = injectInvisible(msg);
   return msg;
+}
+
+// ── Warm contact check: has this number ever sent us a message? ───────────────
+// Warm contacts are MUCH safer to message — they already started the conversation.
+// Cold contacts (strangers) are WhatsApp's #1 spam signal.
+function isWarmContact(phone) {
+  const jid = phone.replace(/\D/g, '') + '@s.whatsapp.net';
+  const u = userData[jid];
+  return !!(u && (u.ownerMessages?.length || u.greeted || u.registered));
+}
+
+// ── Time-of-day safety gate: only send 8 am – 9 pm ───────────────────────────
+function isSafeHour() {
+  const h = new Date().getHours();
+  return h >= 8 && h < 21;
+}
+async function waitForSafeHour(state) {
+  if (isSafeHour()) return;
+  campaignLog({ status: 'paused', text: 'Outside safe hours (8 am–9 pm) — waiting for 8 am to protect your account' });
+  while (!isSafeHour() && state.running) {
+    await new Promise(r => setTimeout(r, 60 * 1000));
+  }
+}
+
+// ── Idle browsing: subscribe to presence of random known contacts ─────────────
+// Real WhatsApp Web calls presenceSubscribe for every contact visible in the
+// chat list as you scroll. Doing this between sends makes the session
+// indistinguishable from a genuine browser tab.
+async function idleBrowse() {
+  if (!sock || !isConnected) return;
+  const known = Object.keys(userData).filter(j => j.endsWith('@s.whatsapp.net'));
+  if (known.length < 2) return;
+  const pick = [...known].sort(() => Math.random() - 0.5).slice(0, 3 + Math.floor(Math.random() * 3));
+  for (const jid of pick) {
+    try {
+      await sock.presenceSubscribe(jid);
+      await new Promise(r => setTimeout(r, 400 + Math.random() * 1200));
+    } catch (_) {}
+  }
 }
 
 async function runCampaign(contacts, message) {
@@ -3959,27 +4029,28 @@ async function runCampaign(contacts, message) {
   campaignState.dailyCap      = DAILY_SEND_CAP;
 
   // ── Timing constants (stealth mode — very human-like) ──────────────────────
-  // Gap between each message: 60–180 s (1–3 min — hard to flag as bot)
-  const MIN_MSG_DELAY  = 60 * 1000;
-  const MAX_MSG_DELAY  = 180 * 1000;
-  // Typing simulation for opener: 2–6 s
-  const MIN_TYPE_OPENER = 2000;
+  const MIN_MSG_DELAY   = 60 * 1000;   // 1–3 min between contacts
+  const MAX_MSG_DELAY   = 180 * 1000;
+  const MIN_TYPE_OPENER = 2000;        // 2–6 s typing for opener
   const MAX_TYPE_OPENER = 6000;
-  // Typing simulation for main message: 4–10 s (longer msg = longer typing)
-  const MIN_TYPE_MAIN   = 4000;
+  const MIN_TYPE_MAIN   = 4000;        // 4–10 s typing for main msg
   const MAX_TYPE_MAIN   = 10000;
-  // Gap between opener and main message within same contact: 12–30 s
-  const MIN_INNER_DELAY = 12 * 1000;
+  const MIN_INNER_DELAY = 12 * 1000;   // 12–30 s between opener and main msg
   const MAX_INNER_DELAY = 30 * 1000;
-  // Batch size: fixed at 3 contacts before a cooldown
-  const minBatch = 3;
-  const maxBatch = 3;
-  // Cooldown after every 3 contacts: exactly 2 minutes
-  const MIN_COOLDOWN = 2 * 60 * 1000;
-  const MAX_COOLDOWN = 2 * 60 * 1000;
+  const minBatch        = 3;           // 3 contacts per batch
+  const maxBatch        = 3;
+  const COOLDOWN_MS     = 2 * 60 * 1000; // 2 min rest after every 3 contacts
 
-  // Shuffle contacts so there's no detectable order pattern
-  const shuffled = [...contacts].sort(() => Math.random() - 0.5);
+  // ── Classify contacts — warm first, cold last ─────────────────────────────
+  // Warm = has ever messaged the bot (bidirectional history = much safer)
+  // Cold = total stranger — treated with extreme care, hard cap of 20/day
+  const warm = contacts.filter(c => isWarmContact((c.phone || c)));
+  const cold = contacts.filter(c => !isWarmContact((c.phone || c)));
+  const shuffled = [
+    ...warm.sort(() => Math.random() - 0.5),
+    ...cold.sort(() => Math.random() - 0.5)
+  ];
+  campaignLog({ status: 'info', text: `Contacts: ${warm.length} warm (safe) + ${cold.length} cold (capped at ${COLD_DAILY_CAP}/day)` });
 
   let sentInBatch = 0;
   let currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
@@ -3990,9 +4061,13 @@ async function runCampaign(contacts, message) {
       break;
     }
 
-    // ── Daily cap guard ────────────────────────────────────────────────────
+    // ── Time-of-day safety gate ────────────────────────────────────────────
+    await waitForSafeHour(campaignState);
+    if (!campaignState.running) break;
+
+    // ── Daily cap guards ───────────────────────────────────────────────────
     if (getDailySendCount() >= DAILY_SEND_CAP) {
-      campaignLog({ status: "stopped", text: `Daily cap of ${DAILY_SEND_CAP} messages reached. Resume tomorrow.` });
+      campaignLog({ status: "stopped", text: `Daily cap of ${DAILY_SEND_CAP} reached. Resume tomorrow.` });
       break;
     }
 
@@ -4000,6 +4075,14 @@ async function runCampaign(contacts, message) {
     const phone = (c.phone || c).replace(/\D/g, "");
     const name  = c.name || phone;
     const jid   = phone + "@s.whatsapp.net";
+    const warm  = isWarmContact(phone);
+
+    // Cold contact hard cap
+    if (!warm && getDailyColdCount() >= COLD_DAILY_CAP) {
+      campaignLog({ status: "skipped", phone, name, error: `Cold daily cap (${COLD_DAILY_CAP}) reached — skipping stranger` });
+      campaignState.skipped++;
+      continue;
+    }
 
     campaignState.current  = name;
     campaignState.checking = true;
@@ -4026,39 +4109,37 @@ async function runCampaign(contacts, message) {
 
     campaignState.checking = false;
 
-    // ── Step 2: Virtual "open chat" — mimics a human tapping the conversation ──
-    // Sequence: go available → brief glance pause → mark chat as read →
-    // short idle pause → (sometimes) go unavailable briefly → then composing.
-    // This is exactly what WhatsApp Web does when you click a chat thread.
+    // ── Step 2: presenceSubscribe — tells WA we're "looking at" this chat ─
+    // Real WA Web always subscribes to presence before opening a conversation.
+    // Skipping this is one of the clearest bot fingerprints.
+    try { await sock.presenceSubscribe(jid); } catch (_) {}
+    await new Promise(r => setTimeout(r, 300 + Math.random() * 600));
+
+    // ── Step 3: Virtual "open chat" — mimics tapping the conversation ──────
     try {
-      // 2a. Appear online (user just picked up their phone / opened the tab)
+      // Go available (opened the app / tab)
       await sock.sendPresenceUpdate("available", jid);
       await new Promise(r => setTimeout(r, 600 + Math.random() * 900));
 
-      // 2b. Virtually mark the chat as read (simulates opening/viewing the thread)
-      try {
-        await sock.chatModify({ markRead: true, lastMessages: [] }, jid);
-      } catch (_) { /* non-fatal — older Baileys versions may not support */ }
+      // Mark chat as read (opened and viewed the thread)
+      try { await sock.chatModify({ markRead: true, lastMessages: [] }, jid); } catch (_) {}
       await new Promise(r => setTimeout(r, 400 + Math.random() * 800));
 
-      // 2c. Occasionally go unavailable for a moment (like the screen locked briefly)
+      // 35% chance: go unavailable briefly then come back (screen lock / tab switch)
       if (Math.random() < 0.35) {
         await sock.sendPresenceUpdate("unavailable", jid);
         await new Promise(r => setTimeout(r, 1200 + Math.random() * 2000));
         await sock.sendPresenceUpdate("available", jid);
         await new Promise(r => setTimeout(r, 500 + Math.random() * 700));
       }
-    } catch (_) { /* presence is best-effort */ }
+    } catch (_) {}
 
-    // ── Step 3: Send a random casual opener ───────────────────────────────
+    // ── Step 4: Send casual opener ────────────────────────────────────────
     const opener = CAMPAIGN_OPENERS[Math.floor(Math.random() * CAMPAIGN_OPENERS.length)];
     try {
-      // Start composing — typing indicator appears in recipient's chat
       await sock.sendPresenceUpdate("composing", jid);
-      const openerTypeMs = MIN_TYPE_OPENER + Math.floor(Math.random() * (MAX_TYPE_OPENER - MIN_TYPE_OPENER));
-      await new Promise(r => setTimeout(r, openerTypeMs));
+      await new Promise(r => setTimeout(r, MIN_TYPE_OPENER + Math.random() * (MAX_TYPE_OPENER - MIN_TYPE_OPENER)));
       await sock.sendPresenceUpdate("paused", jid);
-      // Small pause after stopping typing — like briefly rereading before sending
       await new Promise(r => setTimeout(r, 300 + Math.random() * 600));
       await sock.sendMessage(jid, { text: opener });
       campaignLog({ status: "opener", phone, name, text: opener });
@@ -4068,56 +4149,52 @@ async function runCampaign(contacts, message) {
       continue;
     }
 
-    // ── Step 4: Natural pause — like the person is reading/typing back ────
-    const innerDelay = MIN_INNER_DELAY + Math.floor(Math.random() * (MAX_INNER_DELAY - MIN_INNER_DELAY));
-    await new Promise(r => setTimeout(r, innerDelay));
-
+    // ── Step 5: Natural reading pause ─────────────────────────────────────
+    await new Promise(r => setTimeout(r, MIN_INNER_DELAY + Math.random() * (MAX_INNER_DELAY - MIN_INNER_DELAY)));
     if (!campaignState.running) break;
 
-    // ── Step 5: Typing simulation for main message ────────────────────────
+    // ── Step 6: Type and send main message ────────────────────────────────
     try {
       await sock.sendPresenceUpdate("composing", jid);
-      const mainTypeMs = MIN_TYPE_MAIN + Math.floor(Math.random() * (MAX_TYPE_MAIN - MIN_TYPE_MAIN));
-      await new Promise(r => setTimeout(r, mainTypeMs));
+      await new Promise(r => setTimeout(r, MIN_TYPE_MAIN + Math.random() * (MAX_TYPE_MAIN - MIN_TYPE_MAIN)));
       await sock.sendPresenceUpdate("paused", jid);
     } catch (_) {}
 
-    // ── Step 6: Send the main campaign message (personalised + spun) ──────
     const finalMsg = buildCampaignMessage(message, name);
     try {
       await sock.sendMessage(jid, { text: finalMsg });
       const daily = incrementDailySend();
+      if (!warm) incrementDailyCold();
       campaignState.sent++;
       campaignState.dailySent = daily;
       sentInBatch++;
-      campaignLog({ status: "sent", phone, name });
+      campaignLog({ status: "sent", phone, name, warm });
     } catch (err) {
       campaignState.failed++;
       campaignLog({ status: "failed", phone, name, error: err.message });
     }
 
-    // ── Step 7: Delays between contacts ───────────────────────────────────
+    // ── Step 7: Delays + cooldown ──────────────────────────────────────────
     if (i < shuffled.length - 1 && campaignState.running) {
 
-      // Long cooldown after a full batch
       if (sentInBatch >= currentBatchSize) {
         sentInBatch = 0;
         currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
 
-        const cooldownMs = MIN_COOLDOWN + Math.floor(Math.random() * (MAX_COOLDOWN - MIN_COOLDOWN));
         campaignState.cooldown       = true;
-        campaignState.cooldownEndsAt = new Date(Date.now() + cooldownMs).toISOString();
-        campaignLog({ status: "cooldown", text: `Batch done — resting ${Math.round(cooldownMs / 60000)}m to protect your account` });
+        campaignState.cooldownEndsAt = new Date(Date.now() + COOLDOWN_MS).toISOString();
+        campaignLog({ status: "cooldown", text: `Batch done — resting 2 min + browsing to protect your account` });
 
-        const deadline = Date.now() + cooldownMs;
-        while (Date.now() < deadline && campaignState.running) {
+        // During the cooldown, do idle browsing (looks like real WA usage)
+        const cooldownEnd = Date.now() + COOLDOWN_MS;
+        await idleBrowse();
+        while (Date.now() < cooldownEnd && campaignState.running) {
           await new Promise(r => setTimeout(r, 1000));
         }
         campaignState.cooldown       = false;
         campaignState.cooldownEndsAt = null;
       }
 
-      // Short random gap between individual contacts
       if (campaignState.running) {
         const msgDelay = MIN_MSG_DELAY + Math.floor(Math.random() * (MAX_MSG_DELAY - MIN_MSG_DELAY));
         await new Promise(r => setTimeout(r, msgDelay));
