@@ -1711,7 +1711,40 @@ async function connectToWhatsApp() {
 
         // .owner — anyone can check
         if (cmd === "owner") {
-          await send(`mfg_bot was built by its maker.\ncontact: +${OWNER_NUMBER}`);
+          const ownerArt = `╔══════════════════════════════════╗
+║                                  ║
+║  ████████╗███████╗██████╗██████╗ ║
+║     ██╔═╝██╔════╝██╔══██╗██╔══╗ ║
+║     ██║  █████╗  ██║  ██║██║  ║ ║
+║     ██║  ██╔══╝  ██║  ██║██║  ║ ║
+║     ██║  ███████╗██████╔╝██████╝ ║
+║     ╚═╝  ╚══════╝╚═════╝ ╚═════╝ ║
+║                                  ║
+║  ███╗   ███╗███████╗ ██████╗     ║
+║  ████╗ ████║██╔════╝██╔════╝     ║
+║  ██╔████╔██║█████╗  ██║  ███╗   ║
+║  ██║╚██╔╝██║██╔══╝  ██║   ██║   ║
+║  ██║ ╚═╝ ██║██║      ╚██████╔╝   ║
+║  ╚═╝     ╚═╝╚═╝       ╚═════╝   ║
+║                                  ║
+║  👑 *THE OWNER*                  ║
+║  📲 +2349132883869               ║
+║  ⚡ building different           ║
+║  🔥 mfg_bot — made by teddymfg   ║
+╚══════════════════════════════════╝`;
+          const ownerPhotoPath = path.join(__dirname, "data", "owner_photo.jpg");
+          try {
+            if (fs.existsSync(ownerPhotoPath)) {
+              await sock.sendMessage(from, {
+                image: fs.readFileSync(ownerPhotoPath),
+                caption: ownerArt
+              });
+            } else {
+              await send(ownerArt);
+            }
+          } catch (e) {
+            await send(ownerArt);
+          }
           continue;
         }
 
