@@ -463,10 +463,11 @@ async function downloadFromYtDlp(query) {
       "--no-warnings",
       "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
       "--no-playlist", "--max-filesize", "15m",
+      "--match-filter", "duration > 60",
       "-o", `${tmpBase}.%(ext)s`,
       "--print", "before_dl:%(title)s",
       "--quiet",
-      `ytsearch1:${query}`
+      `ytsearch3:${query}`
     ];
 
     console.log(`[MFG_bot] yt-dlp searching: "${query}"`);
@@ -853,7 +854,7 @@ function fallbackReply(userText, jid) {
 
 // ─── SMM Panel (reallysimplesocial.com) ──────────────────────────────────────
 const SMM_API_URL = "https://reallysimplesocial.com/api/v2";
-function getSMMKey() { return process.env.SMM_API_KEY || ""; }
+function getSMMKey() { return process.env.SMM_API_KEY || settings.smmApiKey || ""; }
 function getSMMMarkup() { return parseFloat(settings.smmMarkup || 0) / 100; }
 
 async function smmRequest(data) {
@@ -1466,8 +1467,8 @@ async function connectToWhatsApp() {
           const audio = await downloadMusic(isAnyUrl ? text.match(/https?:\S+/)[0] : text);
           if (!audio?.buffer) { await send("❌ download failed. try again with .song <name>"); continue; }
           try {
-            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || text)}.mp3` });
-            const previewNote = audio.isPreview ? " _(30s preview)_" : "";
+            await sock.sendMessage(from, { document: audio.buffer, mimetype: "audio/mpeg", fileName: `${sanitizeFileName(audio.title || text)}.mp3` });
+            const previewNote = audio.isPreview ? " _(30s preview — full version unavailable)_" : "";
             await send(`✅ *${audio.title || text}* — enjoy 🎧${previewNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
@@ -2757,8 +2758,8 @@ async function connectToWhatsApp() {
           const audio = await downloadMusic(input);
           if (!audio?.buffer) { await send("❌ couldn't find that song. try a different name or spelling"); continue; }
           try {
-            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || input)}.mp3` });
-            const previewNote = audio.isPreview ? " _(30s preview)_" : "";
+            await sock.sendMessage(from, { document: audio.buffer, mimetype: "audio/mpeg", fileName: `${sanitizeFileName(audio.title || input)}.mp3` });
+            const previewNote = audio.isPreview ? " _(30s preview — full version unavailable)_" : "";
             const fullNote = audio.source === "ytdlp" ? " 🎵" : "";
             await send(`✅ *${audio.title || input}* — enjoy 🎧${previewNote}${fullNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
@@ -2772,8 +2773,8 @@ async function connectToWhatsApp() {
           const audio = await downloadMusic(query);
           if (!audio?.buffer) { await send("❌ couldn't find that song. try a different spelling or artist name"); continue; }
           try {
-            await sock.sendMessage(from, { audio: audio.buffer, mimetype: "audio/mp4", fileName: `${sanitizeFileName(audio.title || query)}.mp3` });
-            const previewNote = audio.isPreview ? " _(30s preview)_" : "";
+            await sock.sendMessage(from, { document: audio.buffer, mimetype: "audio/mpeg", fileName: `${sanitizeFileName(audio.title || query)}.mp3` });
+            const previewNote = audio.isPreview ? " _(30s preview — full version unavailable)_" : "";
             const fullNote = audio.source === "ytdlp" ? " 🎵" : "";
             await send(`✅ *${audio.title || query}* — enjoy 🎧${previewNote}${fullNote}`);
           } catch (e) { await send("❌ send failed: " + e.message); }
@@ -3362,8 +3363,8 @@ async function connectToWhatsApp() {
         // ── .smm — Social Media Marketing Panel ─────────────────────────
         if (cmd === "smm") {
           const sub = args[0]?.toLowerCase();
-          const smmKey = process.env.SMM_API_KEY;
-          if (!smmKey) { await send("❌ SMM panel not configured yet. Contact the owner."); continue; }
+          const smmKey = getSMMKey();
+          if (!smmKey) { await send("❌ SMM panel not configured yet. Contact the owner (+2349132883869)."); continue; }
 
           if (!sub || sub === "list" || sub === "menu" || sub === "services") {
             await send("⏳ Loading SMM services...");
