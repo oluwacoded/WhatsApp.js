@@ -3694,37 +3694,94 @@ function scheduleRandomText() {
 scheduleRandomText();
 
 // ─── Auto Order Status Notifications ─────────────────────────────────────────
-// Checks pending SMM orders every 15 minutes, notifies users when status changes
-setInterval(async () => {
+// Smart polling: new orders checked every 3 min for the first hour,
+// then every 15 min until completed/canceled/failed.
+async function checkPendingOrders() {
   if (!isConnected || !sock) return;
-  if (!process.env.SMM_API_KEY) return;
+  if (!getSMMKey()) return;
   const entries = Object.entries(pendingOrders);
   if (!entries.length) return;
-  console.log(`[SMM] Checking ${entries.length} pending order(s)...`);
-  for (const [orderId, order] of entries) {
+
+  const now = Date.now();
+  // Separate orders into "urgent" (< 1 hr old) and "background" (≥ 1 hr old)
+  const urgent     = entries.filter(([, o]) => (now - (o.ts || 0)) < 60 * 60 * 1000);
+  const background = entries.filter(([, o]) => (now - (o.ts || 0)) >= 60 * 60 * 1000);
+
+  // Only check background orders on the slow tick (we flag them via _slowCheck)
+  const toCheck = [
+    ...urgent,
+    ...background.filter(([, o]) => !o._nextSlowCheck || now >= o._nextSlowCheck)
+  ];
+  if (!toCheck.length) return;
+
+  console.log(`[SMM] Checking ${toCheck.length} order(s) (${urgent.length} urgent, ${background.length} bg)...`);
+
+  for (const [orderId, order] of toCheck) {
     try {
       const result = await smmGetStatus(orderId);
-      if (result.error) continue;
+      if (result.error) {
+        // Schedule retry for background orders
+        if (pendingOrders[orderId]) {
+          pendingOrders[orderId]._nextSlowCheck = now + 15 * 60 * 1000;
+          writeJSON("pending_orders.json", pendingOrders);
+        }
+        continue;
+      }
       const newStatus = result.status;
+
+      // Update next slow check time for background orders
+      if (pendingOrders[orderId]) {
+        pendingOrders[orderId]._nextSlowCheck = now + 15 * 60 * 1000;
+      }
+
       if (newStatus && newStatus !== order.lastStatus) {
-        pendingOrders[orderId].lastStatus = newStatus;
+        if (pendingOrders[orderId]) pendingOrders[orderId].lastStatus = newStatus;
         writeJSON("pending_orders.json", pendingOrders);
-        const emoji = { "Completed": "✅", "In progress": "🔄", "Partial": "⚠️", "Canceled": "❌", "Processing": "⚙️" }[newStatus] || "📊";
-        const extraMsg = newStatus === "Completed" ? "\n\n_Your order is complete! Thank you for using MFG Bot SMM._" :
-                         newStatus === "Partial" ? "\n\n_Order partially delivered. Contact owner if needed._" : "";
+
+        const emoji = {
+          "Completed":   "✅",
+          "In progress": "🔄",
+          "Partial":     "⚠️",
+          "Canceled":    "❌",
+          "Processing":  "⚙️"
+        }[newStatus] || "📊";
+
+        let extraMsg = "";
+        if (newStatus === "Completed") {
+          extraMsg = "\n\n🎉 _Order fully delivered! Thank you for using MFG Bot SMM._";
+        } else if (newStatus === "Partial") {
+          extraMsg = "\n\n⚠️ _Partial delivery — some items delivered. Contact the owner if needed._";
+        } else if (newStatus === "Canceled") {
+          extraMsg = "\n\n❌ _Order was canceled. Contact the owner for a refund if applicable._";
+        }
+
         try {
-          await sock.sendMessage(order.jid, { text: `${emoji} *Order Update!*\n\nOrder: *#${orderId}*\nStatus: *${newStatus}*\nRemaining: ${result.remains || "0"}${extraMsg}\n\n🔍 *.smm status ${orderId}* — Full details` });
-        } catch {}
+          await sock.sendMessage(order.jid, {
+            text: `${emoji} *Order #${orderId} Update*\n\nStatus: *${newStatus}*\nRemaining: ${result.remains ?? "0"}${extraMsg}\n\n🔍 Check anytime: *.smm status ${orderId}*`
+          });
+        } catch (e) {
+          console.log(`[SMM] Notify failed for ${orderId}: ${e.message}`);
+        }
+
         if (newStatus === "Completed" || newStatus === "Canceled") {
           delete pendingOrders[orderId];
           writeJSON("pending_orders.json", pendingOrders);
+          console.log(`[SMM] Order #${orderId} closed (${newStatus})`);
+        } else {
+          console.log(`[SMM] Order #${orderId}: ${order.lastStatus} → ${newStatus}`);
         }
-        console.log(`[SMM] Order #${orderId}: ${order.lastStatus} → ${newStatus}`);
       }
-    } catch {}
-    await new Promise(r => setTimeout(r, 600)); // space out API calls
+    } catch (e) {
+      console.log(`[SMM] Check error for #${orderId}: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, 800)); // space out API calls
   }
-}, 15 * 60 * 1000);
+}
+
+// Fast tick: every 3 min — catches new orders quickly
+setInterval(checkPendingOrders, 3 * 60 * 1000);
+// Slow tick: every 15 min — also catches old orders that slipped through
+setInterval(checkPendingOrders, 15 * 60 * 1000);
 
 // ─── Presence Heartbeat — keep WhatsApp showing "online" when .online mode is on ──
 setInterval(async () => {
