@@ -459,15 +459,13 @@ async function downloadFromYtDlp(query) {
     const outPath = `${tmpBase}.mp3`;
 
     const args = [
-      "--js-runtimes", `node:${NODE_BIN}`,
       "--no-warnings",
       "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
       "--no-playlist", "--max-filesize", "15m",
-      "--match-filter", "duration > 60",
       "-o", `${tmpBase}.%(ext)s`,
       "--print", "before_dl:%(title)s",
       "--quiet",
-      `ytsearch3:${query}`
+      `scsearch3:${query}`
     ];
 
     console.log(`[MFG_bot] yt-dlp searching: "${query}"`);
@@ -1714,26 +1712,21 @@ async function connectToWhatsApp() {
 
         // .owner — anyone can check
         if (cmd === "owner") {
-          const ownerArt = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                               ┃
-┃   𝕿𝖊𝖉𝖉𝖞𝕸𝖋𝖌                  ┃
-┃   ▔▔▔▔▔▔▔▔▔▔▔▔               ┃
-┃                               ┃
-┃   ꜰ ᴜ ʟ ʟ   ɴ ᴀ ᴍ ᴇ          ┃
-┃   𝐓𝐞𝐝𝐝𝐲 𝐌𝐟𝐠                  ┃
-┃                               ┃
-┃   ʀ ᴏ ʟ ᴇ                    ┃
-┃   👑 𝗕𝗼𝘁 𝗢𝘄𝗻𝗲𝗿 & 𝗖𝗿𝗲𝗮𝘁𝗼𝗿      ┃
-┃                               ┃
-┃   ᴄ ᴏ ɴ ᴛ ᴀ ᴄ ᴛ               ┃
-┃   📲 +2349132883869           ┃
-┃                               ┃
-┃   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒   ┃
-┃   ⚡ 𝘣𝘶𝘪𝘭𝘥𝘪𝘯𝘨 𝘥𝘪𝘧𝘧𝘦𝘳𝘦𝘯𝘵        ┃
-┃   🔥 𝘮𝘧𝘨_𝘣𝘰𝘵 — 𝘮𝘢𝘥𝘦 𝘣𝘺 𝘵𝘦𝘥𝘥𝘺  ┃
-┃   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒   ┃
-┃                               ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛`;
+          const ownerArt = `╔══════════════════════════════╗
+║                              ║
+║   ★彡 T E D D Y M F G 彡★   ║
+║   ══════════════════════     ║
+║                              ║
+║   👑  Bot Owner & Creator    ║
+║   📲  +2349132883869         ║
+║   🌍  Nigeria                ║
+║                              ║
+║  ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬   ║
+║  ⚡ building different       ║
+║  🔥 mfg_bot — by teddymfg    ║
+║  ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬   ║
+║                              ║
+╚══════════════════════════════╝`;
           const ownerPhotoPath = path.join(__dirname, "data", "owner_photo.jpg");
           try {
             if (fs.existsSync(ownerPhotoPath)) {
