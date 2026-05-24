@@ -403,6 +403,20 @@
 
 <div class="page">
 
+  <!-- ── Backend URL Config ── -->
+  <div class="card" id="backend-config-card">
+    <div class="card-title">🔗 Backend Connection</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+      Point this dashboard to your backend server. Leave blank if the frontend is served directly by the backend (same origin).
+    </p>
+    <div class="input-row">
+      <input type="text" id="backend-url-input" placeholder="https://your-backend.replit.app  (leave blank for same-origin)" style="font-size:13px;" />
+      <button onclick="saveBackendUrl()" style="white-space:nowrap;">💾 Save</button>
+      <button class="muted" onclick="clearBackendUrl()" style="white-space:nowrap;">✕ Clear</button>
+    </div>
+    <div id="backend-url-status" style="font-size:12px;margin-top:8px;color:var(--muted);"></div>
+  </div>
+
   <!-- ── Stats ── -->
   <div class="card">
     <div class="card-title">Live Stats</div>
@@ -622,6 +636,58 @@
   let qrRendered = false;
   let lastConnected = null;
 
+  // ── Backend URL Config ──
+  const BACKEND_KEY = 'mfg_backend_url';
+  function getBaseUrl() {
+    const stored = localStorage.getItem(BACKEND_KEY) || '';
+    return stored.replace(/\/$/, ''); // strip trailing slash
+  }
+  function api(path) {
+    return getBaseUrl() + path;
+  }
+  function saveBackendUrl() {
+    const val = document.getElementById('backend-url-input').value.trim().replace(/\/$/, '');
+    if (val && !/^https?:\/\//i.test(val)) {
+      toast('URL must start with http:// or https://', 'err'); return;
+    }
+    if (val) localStorage.setItem(BACKEND_KEY, val);
+    else localStorage.removeItem(BACKEND_KEY);
+    updateBackendStatus();
+    toast(val ? '✅ Backend URL saved — reconnecting...' : '✅ Cleared — using same-origin', 'ok');
+    setTimeout(pollStatus, 500);
+  }
+  function clearBackendUrl() {
+    localStorage.removeItem(BACKEND_KEY);
+    document.getElementById('backend-url-input').value = '';
+    updateBackendStatus();
+    toast('✅ Cleared — using same-origin', 'ok');
+    setTimeout(pollStatus, 500);
+  }
+  function updateBackendStatus() {
+    const url = getBaseUrl();
+    const el = document.getElementById('backend-url-status');
+    const inp = document.getElementById('backend-url-input');
+    if (url) {
+      inp.value = url;
+      el.innerHTML = `Pointing to: <strong style="color:var(--accent)">${url}</strong>`;
+    } else {
+      el.textContent = 'Using same-origin (backend serves this page)';
+    }
+  }
+
+  // ── Fetch interceptor — prepend base URL to all /api/ and /webhook/ calls ──
+  // This means every fetch("/api/...") call automatically hits the configured backend,
+  // even when the frontend is hosted on a different domain.
+  (function () {
+    const _fetch = window.fetch.bind(window);
+    window.fetch = function (url, opts) {
+      if (typeof url === 'string' && (url.startsWith('/api/') || url.startsWith('/webhook'))) {
+        url = getBaseUrl() + url;
+      }
+      return _fetch(url, opts);
+    };
+  })();
+
   // ── Toast ──
   function toast(msg, type = "ok") {
     const el = document.getElementById("toast");
@@ -643,7 +709,7 @@
   function renderQr() {
     const img = document.getElementById("qr-img");
     const ts = Date.now();
-    img.src = "/api/qr/image?t=" + ts;
+    img.src = api("/api/qr/image") + "?t=" + ts;
     qrTimestamp = ts;
     qrRendered = true;
   }
@@ -777,7 +843,8 @@
     if (e.key === "Enter") requestPairingCode();
   });
 
-  // ── Poll on load and every 5s ──
+  // ── Init backend config then start polling ──
+  updateBackendStatus();
   pollStatus();
   setInterval(pollStatus, 5000);
 
