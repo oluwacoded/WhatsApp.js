@@ -125,6 +125,7 @@ let userData = readJSON("users.json", {});
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
+let _pairInProgress = false; // set true while /api/pair tears down socket — suppresses duplicate reconnect
 const activePersona = new Map(); // jid → persona name (e.g. "Burna Boy")
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
@@ -1091,17 +1092,23 @@ async function connectToWhatsApp() {
         consecutive401s = 0; reconnectCount = 0; pendingPairPhone = null;
       }
       if (shouldReconnect) {
-        reconnectCount++;
-        // 515 = "restart required" (normal post-pair) → reconnect FAST
-        // post-pair-restart (any code, no prior open) → reconnect FAST so creds get used
-        // otherwise standard backoff
-        const fastReconnect = code === 515 || isPostPairRestart;
-        // Add random jitter to reconnection so it never fires on a predictable schedule
-        const baseDelay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
-        const jitter = fastReconnect ? 0 : Math.floor(Math.random() * 4000);
-        const delay = baseDelay + jitter;
-        console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
-        setTimeout(connectToWhatsApp, delay);
+        // If /api/pair intentionally tore down this socket, it will call
+        // connectToWhatsApp() itself — skip the duplicate reconnect here.
+        if (_pairInProgress) {
+          console.log("[MFG_bot] Disconnect triggered by pair-switch — skipping auto-reconnect (pair handler will do it)");
+        } else {
+          reconnectCount++;
+          // 515 = "restart required" (normal post-pair) → reconnect FAST
+          // post-pair-restart (any code, no prior open) → reconnect FAST so creds get used
+          // otherwise standard backoff
+          const fastReconnect = code === 515 || isPostPairRestart;
+          // Add random jitter to reconnection so it never fires on a predictable schedule
+          const baseDelay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
+          const jitter = fastReconnect ? 0 : Math.floor(Math.random() * 4000);
+          const delay = baseDelay + jitter;
+          console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
+          setTimeout(connectToWhatsApp, delay);
+        }
       }
     }
   });
@@ -3738,11 +3745,15 @@ async function handlePair(req, res) {
     }, 50000);
   });
 
-  // Tear down the existing socket to force a fresh connection in pairing mode
+  // Tear down the existing socket to force a fresh connection in pairing mode.
+  // Set _pairInProgress BEFORE ending the socket so the disconnect handler knows
+  // NOT to schedule its own reconnect — we'll call connectToWhatsApp() ourselves.
+  _pairInProgress = true;
   if (sock) {
     try { sock.ev.removeAllListeners(); sock.end(new Error("switching to pairing code")); } catch (e) {}
     sock = null;
   }
+  _pairInProgress = false;
   connectToWhatsApp();
 
   const result = await codePromise;
@@ -4670,14 +4681,19 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   }, 3000); // wait 3s so WhatsApp connection is ready before we fire alerts
 });
 
+let _portRetries = 0;
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`[MFG_bot] Port ${PORT} in use — killing old process and retrying...`);
-    const { execSync } = require("child_process");
-    try { execSync(`fuser -k ${PORT}/tcp`, { stdio: "ignore" }); } catch {}
-    setTimeout(() => {
-      server.listen(PORT, "0.0.0.0");
-    }, 2000);
+    _portRetries++;
+    if (_portRetries > 3) {
+      console.error(`[MFG_bot] Port ${PORT} still busy after ${_portRetries} attempts — exiting so process manager can restart fresh`);
+      process.exit(1);
+    }
+    console.error(`[MFG_bot] Port ${PORT} in use (attempt ${_portRetries}) — freeing and retrying in 3s...`);
+    const { exec } = require("child_process");
+    exec(`lsof -ti:${PORT} | xargs kill -9 2>/dev/null; true`, () => {
+      setTimeout(() => server.listen(PORT, "0.0.0.0"), 3000);
+    });
   } else {
     console.error("[MFG_bot] Server error:", err);
     process.exit(1);
