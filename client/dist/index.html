@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MFG Bot — Control Panel</title>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -204,10 +203,14 @@
       border-radius: 10px;
       border: 1px solid var(--border);
     }
-    #qr-canvas-wrap canvas {
+    #qr-img {
       border-radius: 8px;
       background: #fff;
       padding: 10px;
+      width: 240px;
+      height: 240px;
+      object-fit: contain;
+      display: block;
     }
     #qr-canvas-wrap p {
       font-size: 13px;
@@ -337,7 +340,7 @@
     <div class="card">
       <div class="card-title">Scan QR Code</div>
       <div id="qr-canvas-wrap">
-        <canvas id="qr-canvas"></canvas>
+        <img id="qr-img" src="" alt="QR Code" />
         <p>Open WhatsApp → Settings → Linked Devices → Link a Device → scan this code</p>
       </div>
       <div class="divider">or use phone number pairing below</div>
@@ -436,16 +439,14 @@
     return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
   }
 
-  // ── Render QR ──
-  async function renderQr(qrData) {
-    if (qrRendered && currentQr === qrData) return;
-    currentQr = qrData;
+  // ── Render QR — uses server-side image endpoint ──
+  let qrTimestamp = 0;
+  function renderQr() {
+    const img = document.getElementById("qr-img");
+    const ts = Date.now();
+    img.src = "/api/qr/image?t=" + ts;
+    qrTimestamp = ts;
     qrRendered = true;
-    const canvas = document.getElementById("qr-canvas");
-    QRCode.toCanvas(canvas, qrData, {
-      width: 220, margin: 1,
-      color: { dark: "#000000", light: "#ffffff" }
-    });
   }
 
   // ── Poll /api/status ──
@@ -490,11 +491,8 @@
         danger.style.display   = "none";
         lastConnected = false;
 
-        // Fetch and render QR
-        try {
-          const qr = await fetch("/api/qr");
-          if (qr.ok) { const qd = await qr.json(); renderQr(qd.qr); }
-        } catch {}
+        // Render QR from server-side image endpoint
+        renderQr();
 
       } else {
         // OFFLINE / disconnected

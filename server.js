@@ -65,7 +65,7 @@ const SETTINGS_DEFAULTS = {
   moodAware: true,              // Adjust tone by time of day
   antiScam: true,               // Detect scam patterns, alert owner
   birthdayWishes: true,         // Auto-wish birthdays mentioned in chat
-  voiceCloneEnabled: false,     // Requires ELEVENLABS_API_KEY + voice ID
+  voiceCloneEnabled: false,
   voiceReplyMode: "off",        // "off" | "auto" (every reply) | "owner" (only when owner asks .voice me)
   greeting: "yo. mfg_bot here.",
   systemPrompt: `You are texting AS the owner of this phone — you ARE them. Not a bot, not an assistant. Just them.
@@ -106,20 +106,11 @@ WHEN UNSURE: Just be short, lowercase, casual. One word answers are fine. "yo", 
 let settings = { ...SETTINGS_DEFAULTS, ...readJSON("settings.json", {}) };
 delete settings.paymentsEnabled;
 
-// ─── Flutterwave Keys ────────────────────────────────────────────────────────
-const FLW_SECRET = process.env.FLW_SECRET_KEY || "";
-const FLW_PUBLIC = process.env.FLW_PUBLIC_KEY || "";
-const FLW_ENCRYPT = process.env.FLW_ENCRYPTION_KEY || "";
-let ghostBankData = readJSON("ghostBank.json", {}); // jid → { accountNumber, bankName, acctName, txRef, balance }
-
 let tokenData = readJSON("tokenData.json", {
   validTokens: [ "a7F9kLm2Qx8P", "Zr4Tn8Vy1Bc6", "pQ5mX2sL9dKe", "H8uJ3wRt7Nz1", "yL0cV6kPq4Xm", "T9bF2nGh5Wr8", "mX7qL1zCv9Dt", "R4pNk8Jw2Ys5", "vD6tQ3mLp1Xc", "K2yW9nFr5Tb7", "cM8xQ4vL1zHp", "P5rT7nYk2Wd9", "fJ3mX8qLc6Vz", "N1wK4tRp9Ys2", "zQ7vM2xLf5Dc", "B9kT3nWy8Rp1", "gL4xQ7mVc2Dt", "W6pNz1kY5Rf8", "tX2mL9qCv4Jh", "Y8rK5nWp1Dz3", "qF7vM2xLc9Tb", "D1kY4nRp8Ws5", "mQ9xL2vTc7Fh", "R5pNz8kW1Dy4", "cX3mL7qVf2Tn", "T8rK1nWp5Dz9", "zF4vM7xLc2Tb", "B1kY9nRp4Ws8", "gQ5xL2vTc8Fh", "W7pNz1kY4Rf9", "tX8mL3qCv5Jh", "Y2rK9nWp1Dz6", "qF5vM8xLc4Tb", "D7kY1nRp9Ws2", "mQ4xL8vTc5Fh", "R1pNz7kW2Dy9", "cX5mL9qVf1Tn", "T2rK8nWp4Dz7", "zF1vM5xLc9Tb", "B8kY2nRp6Ws4", "gQ7xL1vTc5Fh", "W9pNz4kY2Rf8", "tX6mL3qCv1Jh", "Y5rK8nWp2Dz9", "qF1vM4xLc7Tb", "D9kY5nRp2Ws8", "mQ3xL7vTc1Fh", "R8pNz2kW5Dy4", "cX1mL6qV9Tn3", "T5rK2nWp8Dz1", "zF9vM3xLc7Tb", "B4kY8nRp1Ws5", "gQ2xL9vTc6Fh", "W1pNz5kY8Rf3", "tX4mL7qCv2Jh", "Y9rK1nWp6Dz5", "qF3vM8xLc2Tb", "D5kY7nRp4Ws1", "mQ1xL6vTc9Fh", "R2pNz8kW3Dy7", "cX9mL4qV1Tn5", "T7rK3nWp9Dz2", "zF2vM6xLc8Tb", "B5kY1nRp7Ws9", "gQ8xL4vTc2Fh", "W3pNz9kY1Rf6", "tX5mL2qCv8Jh", "Y1rK7nWp4Dz9", "qF6vM3xLc5Tb", "D8kY2nRp9Ws4", "mQ7xL1vTc3Fh", "R4pNz6kW8Dy2", "cX2mL9qV5Tn1", "T1rK8nWp3Dz7", "zF5vM7xLc4Tb", "B2kY9nRp6Ws1", "gQ4xL8vTc5Fh", "W6pNz1kY7Rf2", "tX9mL3qCv4Jh", "Y7rK5nWp1Dz8", "qF2vM9xLc6Tb", "D4kY7nRp3Ws5", "mQ8xL1vTc2Fh", "R9pNz5kW4Dy1", "cX6mL2qV8Tn7", "T3rK9nWp5Dz1", "zF7vM4xLc1Tb", "B1kY5nRp8Ws3", "gQ9xL2vTc4Fh", "W5pNz8kY1Rf7", "tX1mL6qCv9Jh", "Y4rK2nWp7Dz5", "qF8vM1xLc3Tb", "D2kY6nRp9Ws4", "mQ5xL7vTc1Fh", "R3pNz4kW8Dy2", "cX7mL1qV5Tn9", "T9rK4nWp2Dz6", "zF3vM8xLc5Tb", "B6kY1nRp7Ws2" ],
   usedTokens: {},
   authorizedUsers: {}
 });
-
-// Auto-flip voiceClone on if both ElevenLabs env vars are present
-if (process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID) settings.voiceCloneEnabled = true;
 
 // Ensure maker is recognized
 if (!settings.systemPrompt.includes("+23409132883869")) {
@@ -263,49 +254,6 @@ let pairCodeResolve = null;    // Promise resolver waiting for the code
 
 function trackCommand(cmd) {
   commandStats[cmd] = (commandStats[cmd] || 0) + 1;
-}
-
-// ─── ElevenLabs Voice Synthesis ──────────────────────────────────────────────
-// Auto-enables when both ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID env vars are set
-async function synthesizeVoice(text) {
-  if (!process.env.ELEVENLABS_API_KEY || !process.env.ELEVENLABS_VOICE_ID) return null;
-  if (!text || text.length > 500) return null; // keep voice notes short
-  try {
-    const https = require("https");
-    const body = JSON.stringify({
-      text,
-      model_id: "eleven_turbo_v2_5",
-      voice_settings: { stability: 0.45, similarity_boost: 0.75, style: 0.30, use_speaker_boost: true }
-    });
-    const audio = await new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: "api.elevenlabs.io",
-        path: `/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128`,
-        method: "POST",
-        headers: {
-          "xi-api-key": process.env.ELEVENLABS_API_KEY,
-          "Content-Type": "application/json",
-          "Accept": "audio/mpeg",
-          "Content-Length": Buffer.byteLength(body)
-        }
-      }, (res) => {
-        if (res.statusCode !== 200) {
-          let err = ""; res.on("data", c => err += c); res.on("end", () => reject(new Error(`ElevenLabs ${res.statusCode}: ${err.slice(0,200)}`)));
-          return;
-        }
-        const chunks = [];
-        res.on("data", c => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-        res.on("error", reject);
-      });
-      req.on("error", reject);
-      req.write(body); req.end();
-    });
-    return audio;
-  } catch (e) {
-    console.log("[MFG_bot] ElevenLabs error:", e.message);
-    return null;
-  }
 }
 
 // ─── Owner Config ────────────────────────────────────────────────────────────
@@ -2189,124 +2137,6 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // .pay — Flutterwave GHOST BANK virtual account
-        if (cmd === "pay" || cmd === "bank" || cmd === "ghostbank") {
-          const sub = args[0]?.toLowerCase();
-          const senderPhone = (participantJid || from).split("@")[0].replace(/[^0-9]/g, "");
-          const senderName = msg?.pushName || msg?.verifiedBizName || `User_${senderPhone.slice(-4)}`;
-          const jidKey = (participantJid || from);
-
-          if (sub === "balance") {
-            const acct = ghostBankData[jidKey];
-            if (!acct) { await send("You don't have a GHOST BANK account yet. Type *.pay* to create one."); continue; }
-            await send(`🏦 *GHOST BANK MFG*\n\n👤 Name: ${acct.acctName}\n🏛 Bank: ${acct.bankName || "Sterling Bank"}\n💳 Account: ${acct.accountNumber}\n💰 Balance: ₦${(acct.balance || 0).toLocaleString()}\n\n_Type .pay history for transactions_`);
-            continue;
-          }
-
-          if (sub === "history") {
-            const acct = ghostBankData[jidKey];
-            if (!acct) { await send("No account found. Type *.pay* to create one."); continue; }
-            const txs = acct.transactions || [];
-            if (!txs.length) { await send("No transactions yet. Share your account number to receive funds."); continue; }
-            const lines = txs.slice(-10).map(t => `${t.type === "credit" ? "➕" : "➖"} ₦${t.amount.toLocaleString()} — ${t.note || "transfer"} (${t.date})`).join("\n");
-            await send(`📋 *GHOST BANK — Transaction History*\n\n${lines}\n\n💰 Balance: ₦${(acct.balance || 0).toLocaleString()}`);
-            continue;
-          }
-
-
-          // Default: create / show account
-          // Auto-renew if account expired (temporary accounts expire after ~1hr)
-          if (ghostBankData[jidKey]?.accountNumber && ghostBankData[jidKey]?.expiresAt) {
-            if (new Date() > new Date(ghostBankData[jidKey].expiresAt)) {
-              console.log(`[GhostBank] Account expired for ${jidKey} — will auto-renew`);
-              // Keep balance and transaction history, but clear account number to trigger re-creation
-              ghostBankData[jidKey]._oldBalance = ghostBankData[jidKey].balance || 0;
-              ghostBankData[jidKey]._oldTxs = ghostBankData[jidKey].transactions || [];
-              delete ghostBankData[jidKey].accountNumber;
-            }
-          }
-
-          if (ghostBankData[jidKey]?.accountNumber) {
-            const acct = ghostBankData[jidKey];
-            await send(`🏦 *GHOST BANK MFG*\n━━━━━━━━━━━━━━━━━━━━\n\n👤 *Account Name:* ${acct.acctName}\n🏛 *Bank:* ${acct.bankName || "Sterling Bank"}\n💳 *Account Number:* ${acct.accountNumber}\n💰 *Balance:* ₦${(acct.balance || 0).toLocaleString()}\n\n━━━━━━━━━━━━━━━━━━━━\n📲 Share this account to receive payments.\n\n*.pay balance* — check balance\n*.pay history* — view transactions\n\n_Powered by GHOST BANK MFG 🔥_`);
-            continue;
-          }
-
-          // Create new Flutterwave virtual account
-          await send("🏦 *Creating your GHOST BANK account...*");
-          try {
-            const txRef = `GHOST_${senderPhone}_${Date.now()}`;
-
-            // is_permanent: false works without BVN/NIN verification
-            // duration: 525600 = 365 days in minutes (1 year)
-            // is_permanent: true as a fallback (may work on fully-verified Flutterwave accounts)
-            const basePayload = {
-              email: `wa_${senderPhone}@ghostbank.mfg`,
-              is_permanent: false,
-              tx_ref: txRef,
-              narration: senderName,
-              currency: "NGN",
-              amount: 100,
-              frequency: 1000,
-              duration: 525600
-            };
-
-            let flwData = null;
-            let attempt = 0;
-            const payloads = [
-              basePayload,
-              { ...basePayload, is_permanent: true, frequency: undefined, duration: undefined }
-            ];
-
-            for (const payload of payloads) {
-              attempt++;
-              try {
-                console.log(`[MFG_bot] Flutterwave attempt ${attempt}...`);
-                const flwRes = await fetch("https://api.flutterwave.com/v3/virtual-account-numbers", {
-                  method: "POST",
-                  headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
-                  body: JSON.stringify(payload),
-                  signal: AbortSignal.timeout(15000)
-                });
-                flwData = await flwRes.json().catch(() => null);
-                console.log(`[MFG_bot] Flutterwave attempt ${attempt} response:`, JSON.stringify(flwData)?.slice(0, 200));
-                if (flwData?.status === "success" && flwData?.data?.account_number) break;
-                flwData = null;
-              } catch (e) { console.log(`[MFG_bot] FLW attempt ${attempt} err:`, e.message); }
-            }
-
-            if (flwData?.status === "success" && flwData?.data?.account_number) {
-              const d = flwData.data;
-              // Restore balance/transactions if this is a renewal of an expired account
-              const prevBalance = ghostBankData[jidKey]?._oldBalance || 0;
-              const prevTxs    = ghostBankData[jidKey]?._oldTxs    || [];
-              // Store expiry so auto-renewal knows when to refresh the account number
-              const expiresAt = d.expiry_date ? new Date(d.expiry_date.replace(" ", "T") + "Z").toISOString() : null;
-              ghostBankData[jidKey] = {
-                accountNumber: d.account_number,
-                bankName: d.bank_name || "Sterling Bank",
-                acctName: d.account_name || senderName,
-                txRef,
-                balance: prevBalance,
-                transactions: prevTxs,
-                createdAt: new Date().toISOString(),
-                ...(expiresAt && { expiresAt })
-              };
-              writeJSON("ghostBank.json", ghostBankData);
-              const isRenewal = prevBalance > 0 || prevTxs.length > 0;
-              const balanceText = isRenewal ? `₦${prevBalance.toLocaleString()} (carried over)` : "₦0.00";
-              await send(`✅ *GHOST BANK MFG — Account ${isRenewal ? "Renewed" : "Created"}!* 🎉\n\n━━━━━━━━━━━━━━━━━━━━\n👤 *Name:* ${ghostBankData[jidKey].acctName}\n🏛 *Bank:* ${ghostBankData[jidKey].bankName}\n💳 *Account Number:* ${ghostBankData[jidKey].accountNumber}\n💰 *Balance:* ${balanceText}\n━━━━━━━━━━━━━━━━━━━━\n\n📲 Share this number to receive payments!\nFunds reflect automatically when paid.\n\n*.pay balance* — check balance\n*.pay history* — view transactions\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`);
-            } else {
-              const errMsg = flwData?.message || "API unavailable";
-              await send(`❌ Could not create account: ${errMsg}\n\nContact *+2349132883869* for manual setup.`);
-            }
-          } catch (e) {
-            console.log("[MFG_bot] Flutterwave error:", e.message);
-            await send("❌ Bank service temporarily down. Try again in a moment or contact *+2349132883869*.");
-          }
-          continue;
-        }
-
         // .bcast <message> — auto-broadcast to ALL contacts (owner only)
         if (cmd === "bcast" || cmd === "autobroadcast") {
           if (!senderIsOwner) { await send("owner only."); continue; }
@@ -2330,56 +2160,6 @@ async function connectToWhatsApp() {
             } catch (e) { failed++; }
           }
           await send(`✅ *Broadcast Complete*\n\n📤 Sent: ${sent}\n❌ Failed: ${failed}\n📊 Total: ${contacts.length}`);
-          continue;
-        }
-
-        // .paylink <amount> [description] — generate a Flutterwave payment link
-        if (cmd === "paylink" || cmd === "plink" || cmd === "charge") {
-          const amountArg = args[0];
-          const desc = args.slice(1).join(" ").trim() || "Payment to teddymfg";
-          if (!amountArg || isNaN(Number(amountArg))) {
-            await send(`💳 *.paylink <amount> [description]*\n\nExamples:\n.paylink 3000\n.paylink 5000 For premium access\n.paylink 1500 Bot subscription\n\n_Generates a Flutterwave payment link instantly_`);
-            continue;
-          }
-          const amount = Number(amountArg);
-          if (amount < 100) { await send("❌ Minimum amount is ₦100"); continue; }
-          await send("💳 *Generating payment link...*");
-          try {
-            const txRef = `MFG_${Date.now()}_${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-            const payload = {
-              tx_ref: txRef,
-              amount,
-              currency: "NGN",
-              redirect_url: "https://teddymfg.com/thanks",
-              meta: { source: "mfg_bot_whatsapp" },
-              customer: {
-                email: "customer@mfgbot.ng",
-                name: "MFG Bot Customer"
-              },
-              customizations: {
-                title: "MFG Bot Payment",
-                description: desc,
-                logo: ""
-              },
-              payment_options: "card,banktransfer,ussd"
-            };
-            const flwRes = await fetch("https://api.flutterwave.com/v3/payments", {
-              method: "POST",
-              headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-              signal: AbortSignal.timeout(15000)
-            });
-            const flwData = await flwRes.json().catch(() => null);
-            console.log("[MFG_bot] Paylink response:", JSON.stringify(flwData)?.slice(0, 200));
-            if (flwData?.status === "success" && flwData?.data?.link) {
-              await send(`✅ *PAYMENT LINK GENERATED* 💳\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *Amount:* ₦${amount.toLocaleString()}\n📝 *Description:* ${desc}\n━━━━━━━━━━━━━━━━━━━━\n\n🔗 *Link:*\n${flwData.data.link}\n\n━━━━━━━━━━━━━━━━━━━━\n_Accepts: Card • Bank Transfer • USSD_\n_Ref: ${txRef}_\n\n_GHOST BANK MFG — built by teddymfg 🔥_`);
-            } else {
-              await send(`❌ Could not generate link: ${flwData?.message || "API error"}`);
-            }
-          } catch (e) {
-            console.log("[MFG_bot] Paylink error:", e.message);
-            await send("❌ Payment service error. Try again in a moment.");
-          }
           continue;
         }
 
@@ -2730,21 +2510,7 @@ async function connectToWhatsApp() {
           continue;
         }
         if (cmd === "voice" || cmd === "voicereply") {
-          if (!senderIsOwner) { await send("owner only."); continue; }
-          const sub = args[0]?.toLowerCase();
-          if (!process.env.ELEVENLABS_API_KEY) { await send("⚠️ ELEVENLABS_API_KEY env var not set on this backend.\nAdd it on Railway: Settings → Variables → ELEVENLABS_API_KEY"); continue; }
-          if (!process.env.ELEVENLABS_VOICE_ID) { await send("⚠️ ELEVENLABS_VOICE_ID env var not set.\n1. Clone your voice on elevenlabs.io (Voice Lab → Instant Voice Clone)\n2. Copy the Voice ID from the voice you created\n3. Add ELEVENLABS_VOICE_ID env var on Railway"); continue; }
-          if (sub === "on" || sub === "auto") { settings.voiceReplyMode = "auto"; settings.voiceCloneEnabled = true; writeJSON("settings.json", settings); await send("🎤 voice replies ON — every AI reply (≤300 chars) will be sent as a voice note in your cloned voice"); }
-          else if (sub === "off") { settings.voiceReplyMode = "off"; writeJSON("settings.json", settings); await send("🔴 voice replies OFF — back to text"); }
-          else if (sub === "test") {
-            const testText = args.slice(1).join(" ") || "yo this is teddy, voice clone working sharp sharp";
-            await send("🎤 testing voice synth...");
-            const audio = await synthesizeVoice(testText);
-            if (!audio) { await send("❌ ElevenLabs synth failed — check key/voice ID/quota"); continue; }
-            try { await sock.sendMessage(from, { audio, mimetype: "audio/mpeg", ptt: true }); }
-            catch (e) { await send("❌ send failed: " + e.message); }
-          }
-          else await send(`🎤 voice clone (ElevenLabs)\nstatus: ${settings.voiceReplyMode === "auto" ? "🟢 auto (every reply as voice)" : "🔴 off"}\nkey: ${process.env.ELEVENLABS_API_KEY?"✅":"❌"} | voice id: ${process.env.ELEVENLABS_VOICE_ID?"✅":"❌"}\n\n.voice on    — every AI reply becomes a voice note\n.voice off   — back to text\n.voice test [text] — test the clone now`);
+          await send("voice clone feature has been removed from this bot.");
           continue;
         }
         if (cmd === "createacct" || cmd === "btc") {
@@ -3040,51 +2806,6 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // ── .bank — alias for .pay (ghost bank shortcut) ─────────────────
-        if (cmd === "bank" || cmd === "account" || cmd === "acct") {
-          const sub = args[0]?.toLowerCase();
-          const senderPhone2 = (participantJid || from).split("@")[0].replace(/[^0-9]/g, "");
-          const jidKey2 = (participantJid || from);
-          if (ghostBankData[jidKey2]?.accountNumber) {
-            const acct = ghostBankData[jidKey2];
-            await send(`🏦 *GHOST BANK MFG*\n\n👤 *${acct.acctName}*\n🏛 ${acct.bankName || "Sterling Bank"}\n💳 *${acct.accountNumber}*\n💰 Balance: ₦${(acct.balance || 0).toLocaleString()}\n\n*.pay balance* • *.pay history*`);
-          } else {
-            await send("you don't have a ghost bank account yet.\ntype *.pay* to create one — takes 5 seconds 🏦");
-          }
-          continue;
-        }
-
-        // ── .sendpaylink <number> <amount> [desc] — send paylink to a number ──
-        if (cmd === "sendpaylink" || cmd === "splink") {
-          if (!senderIsOwner) { await send("owner only."); continue; }
-          const numArg = args[0]?.replace(/\D/g, "");
-          const amountArg2 = args[1];
-          const desc2 = args.slice(2).join(" ").trim() || "Payment to teddymfg";
-          if (!numArg || !amountArg2 || isNaN(Number(amountArg2))) {
-            await send("*.sendpaylink <number> <amount> [desc]*\nexample: .sendpaylink 08012345678 5000 For premium access");
-            continue;
-          }
-          const amount2 = Number(amountArg2);
-          try {
-            const txRef2 = `MFG_${Date.now()}_${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-            const flwRes2 = await fetch("https://api.flutterwave.com/v3/payments", {
-              method: "POST",
-              headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ tx_ref: txRef2, amount: amount2, currency: "NGN", redirect_url: "https://teddymfg.com/thanks", customer: { email: `wa_${numArg}@mfgbot.ng`, name: numArg }, customizations: { title: "MFG Bot Payment", description: desc2 }, payment_options: "card,banktransfer,ussd" }),
-              signal: AbortSignal.timeout(15000)
-            });
-            const flwData2 = await flwRes2.json().catch(() => null);
-            if (flwData2?.status === "success" && flwData2?.data?.link) {
-              const targetJid = `${numArg.replace(/^0/, "234")}@s.whatsapp.net`;
-              await sock.sendMessage(targetJid, { text: `💳 *PAYMENT REQUEST*\n\nYou have a payment of *₦${amount2.toLocaleString()}* from teddymfg.\n\n📝 ${desc2}\n\n🔗 *Pay here:*\n${flwData2.data.link}\n\n_Accepts: Card • Bank Transfer • USSD_\n_Powered by GHOST BANK MFG 🔥_` });
-              await send(`✅ Payment link (₦${amount2.toLocaleString()}) sent to ${numArg}`);
-            } else {
-              await send(`❌ Failed: ${flwData2?.message || "API error"}`);
-            }
-          } catch (e) { await send("❌ Error: " + e.message); }
-          continue;
-        }
-
         // ── .nairarate — live NGN exchange rates ──────────────────────────
         if (cmd === "nairarate" || cmd === "rate" || cmd === "usdngn") {
           try {
@@ -3224,39 +2945,12 @@ async function connectToWhatsApp() {
           const w = getWallet(from);
 
           if (!sub || sub === "balance" || sub === "bal") {
-            const FLW_SECRET = process.env.FLW_SECRET_KEY;
-            const topupHint = FLW_SECRET ? "\n\n💳 *.wallet topup <amount>* — Add NGN funds" : "\n\n📞 Contact owner to top up your wallet";
-            await send(`💰 *Your Wallet*\n\n━━━━━━━━━━━━━━━━\n Balance: *₦${w.balance.toLocaleString()}*\n━━━━━━━━━━━━━━━━${topupHint}\n📋 *.wallet history* — View transactions`);
+            await send(`💰 *Your Wallet*\n\n━━━━━━━━━━━━━━━━\n Balance: *₦${w.balance.toLocaleString()}*\n━━━━━━━━━━━━━━━━\n\n📞 Contact owner to top up your wallet\n📋 *.wallet history* — View transactions`);
             continue;
           }
 
           if (sub === "topup" || sub === "fund" || sub === "add") {
-            const amount = parseInt(args[1]);
-            if (isNaN(amount) || amount < 100) { await send("💳 *.wallet topup <amount>*\nMinimum top-up: ₦100\n\nExample: .wallet topup 5000"); continue; }
-            const FLW_SECRET = process.env.FLW_SECRET_KEY;
-            if (!FLW_SECRET) { await send(`💳 *Wallet Top-Up: ₦${amount.toLocaleString()}*\n\nOnline payment not yet configured.\n\n📞 Contact the owner to manually credit your wallet.\n\nOwner: *+${OWNER_NUMBER}*`); continue; }
-            try {
-              const txRef = `WALLET_${from.split("@")[0]}_${Date.now()}`;
-              const flwRes = await fetch("https://api.flutterwave.com/v3/payments", {
-                method: "POST",
-                headers: { "Authorization": `Bearer ${FLW_SECRET}`, "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  tx_ref: txRef, amount, currency: "NGN",
-                  redirect_url: `https://${process.env.REPLIT_DEV_DOMAIN || "localhost:5000"}/wallet/callback`,
-                  customer: { email: `wa_${from.split("@")[0]}@mfgbot.ng`, name: from.split("@")[0] },
-                  customizations: { title: "MFG Bot Wallet", description: `Top up ₦${amount.toLocaleString()}` },
-                  payment_options: "card,banktransfer,ussd",
-                  meta: { jid: from, type: "wallet_topup", amount }
-                }),
-                signal: AbortSignal.timeout(15000)
-              });
-              const flwData = await flwRes.json().catch(() => null);
-              if (flwData?.status === "success" && flwData?.data?.link) {
-                await send(`💳 *Wallet Top-Up*\n\nAmount: *₦${amount.toLocaleString()}*\n\n🔗 Pay here:\n${flwData.data.link}\n\n_Your wallet will be credited automatically after payment._\n_Accepts: Card • Bank Transfer • USSD_`);
-              } else {
-                await send(`❌ Could not generate payment link.\n\nContact owner to manually credit ₦${amount.toLocaleString()}: *+${OWNER_NUMBER}*`);
-              }
-            } catch (e) { await send("❌ Payment error: " + e.message); }
+            await send(`💳 *Wallet Top-Up*\n\nTo add funds to your wallet, contact the owner: *+${OWNER_NUMBER}*`);
             continue;
           }
 
@@ -3865,30 +3559,6 @@ setInterval(async () => {
   }
 }, 15 * 60 * 1000);
 
-// ─── Wallet Payment Webhook (Flutterwave callback) ────────────────────────────
-app.get("/wallet/callback", (req, res) => {
-  res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>✅ Payment Received!</h2><p>Your MFG Bot wallet is being credited. Return to WhatsApp and type <b>.wallet</b> to check your balance.</p></body></html>`);
-});
-app.post("/webhook/wallet", async (req, res) => {
-  const FLW_SECRET = process.env.FLW_SECRET_KEY;
-  if (!FLW_SECRET) return res.sendStatus(400);
-  try {
-    const { status, meta, amount, currency } = req.body?.data || {};
-    if (status !== "successful" || currency !== "NGN") return res.sendStatus(200);
-    const jid = meta?.jid;
-    const amt = parseInt(meta?.amount || amount || 0);
-    if (!jid || !amt) return res.sendStatus(200);
-    walletCredit(jid, amt, `Flutterwave top-up ₦${amt.toLocaleString()}`);
-    console.log(`[Wallet] Credited ₦${amt} to ${jid}`);
-    if (isConnected && sock) {
-      try {
-        await sock.sendMessage(jid, { text: `💰 *Wallet Credited!*\n\nAmount: *₦${amt.toLocaleString()}*\nNew balance: *₦${getWallet(jid).balance.toLocaleString()}*\n\n🛒 *.smm list* — Browse services\n📦 *.smm search <keyword>* — Find a service` });
-      } catch {}
-    }
-    res.sendStatus(200);
-  } catch (e) { console.log("[Wallet webhook error]", e.message); res.sendStatus(500); }
-});
-
 // ─── Presence Heartbeat — keep WhatsApp showing "online" when .online mode is on ──
 setInterval(async () => {
   if (!isConnected || !sock || !settings.onlineMode) return;
@@ -3962,6 +3632,19 @@ app.get("/api/diag", async (req, res) => {
 app.get("/api/qr", (req, res) =>
   currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "no qr available" })
 );
+
+app.get("/api/qr/image", async (req, res) => {
+  if (!currentQr) return res.status(404).send("No QR available");
+  try {
+    const QRCode = require("qrcode");
+    const buf = await QRCode.toBuffer(currentQr, { width: 280, margin: 2 });
+    res.set("Content-Type", "image/png");
+    res.set("Cache-Control", "no-store");
+    res.send(buf);
+  } catch (e) {
+    res.status(500).send("QR render error: " + e.message);
+  }
+});
 
 // Pairing code — restarts the socket in phone-pairing mode (no QR conflict)
 // Accepts: POST {phone}  OR  GET ?number=...  OR  GET ?phone=...
@@ -4148,102 +3831,6 @@ app.delete("/api/bots/:id", (req, res) => {
   res.status(204).end();
 });
 
-// ─── PAYMENT EVENT PROCESSOR — runs on EVERY backend ────────────────────────
-// When any backend receives a payment (directly from FLW or forwarded from hub),
-// this function checks if it owns the account and updates the balance + WA notify.
-async function processPaymentEvent(payload) {
-  try {
-    const data = payload?.data || {};
-    const status = data.status;
-    if (status !== "successful") return false; // only process successful payments
-
-    // Always reload from disk so newly-created accounts are visible
-    const liveGhostBank = readJSON("ghostBank.json", {});
-    // Sync into the in-memory global so commands see the same data
-    Object.assign(ghostBankData, liveGhostBank);
-
-    const txRef       = data.tx_ref || data.txRef || "";
-    const accountNum  = data.account_number || data.meta?.account_number || "";
-    const amount      = Number(data.amount || 0);
-    const narration   = data.narration || data.meta?.narration || "";
-    const flwRef      = data.flw_ref || data.id || "";
-    const now         = new Date();
-    const dateStr     = now.toLocaleDateString("en-NG", { day: "2-digit", month: "short", year: "numeric" });
-
-    // Find which JID owns this account — match by txRef or account_number
-    let ownerJid = null;
-    for (const [jid, acct] of Object.entries(ghostBankData)) {
-      const matchTxRef  = txRef && acct.txRef === txRef;
-      const matchAccNum = accountNum && acct.accountNumber === accountNum;
-      if (matchTxRef || matchAccNum) { ownerJid = jid; break; }
-    }
-
-    if (!ownerJid) {
-      // Not our account — that's fine, another backend will handle it
-      console.log(`[Payment] Not our account — txRef:${txRef} acctNum:${accountNum}`);
-      return false;
-    }
-
-    // Duplicate guard — don't credit the same flwRef twice
-    const acct = ghostBankData[ownerJid];
-    const txList = acct.transactions || [];
-    if (flwRef && txList.some(t => t.flwRef === flwRef)) {
-      console.log(`[Payment] Duplicate event ignored — flwRef:${flwRef}`);
-      return true; // handled (already processed)
-    }
-
-    // Update balance and add transaction
-    const prevBalance = Number(acct.balance || 0);
-    const newBalance  = prevBalance + amount;
-    acct.balance = newBalance;
-    acct.transactions = [
-      ...txList,
-      { type: "credit", amount, flwRef, txRef, narration, date: dateStr, at: now.toISOString() }
-    ].slice(-50); // keep last 50 transactions
-    writeJSON("ghostBank.json", ghostBankData);
-
-    console.log(`[Payment] ✅ Balance updated for ${ownerJid}: ₦${prevBalance} → ₦${newBalance} (+₦${amount})`);
-
-    // Send WhatsApp notification to account owner
-    if (sock && isConnected) {
-      try {
-        await sock.sendMessage(ownerJid, {
-          text: `🏦 *GHOST BANK MFG — Credit Alert!* 💚\n\n━━━━━━━━━━━━━━━━━━━━\n➕ *₦${amount.toLocaleString()}* received\n📝 ${narration || "Transfer"}\n━━━━━━━━━━━━━━━━━━━━\n💰 *New Balance: ₦${newBalance.toLocaleString()}*\n📅 ${dateStr}\n🔖 Ref: ${flwRef || txRef}\n━━━━━━━━━━━━━━━━━━━━\n\n*.pay balance* — check balance\n*.pay history* — transaction history\n\n_GHOST BANK MFG — Powered by teddymfg 🔥_`
-        });
-        console.log(`[Payment] WA credit alert sent to ${ownerJid}`);
-      } catch (e) { console.log("[Payment] WA notify err:", e.message); }
-    }
-
-    // Also notify the owner's WhatsApp (the bot owner) about the inbound credit
-    if (sock && isConnected && OWNER_NUMBERS.length) {
-      const ownerPhone = OWNER_NUMBERS[0].replace(/[^0-9]/g, "");
-      const ownerWaJid = `${ownerPhone}@s.whatsapp.net`;
-      if (ownerWaJid !== ownerJid) {
-        try {
-          await sock.sendMessage(ownerWaJid, {
-            text: `💸 *GHOST BANK CREDIT*\n\n👤 ${acct.acctName}\n💳 ${acct.accountNumber}\n💰 +₦${amount.toLocaleString()}\n📝 ${narration || "Transfer"}\n🔖 ${flwRef || txRef}\n\nNew balance: ₦${newBalance.toLocaleString()}`
-          });
-        } catch {}
-      }
-    }
-    return true;
-  } catch (e) {
-    console.log("[Payment] processPaymentEvent err:", e.message);
-    return false;
-  }
-}
-
-// ── /webhook — endpoint exposed by EACH backend to receive forwarded events ──
-// The hub calls this on every backend when a payment arrives.
-// Also accepts direct Flutterwave webhooks (no verif-hash check needed here since hub already verified).
-app.post("/webhook", express.json(), async (req, res) => {
-  res.status(200).json({ status: "ok" }); // reply fast
-  const payload = req.body;
-  if (!payload) return;
-  // If forwarded from hub, payload IS the raw FLW payload
-  // If direct from FLW, same structure
-  await processPaymentEvent(payload);
-});
 
 // ─── FLUTTERWAVE WEBHOOK HUB ─────────────────────────────────────────────────
 // Single webhook URL for ALL your backends.
@@ -4252,7 +3839,7 @@ app.post("/webhook", express.json(), async (req, res) => {
 //              all registered backend URLs instantly, 4) retries any that failed
 //              5) exposes a polling endpoint so offline backends can catch up
 
-const WEBHOOK_SECRET = process.env.FLW_WEBHOOK_SECRET || FLW_SECRET.slice(0, 20);
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "mfg_webhook_secret_local";
 const WEBHOOK_EVENTS_FILE = "webhookEvents.json";
 const WEBHOOK_BACKENDS_FILE = "webhookBackends.json";
 const MAX_STORED_EVENTS = 500; // rolling window
@@ -4297,67 +3884,6 @@ async function forwardToAllBackends(event) {
   }
 }
 
-// ── Receive webhook from Flutterwave ────────────────────────────────────────
-app.post("/webhook/flutterwave", express.json(), async (req, res) => {
-  // Verify Flutterwave signature hash
-  const hash = req.headers["verif-hash"];
-  if (hash && WEBHOOK_SECRET && hash !== WEBHOOK_SECRET) {
-    console.log("[Webhook] ❌ Invalid signature hash");
-    return res.status(401).json({ error: "invalid signature" });
-  }
-
-  const payload = req.body;
-  const eventId = `flw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const event = {
-    id: eventId,
-    receivedAt: new Date().toISOString(),
-    type: payload?.event || "unknown",
-    status: payload?.data?.status || "unknown",
-    amount: payload?.data?.amount,
-    currency: payload?.data?.currency,
-    txRef: payload?.data?.tx_ref || payload?.data?.txRef,
-    flwRef: payload?.data?.flw_ref,
-    customerEmail: payload?.data?.customer?.email,
-    customerName: payload?.data?.customer?.name,
-    customerPhone: payload?.data?.customer?.phone_number,
-    payload,
-    deliveries: []
-  };
-
-  // Store event (rolling window of MAX_STORED_EVENTS)
-  let events = readWebhookEvents();
-  events.unshift(event);
-  if (events.length > MAX_STORED_EVENTS) events = events.slice(0, MAX_STORED_EVENTS);
-  writeWebhookEvents(events);
-
-  console.log(`[Webhook] ✅ Received: ${event.type} | ${event.status} | ₦${event.amount} | ref:${event.txRef}`);
-
-  // Acknowledge Flutterwave immediately (must reply fast)
-  res.status(200).json({ status: "ok", id: eventId });
-
-  // Async: process locally + forward to all backends
-  setImmediate(async () => {
-    // 1. Try to handle it on THIS backend first (update balance if we own the account)
-    const handledLocally = await processPaymentEvent(payload);
-
-    // 2. Forward raw payload to all other registered backends
-    await forwardToAllBackends(event);
-
-    // 3. If NOT handled locally (another backend owns it) — still notify owner about inbound payment
-    if (!handledLocally && event.status === "successful" && sock && isConnected && OWNER_NUMBERS.length) {
-      const ownerJid = `${OWNER_NUMBERS[0].replace(/[^0-9]/g, "")}@s.whatsapp.net`;
-      const backends = readWebhookBackends();
-      const fwdStatus = backends.length
-        ? `\n📡 Forwarded to ${backends.length} backend${backends.length > 1 ? "s" : ""}`
-        : "\n⚠️ No backends registered yet";
-      try {
-        await sock.sendMessage(ownerJid, {
-          text: `💸 *PAYMENT RECEIVED!*\n\n━━━━━━━━━━━━━━━━━━━━\n💰 Amount: *₦${(event.amount || 0).toLocaleString()}*\n👤 From: ${event.customerName || "Unknown"}\n📱 Phone: ${event.customerPhone || "—"}\n📧 ${event.customerEmail || "—"}\n🔖 Ref: ${event.txRef || "—"}\n━━━━━━━━━━━━━━━━━━━━${fwdStatus}\n\n_GHOST BANK MFG 🔥_`
-        });
-      } catch (e) { console.log("[Webhook] WA notify err:", e.message); }
-    }
-  });
-});
 
 // ── Polling endpoint — backends call this to fetch events they missed ────────
 // GET /webhook/events?since=<ISO timestamp or event id>&limit=50&secret=<key>
@@ -4498,13 +4024,12 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
   console.log(`[MFG_bot] SMM key: ${process.env.SMM_API_KEY ? "✅ loaded (" + process.env.SMM_API_KEY.length + " chars)" : "❌ NOT SET — .smm commands will fail"}`);
   console.log(`[MFG_bot] Groq key: ${process.env.GROQ_API_KEY ? "✅ loaded" : "⚠️ not set — .answer disabled"}`);
-  console.log(`[MFG_bot] Flutterwave: ${process.env.FLW_SECRET_KEY ? "✅ loaded" : "⚠️ not set — wallet topup via link disabled"}`);
   connectToWhatsApp();
 
   // ─── Hub Self-Registration ────────────────────────────────────────────────
   // Register this backend with the hub so it receives forwarded payments.
   // Uses REPLIT_DEV_DOMAIN when available (Replit), falls back to localhost.
-  const HUB_SECRET = (process.env.FLW_SECRET_KEY || "").slice(0, 20);
+  const HUB_SECRET = WEBHOOK_SECRET;
   const selfDomain = process.env.REPLIT_DEV_DOMAIN
     ? `https://${process.env.REPLIT_DEV_DOMAIN}`
     : `http://localhost:${PORT}`;
