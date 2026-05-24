@@ -900,6 +900,9 @@ async function connectToWhatsApp() {
   // Silent logger for the signal key store (it logs every key op at trace level)
   const signalLogger = pino({ level: "silent" });
 
+  // Randomise keepalive so the heartbeat interval is never a fixed bot-like value
+  const keepAliveMs = 20000 + Math.floor(Math.random() * 10000); // 20–30 s
+
   sock = makeWASocket({
     version,
     // ── PROPER AUTH STATE ──
@@ -913,17 +916,18 @@ async function connectToWhatsApp() {
       keys: makeCacheableSignalKeyStore(state.keys, signalLogger),
     },
     logger: pino({ level: "silent" }),
-    // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
-    browser: Browsers.ubuntu("Chrome"),
+    // Windows Chrome is the most common real WhatsApp Web fingerprint worldwide.
+    // Using it makes the session indistinguishable from a normal browser tab.
+    browser: Browsers.windows("Chrome"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000,
-    retryRequestDelayMs: 250,    // tight retry — answer peer retry requests fast
+    keepAliveIntervalMs: keepAliveMs,
+    retryRequestDelayMs: 250,
     maxMsgRetryCount: 5,
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
     markOnlineOnConnect: false,
-    emitOwnEvents: false,        // don't fire events for our own sends (cuts feedback noise)
+    emitOwnEvents: false,
     fireInitQueries: true,
     transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
 
@@ -1092,7 +1096,10 @@ async function connectToWhatsApp() {
         // post-pair-restart (any code, no prior open) → reconnect FAST so creds get used
         // otherwise standard backoff
         const fastReconnect = code === 515 || isPostPairRestart;
-        const delay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
+        // Add random jitter to reconnection so it never fires on a predictable schedule
+        const baseDelay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
+        const jitter = fastReconnect ? 0 : Math.floor(Math.random() * 4000);
+        const delay = baseDelay + jitter;
         console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
         setTimeout(connectToWhatsApp, delay);
       }
@@ -4019,21 +4026,40 @@ async function runCampaign(contacts, message) {
 
     campaignState.checking = false;
 
-    // ── Step 2: Randomly go "available" first (looks like human opening app) ──
+    // ── Step 2: Virtual "open chat" — mimics a human tapping the conversation ──
+    // Sequence: go available → brief glance pause → mark chat as read →
+    // short idle pause → (sometimes) go unavailable briefly → then composing.
+    // This is exactly what WhatsApp Web does when you click a chat thread.
     try {
-      if (Math.random() > 0.4) {
+      // 2a. Appear online (user just picked up their phone / opened the tab)
+      await sock.sendPresenceUpdate("available", jid);
+      await new Promise(r => setTimeout(r, 600 + Math.random() * 900));
+
+      // 2b. Virtually mark the chat as read (simulates opening/viewing the thread)
+      try {
+        await sock.chatModify({ markRead: true, lastMessages: [] }, jid);
+      } catch (_) { /* non-fatal — older Baileys versions may not support */ }
+      await new Promise(r => setTimeout(r, 400 + Math.random() * 800));
+
+      // 2c. Occasionally go unavailable for a moment (like the screen locked briefly)
+      if (Math.random() < 0.35) {
+        await sock.sendPresenceUpdate("unavailable", jid);
+        await new Promise(r => setTimeout(r, 1200 + Math.random() * 2000));
         await sock.sendPresenceUpdate("available", jid);
-        await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
+        await new Promise(r => setTimeout(r, 500 + Math.random() * 700));
       }
-    } catch (_) {}
+    } catch (_) { /* presence is best-effort */ }
 
     // ── Step 3: Send a random casual opener ───────────────────────────────
     const opener = CAMPAIGN_OPENERS[Math.floor(Math.random() * CAMPAIGN_OPENERS.length)];
     try {
+      // Start composing — typing indicator appears in recipient's chat
       await sock.sendPresenceUpdate("composing", jid);
       const openerTypeMs = MIN_TYPE_OPENER + Math.floor(Math.random() * (MAX_TYPE_OPENER - MIN_TYPE_OPENER));
       await new Promise(r => setTimeout(r, openerTypeMs));
       await sock.sendPresenceUpdate("paused", jid);
+      // Small pause after stopping typing — like briefly rereading before sending
+      await new Promise(r => setTimeout(r, 300 + Math.random() * 600));
       await sock.sendMessage(jid, { text: opener });
       campaignLog({ status: "opener", phone, name, text: opener });
     } catch (err) {
