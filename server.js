@@ -3832,6 +3832,137 @@ app.delete("/api/bots/:id", (req, res) => {
 });
 
 
+// ─── CAMPAIGN ENGINE ─────────────────────────────────────────────────────────
+
+const CONTACTS_FILE = path.join(__dirname, "data", "contacts.json");
+
+function readContacts() {
+  try { return JSON.parse(fs.readFileSync(CONTACTS_FILE, "utf8")); } catch { return []; }
+}
+function writeContacts(list) {
+  fs.writeFileSync(CONTACTS_FILE, JSON.stringify(list, null, 2));
+}
+
+let campaignState = {
+  running: false,
+  total: 0,
+  sent: 0,
+  failed: 0,
+  skipped: 0,
+  current: null,
+  log: [],
+  startedAt: null,
+  stoppedAt: null,
+  message: ""
+};
+
+function campaignLog(entry) {
+  campaignState.log.unshift({ time: new Date().toISOString(), ...entry });
+  if (campaignState.log.length > 50) campaignState.log.pop();
+}
+
+async function runCampaign(contacts, message) {
+  campaignState.running = true;
+  campaignState.total   = contacts.length;
+  campaignState.sent    = 0;
+  campaignState.failed  = 0;
+  campaignState.skipped = 0;
+  campaignState.log     = [];
+  campaignState.startedAt = new Date().toISOString();
+  campaignState.stoppedAt = null;
+  campaignState.message   = message;
+
+  for (let i = 0; i < contacts.length; i++) {
+    if (!campaignState.running) {
+      campaignLog({ status: "stopped", text: "Campaign stopped by user" });
+      break;
+    }
+
+    const c = contacts[i];
+    const phone = (c.phone || c).replace(/\D/g, "");
+    const name  = c.name || phone;
+    campaignState.current = name;
+
+    const jid = phone + "@s.whatsapp.net";
+    const personalised = message.replace(/\{name\}/gi, name);
+
+    try {
+      if (!sock || !isConnected) throw new Error("Bot not connected");
+      await sock.sendMessage(jid, { text: personalised });
+      campaignState.sent++;
+      campaignLog({ status: "sent", phone, name });
+    } catch (err) {
+      campaignState.failed++;
+      campaignLog({ status: "failed", phone, name, error: err.message });
+    }
+
+    // Random delay 4–9 seconds between messages to avoid spam detection
+    const delay = 4000 + Math.floor(Math.random() * 5000);
+    await new Promise(r => setTimeout(r, delay));
+  }
+
+  campaignState.running = false;
+  campaignState.current = null;
+  campaignState.stoppedAt = new Date().toISOString();
+  campaignLog({ status: "done", text: `Finished: ${campaignState.sent} sent, ${campaignState.failed} failed` });
+}
+
+// GET /api/contacts
+app.get("/api/contacts", (req, res) => {
+  res.json({ contacts: readContacts() });
+});
+
+// POST /api/contacts  — save full list
+app.post("/api/contacts", (req, res) => {
+  const { raw } = req.body;
+  if (!raw || typeof raw !== "string") return res.status(400).json({ error: "Provide raw contact text" });
+
+  const contacts = [];
+  for (const line of raw.split(/[\r\n]+/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes(",")) {
+      const [a, b] = trimmed.split(",").map(x => x.trim());
+      const isPhoneFirst = /^\d/.test(a);
+      contacts.push(isPhoneFirst
+        ? { phone: a.replace(/\D/g, ""), name: b || a }
+        : { name: a, phone: b.replace(/\D/g, "") });
+    } else {
+      const phone = trimmed.replace(/\D/g, "");
+      if (phone.length >= 7) contacts.push({ phone, name: phone });
+    }
+  }
+
+  writeContacts(contacts);
+  res.json({ saved: contacts.length, contacts });
+});
+
+// GET /api/campaign/status
+app.get("/api/campaign/status", (req, res) => {
+  res.json(campaignState);
+});
+
+// POST /api/campaign/start
+app.post("/api/campaign/start", (req, res) => {
+  if (campaignState.running) return res.status(409).json({ error: "Campaign already running" });
+  if (!isConnected) return res.status(503).json({ error: "Bot not connected to WhatsApp" });
+
+  const { message } = req.body;
+  if (!message || !message.trim()) return res.status(400).json({ error: "Provide a message template" });
+
+  const contacts = readContacts();
+  if (!contacts.length) return res.status(400).json({ error: "No contacts saved. Upload contacts first." });
+
+  runCampaign(contacts, message.trim()).catch(e => console.error("[Campaign]", e.message));
+  res.json({ started: true, total: contacts.length });
+});
+
+// POST /api/campaign/stop
+app.post("/api/campaign/stop", (req, res) => {
+  campaignState.running = false;
+  res.json({ stopped: true });
+});
+
 // ─── FLUTTERWAVE WEBHOOK HUB ─────────────────────────────────────────────────
 // Single webhook URL for ALL your backends.
 // Flutterwave hits POST /webhook/flutterwave

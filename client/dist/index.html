@@ -281,6 +281,69 @@
       height: 1px; background: var(--border);
     }
 
+    /* ── Campaign ── */
+    #campaign-section { display: none; }
+    #campaign-section.show { display: block; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 20px; background: var(--bg); border-radius: 10px; padding: 4px; }
+    .tab {
+      flex: 1; text-align: center; padding: 9px 12px;
+      border-radius: 8px; font-size: 13px; font-weight: 600;
+      cursor: pointer; color: var(--muted); transition: all .2s;
+    }
+    .tab.active { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    textarea {
+      width: 100%; min-height: 120px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      padding: 12px 14px;
+      outline: none;
+      resize: vertical;
+      line-height: 1.5;
+    }
+    textarea:focus { border-color: var(--accent); }
+    textarea::placeholder { color: var(--muted); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+    .progress-bar-wrap {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      height: 12px;
+      overflow: hidden;
+      margin: 14px 0 6px;
+    }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 8px;
+      transition: width .4s;
+    }
+    .progress-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+    .progress-stats span strong { color: var(--text); }
+    .camp-log {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-size: 12px;
+      font-family: "Courier New", monospace;
+    }
+    .log-row { padding: 3px 0; border-bottom: 1px solid var(--border); }
+    .log-row:last-child { border: none; }
+    .log-sent { color: var(--accent); }
+    .log-failed { color: var(--danger); }
+    .log-stopped { color: var(--warn); }
+    .log-done { color: var(--accent); font-weight: 700; }
+    #start-btn { min-width: 130px; }
+    #stop-btn  { background: var(--danger); color: #fff; }
+
     /* ── Danger zone ── */
     .danger-row { display: flex; gap: 10px; flex-wrap: wrap; }
 
@@ -403,6 +466,57 @@
     </div>
   </div>
 
+  <!-- ── Campaign Section (visible only when connected) ── -->
+  <div id="campaign-section">
+    <div class="card">
+      <div class="card-title">📣 Auto-Message Campaign</div>
+
+      <div class="tabs">
+        <div class="tab active" onclick="switchTab('contacts')">👥 Contacts</div>
+        <div class="tab"       onclick="switchTab('campaign')">🚀 Send Campaign</div>
+        <div class="tab"       onclick="switchTab('progress')">📊 Progress</div>
+      </div>
+
+      <!-- Contacts tab -->
+      <div class="tab-panel active" id="tab-contacts">
+        <p class="hint" style="margin-bottom:10px;">Paste phone numbers below — one per line. Optional: <strong>Name, Number</strong> or <strong>Number, Name</strong> format to personalise messages with {name}.</p>
+        <textarea id="contacts-raw" placeholder="2349012345678&#10;John, 2348034567890&#10;2347011223344, Mary"></textarea>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap;">
+          <button onclick="saveContacts()">💾 Save Contacts</button>
+          <span id="contacts-count" style="font-size:13px;color:var(--muted);"></span>
+        </div>
+        <p class="hint" style="margin-top:8px;">Tip: Use <strong>{name}</strong> in your message and the bot will replace it with each person's name.</p>
+      </div>
+
+      <!-- Campaign tab -->
+      <div class="tab-panel" id="tab-campaign">
+        <p class="hint" style="margin-bottom:10px;">Write the message the bot will send to each contact. Use <strong>{name}</strong> for personalisation.</p>
+        <textarea id="camp-message" placeholder="Hey {name}! 👋 I just wanted to reach out and..." style="min-height:150px;"></textarea>
+        <div class="hint">Messages are sent with a 4–9 second random delay between each one to keep the account safe.</div>
+        <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+          <button id="start-btn" onclick="startCampaign()">▶ Start Campaign</button>
+          <button id="stop-btn"  onclick="stopCampaign()" style="display:none;">⏹ Stop</button>
+          <span id="camp-contacts-count" style="font-size:13px;color:var(--muted);align-self:center;"></span>
+        </div>
+      </div>
+
+      <!-- Progress tab -->
+      <div class="tab-panel" id="tab-progress">
+        <div class="progress-stats">
+          <span>Total: <strong id="p-total">0</strong></span>
+          <span>Sent: <strong id="p-sent" style="color:var(--accent);">0</strong></span>
+          <span>Failed: <strong id="p-failed" style="color:var(--danger);">0</strong></span>
+          <span>Status: <strong id="p-status">Idle</strong></span>
+        </div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar" id="p-bar" style="width:0%"></div>
+        </div>
+        <div class="hint" style="margin-bottom:10px;" id="p-current"></div>
+        <div class="camp-log" id="camp-log"><div style="color:var(--muted);font-style:italic;">No campaign run yet.</div></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Danger Zone ── -->
   <div class="card" id="danger-card" style="display:none;">
     <div class="card-title">Session Control</div>
@@ -469,6 +583,8 @@
       const pairSec = document.getElementById("pair-section");
       const danger  = document.getElementById("danger-card");
 
+      const campSec = document.getElementById("campaign-section");
+
       if (d.connected) {
         // CONNECTED
         pulse.className = "pulse";
@@ -477,6 +593,7 @@
         qrSec.className   = "";
         pairSec.style.display  = "none";
         danger.style.display   = "block";
+        campSec.className = "show";
         qrRendered = false;
         if (lastConnected !== true) toast("✅ Bot is online!", "ok");
         lastConnected = true;
@@ -489,6 +606,7 @@
         qrSec.className   = "show";
         pairSec.style.display  = "block";
         danger.style.display   = "none";
+        campSec.className = "";
         lastConnected = false;
 
         // Render QR from server-side image endpoint
@@ -502,6 +620,7 @@
         qrSec.className   = "";
         pairSec.style.display  = "block";
         danger.style.display   = "none";
+        campSec.className = "";
         qrRendered = false;
         lastConnected = false;
       }
@@ -576,6 +695,135 @@
   // ── Poll on load and every 5s ──
   pollStatus();
   setInterval(pollStatus, 5000);
+
+  // ── Tab switching ──
+  function switchTab(name) {
+    document.querySelectorAll(".tab").forEach((t, i) => {
+      const names = ["contacts","campaign","progress"];
+      t.className = "tab" + (names[i] === name ? " active" : "");
+    });
+    document.querySelectorAll(".tab-panel").forEach((p, i) => {
+      const names = ["contacts","campaign","progress"];
+      p.className = "tab-panel" + (names[i] === name ? " active" : "");
+    });
+    if (name === "contacts") loadContacts();
+    if (name === "progress") pollCampaign();
+  }
+
+  // ── Load saved contacts into textarea ──
+  async function loadContacts() {
+    try {
+      const r = await fetch("/api/contacts");
+      const d = await r.json();
+      if (d.contacts && d.contacts.length) {
+        document.getElementById("contacts-raw").value =
+          d.contacts.map(c => c.name && c.name !== c.phone ? c.name + ", " + c.phone : c.phone).join("\n");
+        document.getElementById("contacts-count").textContent = d.contacts.length + " contact(s) saved";
+        document.getElementById("camp-contacts-count").textContent = d.contacts.length + " contacts loaded";
+      } else {
+        document.getElementById("contacts-count").textContent = "No contacts saved yet";
+      }
+    } catch {}
+  }
+
+  // ── Save contacts ──
+  async function saveContacts() {
+    const raw = document.getElementById("contacts-raw").value.trim();
+    if (!raw) { toast("Paste at least one phone number", "err"); return; }
+    try {
+      const r = await fetch("/api/contacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw })
+      });
+      const d = await r.json();
+      if (d.saved !== undefined) {
+        document.getElementById("contacts-count").textContent = d.saved + " contact(s) saved ✅";
+        document.getElementById("camp-contacts-count").textContent = d.saved + " contacts loaded";
+        toast("✅ " + d.saved + " contacts saved!", "ok");
+      } else {
+        toast(d.error || "Save failed", "err");
+      }
+    } catch (e) { toast("Error: " + e.message, "err"); }
+  }
+
+  // ── Start campaign ──
+  async function startCampaign() {
+    const message = document.getElementById("camp-message").value.trim();
+    if (!message) { toast("Write a message template first", "err"); return; }
+    try {
+      const r = await fetch("/api/campaign/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message })
+      });
+      const d = await r.json();
+      if (d.started) {
+        toast("🚀 Campaign started! " + d.total + " contacts queued.", "ok");
+        document.getElementById("start-btn").disabled = true;
+        document.getElementById("stop-btn").style.display = "inline-block";
+        switchTab("progress");
+        campPollInterval = setInterval(pollCampaign, 2000);
+      } else {
+        toast(d.error || "Could not start campaign", "err");
+      }
+    } catch (e) { toast("Error: " + e.message, "err"); }
+  }
+
+  // ── Stop campaign ──
+  async function stopCampaign() {
+    try {
+      await fetch("/api/campaign/stop", { method: "POST" });
+      toast("Campaign stopped.", "ok");
+    } catch {}
+  }
+
+  // ── Poll campaign progress ──
+  let campPollInterval = null;
+  async function pollCampaign() {
+    try {
+      const r = await fetch("/api/campaign/status");
+      const d = await r.json();
+
+      const pct = d.total > 0 ? Math.round(((d.sent + d.failed) / d.total) * 100) : 0;
+      document.getElementById("p-total").textContent  = d.total;
+      document.getElementById("p-sent").textContent   = d.sent;
+      document.getElementById("p-failed").textContent = d.failed;
+      document.getElementById("p-status").textContent = d.running
+        ? "Running ▶" : (d.stoppedAt ? "Finished ✅" : "Idle");
+      document.getElementById("p-bar").style.width = pct + "%";
+      document.getElementById("p-current").textContent = d.running && d.current
+        ? "Now sending to: " + d.current : "";
+
+      // Render log
+      if (d.log && d.log.length) {
+        const logEl = document.getElementById("camp-log");
+        logEl.innerHTML = d.log.map(entry => {
+          const cls = entry.status === "sent" ? "log-sent"
+            : entry.status === "failed" ? "log-failed"
+            : entry.status === "stopped" ? "log-stopped"
+            : entry.status === "done" ? "log-done" : "";
+          const icon = entry.status === "sent" ? "✓" : entry.status === "failed" ? "✗"
+            : entry.status === "done" ? "★" : "•";
+          const label = entry.name || entry.text || entry.phone || "";
+          const extra = entry.error ? " — " + entry.error : "";
+          return `<div class="log-row ${cls}">${icon} ${label}${extra}</div>`;
+        }).join("");
+      }
+
+      // Stop polling when done
+      if (!d.running && campPollInterval) {
+        clearInterval(campPollInterval);
+        campPollInterval = null;
+        document.getElementById("start-btn").disabled = false;
+        document.getElementById("stop-btn").style.display = "none";
+      }
+    } catch {}
+  }
+
+  // ── Load contacts count on page load ──
+  loadContacts();
+  setInterval(() => { if (campPollInterval) pollCampaign(); }, 2000);
 </script>
 </body>
 </html>
