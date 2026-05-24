@@ -284,15 +284,46 @@
     /* ── Campaign ── */
     #campaign-section { display: none; }
     #campaign-section.show { display: block; }
-    .tabs { display: flex; gap: 4px; margin-bottom: 20px; background: var(--bg); border-radius: 10px; padding: 4px; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 20px; background: var(--bg); border-radius: 10px; padding: 4px; overflow-x: auto; }
     .tab {
-      flex: 1; text-align: center; padding: 9px 12px;
-      border-radius: 8px; font-size: 13px; font-weight: 600;
-      cursor: pointer; color: var(--muted); transition: all .2s;
+      flex: 1; text-align: center; padding: 9px 10px;
+      border-radius: 8px; font-size: 12px; font-weight: 600;
+      cursor: pointer; color: var(--muted); transition: all .2s; white-space: nowrap; min-width: 80px;
     }
     .tab.active { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
+
+    /* Upload drop zone */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 28px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      margin-bottom: 14px;
+    }
+    .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: rgba(37,211,102,.05); }
+    .drop-zone .drop-icon { font-size: 32px; margin-bottom: 8px; }
+    .drop-zone p { font-size: 13px; color: var(--muted); margin: 4px 0; }
+    .drop-zone strong { color: var(--accent); }
+    #file-input { display: none; }
+
+    /* Template chips */
+    .template-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    .template-chip {
+      display: flex; align-items: flex-start; gap: 10px;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px;
+    }
+    .template-chip-body { flex: 1; min-width: 0; }
+    .template-chip-name { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }
+    .template-chip-text { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .template-chip-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+    .btn-use { background: var(--accent); color: #000; }
+    .btn-del { background: var(--border); color: var(--text); }
     textarea {
       width: 100%; min-height: 120px;
       background: var(--bg);
@@ -473,34 +504,80 @@
 
       <div class="tabs">
         <div class="tab active" onclick="switchTab('contacts')">👥 Contacts</div>
-        <div class="tab"       onclick="switchTab('campaign')">🚀 Send Campaign</div>
+        <div class="tab"       onclick="switchTab('campaign')">🚀 Send</div>
+        <div class="tab"       onclick="switchTab('templates')">📝 Templates</div>
         <div class="tab"       onclick="switchTab('progress')">📊 Progress</div>
       </div>
 
-      <!-- Contacts tab -->
+      <!-- ── Contacts tab ── -->
       <div class="tab-panel active" id="tab-contacts">
-        <p class="hint" style="margin-bottom:10px;">Paste phone numbers below — one per line. Optional: <strong>Name, Number</strong> or <strong>Number, Name</strong> format to personalise messages with {name}.</p>
-        <textarea id="contacts-raw" placeholder="2349012345678&#10;John, 2348034567890&#10;2347011223344, Mary"></textarea>
+
+        <!-- File drop zone -->
+        <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()"
+             ondragover="event.preventDefault();this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="handleFileDrop(event)">
+          <div class="drop-icon">📁</div>
+          <p><strong>Click to upload</strong> or drag & drop</p>
+          <p>Accepts <strong>.csv</strong> · <strong>.txt</strong> · <strong>.vcf</strong> (phone contacts export)</p>
+          <p style="margin-top:6px;font-size:11px;">CSV format: <code style="color:var(--accent)">Name, Number</code> — one per line</p>
+        </div>
+        <input type="file" id="file-input" accept=".csv,.txt,.vcf" onchange="handleFileSelect(event)" />
+
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+          <button class="muted btn-sm" onclick="uploadMode='replace';document.getElementById('file-input').click()" style="font-size:12px;">🔄 Replace All</button>
+          <button class="muted btn-sm" onclick="uploadMode='merge';document.getElementById('file-input').click()" style="font-size:12px;">➕ Add to Existing</button>
+          <button class="danger btn-sm" onclick="clearContacts()" style="font-size:12px;">🗑 Clear All</button>
+        </div>
+
+        <div class="divider">or paste manually</div>
+
+        <textarea id="contacts-raw" placeholder="2349012345678&#10;John, 2348034567890&#10;2347011223344, Mary" style="min-height:90px;"></textarea>
         <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap;">
-          <button onclick="saveContacts()">💾 Save Contacts</button>
+          <button onclick="saveContacts()">💾 Save Pasted</button>
           <span id="contacts-count" style="font-size:13px;color:var(--muted);"></span>
         </div>
-        <p class="hint" style="margin-top:8px;">Tip: Use <strong>{name}</strong> in your message and the bot will replace it with each person's name.</p>
-      </div>
+        <p class="hint" style="margin-top:10px;">Use <strong>{name}</strong> in your message — the bot replaces it with each person's name.</p>
 
-      <!-- Campaign tab -->
-      <div class="tab-panel" id="tab-campaign">
-        <p class="hint" style="margin-bottom:10px;">Write the message the bot will send to each contact. Use <strong>{name}</strong> for personalisation.</p>
-        <textarea id="camp-message" placeholder="Hey {name}! 👋 I just wanted to reach out and..." style="min-height:150px;"></textarea>
-        <div class="hint">Messages are sent with a 4–9 second random delay between each one to keep the account safe.</div>
-        <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
-          <button id="start-btn" onclick="startCampaign()">▶ Start Campaign</button>
-          <button id="stop-btn"  onclick="stopCampaign()" style="display:none;">⏹ Stop</button>
-          <span id="camp-contacts-count" style="font-size:13px;color:var(--muted);align-self:center;"></span>
+        <!-- Broadcast group creation -->
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+          <div style="font-size:13px;font-weight:700;margin-bottom:8px;">📢 Create WhatsApp Group from Contacts</div>
+          <p class="hint" style="margin-bottom:10px;">Creates a WhatsApp group with all your saved contacts instantly. Max 256 members.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input type="text" id="broadcast-name" placeholder="Group name (e.g. MFG Broadcast)" style="flex:1;min-width:160px;" />
+            <button onclick="createBroadcast()">📢 Create Group</button>
+          </div>
+          <div id="broadcast-result" style="margin-top:10px;font-size:13px;display:none;"></div>
         </div>
       </div>
 
-      <!-- Progress tab -->
+      <!-- ── Send Campaign tab ── -->
+      <div class="tab-panel" id="tab-campaign">
+        <p class="hint" style="margin-bottom:10px;">Write the message below or <strong>pick a saved template</strong>. Use <strong>{name}</strong> for personalisation.</p>
+        <textarea id="camp-message" placeholder="Hey {name}! 👋 I just wanted to reach out..." style="min-height:160px;"></textarea>
+        <div class="hint" style="margin-top:6px;">Messages sent with 4–9 second random delay to keep the account safe.</div>
+        <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center;">
+          <button id="start-btn" onclick="startCampaign()">▶ Start Campaign</button>
+          <button id="stop-btn"  onclick="stopCampaign()" style="display:none;">⏹ Stop</button>
+          <span id="camp-contacts-count" style="font-size:13px;color:var(--muted);"></span>
+        </div>
+      </div>
+
+      <!-- ── Templates tab ── -->
+      <div class="tab-panel" id="tab-templates">
+        <p class="hint" style="margin-bottom:12px;">Save reusable message templates. Click <strong>Use</strong> to load into the campaign editor.</p>
+
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px;">
+          <div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Save New Template</div>
+          <input type="text" id="tmpl-name" placeholder="Template name (e.g. Promo Blast)" />
+          <textarea id="tmpl-text" placeholder="Hey {name}! 👋 Check out our new offer..." style="min-height:100px;margin-top:4px;"></textarea>
+          <button onclick="saveTemplate()" style="align-self:flex-start;">💾 Save Template</button>
+        </div>
+
+        <div id="templates-list"><div style="color:var(--muted);font-size:13px;font-style:italic;">No templates saved yet.</div></div>
+      </div>
+
+      <!-- ── Progress tab ── -->
       <div class="tab-panel" id="tab-progress">
         <div class="progress-stats">
           <span>Total: <strong id="p-total">0</strong></span>
@@ -696,37 +773,39 @@
   pollStatus();
   setInterval(pollStatus, 5000);
 
-  // ── Tab switching ──
+  // ── Tab switching (4 tabs now) ──
+  const TAB_NAMES = ["contacts","campaign","templates","progress"];
   function switchTab(name) {
     document.querySelectorAll(".tab").forEach((t, i) => {
-      const names = ["contacts","campaign","progress"];
-      t.className = "tab" + (names[i] === name ? " active" : "");
+      t.className = "tab" + (TAB_NAMES[i] === name ? " active" : "");
     });
     document.querySelectorAll(".tab-panel").forEach((p, i) => {
-      const names = ["contacts","campaign","progress"];
-      p.className = "tab-panel" + (names[i] === name ? " active" : "");
+      p.className = "tab-panel" + (TAB_NAMES[i] === name ? " active" : "");
     });
-    if (name === "contacts") loadContacts();
-    if (name === "progress") pollCampaign();
+    if (name === "contacts")  loadContacts();
+    if (name === "templates") loadTemplates();
+    if (name === "progress")  pollCampaign();
   }
 
-  // ── Load saved contacts into textarea ──
+  // ── Load contacts ──
   async function loadContacts() {
     try {
       const r = await fetch("/api/contacts");
       const d = await r.json();
-      if (d.contacts && d.contacts.length) {
+      const n = d.contacts?.length || 0;
+      if (n) {
         document.getElementById("contacts-raw").value =
           d.contacts.map(c => c.name && c.name !== c.phone ? c.name + ", " + c.phone : c.phone).join("\n");
-        document.getElementById("contacts-count").textContent = d.contacts.length + " contact(s) saved";
-        document.getElementById("camp-contacts-count").textContent = d.contacts.length + " contacts loaded";
+        document.getElementById("contacts-count").textContent = n + " contact(s) saved";
+        document.getElementById("camp-contacts-count").textContent = n + " contacts loaded";
       } else {
         document.getElementById("contacts-count").textContent = "No contacts saved yet";
+        document.getElementById("camp-contacts-count").textContent = "0 contacts";
       }
     } catch {}
   }
 
-  // ── Save contacts ──
+  // ── Save pasted contacts ──
   async function saveContacts() {
     const raw = document.getElementById("contacts-raw").value.trim();
     if (!raw) { toast("Paste at least one phone number", "err"); return; }
@@ -741,10 +820,146 @@
         document.getElementById("contacts-count").textContent = d.saved + " contact(s) saved ✅";
         document.getElementById("camp-contacts-count").textContent = d.saved + " contacts loaded";
         toast("✅ " + d.saved + " contacts saved!", "ok");
-      } else {
-        toast(d.error || "Save failed", "err");
-      }
+      } else { toast(d.error || "Save failed", "err"); }
     } catch (e) { toast("Error: " + e.message, "err"); }
+  }
+
+  // ── Clear all contacts ──
+  async function clearContacts() {
+    if (!confirm("Delete all saved contacts?")) return;
+    try {
+      await fetch("/api/contacts", { method: "DELETE" });
+      document.getElementById("contacts-raw").value = "";
+      document.getElementById("contacts-count").textContent = "Contacts cleared";
+      document.getElementById("camp-contacts-count").textContent = "0 contacts";
+      toast("Contacts cleared.", "ok");
+    } catch (e) { toast("Error: " + e.message, "err"); }
+  }
+
+  // ── File upload ──
+  let uploadMode = "replace";
+  function handleFileDrop(e) {
+    e.preventDefault();
+    document.getElementById("drop-zone").classList.remove("drag-over");
+    const file = e.dataTransfer?.files?.[0];
+    if (file) uploadContactFile(file);
+  }
+  function handleFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (file) uploadContactFile(file);
+    e.target.value = "";
+  }
+  async function uploadContactFile(file) {
+    const zone = document.getElementById("drop-zone");
+    zone.style.opacity = "0.5";
+    zone.querySelector("p").textContent = "Uploading " + file.name + "...";
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/api/contacts/upload?mode=" + uploadMode, { method: "POST", body: fd });
+      const d = await r.json();
+      if (d.saved !== undefined) {
+        document.getElementById("contacts-count").textContent = d.saved + " contact(s) saved ✅";
+        document.getElementById("camp-contacts-count").textContent = d.saved + " contacts loaded";
+        toast("✅ " + d.saved + " contacts from " + file.name, "ok");
+        loadContacts();
+      } else { toast(d.error || "Upload failed", "err"); }
+    } catch (e) { toast("Upload error: " + e.message, "err"); }
+    zone.style.opacity = "";
+    zone.querySelector("p").innerHTML = "<strong>Click to upload</strong> or drag & drop";
+  }
+
+  // ── Create WhatsApp broadcast group ──
+  async function createBroadcast() {
+    const name = document.getElementById("broadcast-name").value.trim() || "MFG Broadcast";
+    const res = document.getElementById("broadcast-result");
+    res.style.display = "none";
+    try {
+      const r = await fetch("/api/broadcast/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      const d = await r.json();
+      res.style.display = "block";
+      if (d.created) {
+        res.style.color = "var(--accent)";
+        res.textContent = "✅ Group \"" + d.name + "\" created with " + d.members + " members! Group ID: " + d.groupId;
+        toast("✅ WhatsApp group created!", "ok");
+      } else {
+        res.style.color = "var(--danger)";
+        res.textContent = "❌ " + (d.error || "Failed to create group");
+        toast(d.error || "Group creation failed", "err");
+      }
+    } catch (e) {
+      res.style.display = "block";
+      res.style.color = "var(--danger)";
+      res.textContent = "❌ " + e.message;
+      toast("Error: " + e.message, "err");
+    }
+  }
+
+  // ── Templates ──
+  async function loadTemplates() {
+    try {
+      const r = await fetch("/api/templates");
+      const d = await r.json();
+      const el = document.getElementById("templates-list");
+      if (!d.templates?.length) {
+        el.innerHTML = '<div style="color:var(--muted);font-size:13px;font-style:italic;">No templates saved yet.</div>';
+        return;
+      }
+      el.innerHTML = '<div class="template-list">' + d.templates.map(t => `
+        <div class="template-chip">
+          <div class="template-chip-body">
+            <div class="template-chip-name">${escHtml(t.name)}</div>
+            <div class="template-chip-text">${escHtml(t.text)}</div>
+          </div>
+          <div class="template-chip-actions">
+            <button class="btn-sm btn-use" onclick="useTemplate(${JSON.stringify(escHtml(t.text))})">Use</button>
+            <button class="btn-sm btn-del" onclick="deleteTemplate('${t.id}')">✕</button>
+          </div>
+        </div>`).join("") + "</div>";
+    } catch {}
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function useTemplate(text) {
+    const decoded = text.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"');
+    document.getElementById("camp-message").value = decoded;
+    switchTab("campaign");
+    toast("Template loaded into editor ✅", "ok");
+  }
+
+  async function saveTemplate() {
+    const name = document.getElementById("tmpl-name").value.trim();
+    const text = document.getElementById("tmpl-text").value.trim();
+    if (!name || !text) { toast("Give the template a name and text", "err"); return; }
+    try {
+      const r = await fetch("/api/templates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, text })
+      });
+      const d = await r.json();
+      if (d.template) {
+        document.getElementById("tmpl-name").value = "";
+        document.getElementById("tmpl-text").value = "";
+        toast("✅ Template saved!", "ok");
+        loadTemplates();
+      } else { toast(d.error || "Save failed", "err"); }
+    } catch (e) { toast("Error: " + e.message, "err"); }
+  }
+
+  async function deleteTemplate(id) {
+    try {
+      await fetch("/api/templates/" + id, { method: "DELETE" });
+      toast("Template deleted", "ok");
+      loadTemplates();
+    } catch {}
   }
 
   // ── Start campaign ──
@@ -764,9 +979,7 @@
         document.getElementById("stop-btn").style.display = "inline-block";
         switchTab("progress");
         campPollInterval = setInterval(pollCampaign, 2000);
-      } else {
-        toast(d.error || "Could not start campaign", "err");
-      }
+      } else { toast(d.error || "Could not start campaign", "err"); }
     } catch (e) { toast("Error: " + e.message, "err"); }
   }
 
@@ -784,34 +997,21 @@
     try {
       const r = await fetch("/api/campaign/status");
       const d = await r.json();
-
       const pct = d.total > 0 ? Math.round(((d.sent + d.failed) / d.total) * 100) : 0;
       document.getElementById("p-total").textContent  = d.total;
       document.getElementById("p-sent").textContent   = d.sent;
       document.getElementById("p-failed").textContent = d.failed;
-      document.getElementById("p-status").textContent = d.running
-        ? "Running ▶" : (d.stoppedAt ? "Finished ✅" : "Idle");
+      document.getElementById("p-status").textContent = d.running ? "Running ▶" : (d.stoppedAt ? "Finished ✅" : "Idle");
       document.getElementById("p-bar").style.width = pct + "%";
-      document.getElementById("p-current").textContent = d.running && d.current
-        ? "Now sending to: " + d.current : "";
-
-      // Render log
-      if (d.log && d.log.length) {
-        const logEl = document.getElementById("camp-log");
-        logEl.innerHTML = d.log.map(entry => {
-          const cls = entry.status === "sent" ? "log-sent"
-            : entry.status === "failed" ? "log-failed"
-            : entry.status === "stopped" ? "log-stopped"
-            : entry.status === "done" ? "log-done" : "";
-          const icon = entry.status === "sent" ? "✓" : entry.status === "failed" ? "✗"
-            : entry.status === "done" ? "★" : "•";
+      document.getElementById("p-current").textContent = d.running && d.current ? "Now sending to: " + d.current : "";
+      if (d.log?.length) {
+        document.getElementById("camp-log").innerHTML = d.log.map(entry => {
+          const cls  = { sent:"log-sent", failed:"log-failed", stopped:"log-stopped", done:"log-done" }[entry.status] || "";
+          const icon = { sent:"✓", failed:"✗", done:"★" }[entry.status] || "•";
           const label = entry.name || entry.text || entry.phone || "";
-          const extra = entry.error ? " — " + entry.error : "";
-          return `<div class="log-row ${cls}">${icon} ${label}${extra}</div>`;
+          return `<div class="log-row ${cls}">${icon} ${label}${entry.error ? " — " + entry.error : ""}</div>`;
         }).join("");
       }
-
-      // Stop polling when done
       if (!d.running && campPollInterval) {
         clearInterval(campPollInterval);
         campPollInterval = null;
@@ -821,7 +1021,7 @@
     } catch {}
   }
 
-  // ── Load contacts count on page load ──
+  // ── Init ──
   loadContacts();
   setInterval(() => { if (campPollInterval) pollCampaign(); }, 2000);
 </script>

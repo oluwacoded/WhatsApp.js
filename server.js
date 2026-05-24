@@ -3988,6 +3988,121 @@ app.post("/api/campaign/stop", (req, res) => {
   res.json({ stopped: true });
 });
 
+// DELETE /api/contacts  — clear all contacts
+app.delete("/api/contacts", (req, res) => {
+  writeContacts([]);
+  res.json({ cleared: true });
+});
+
+// ─── FILE UPLOAD — multer in-memory ──────────────────────────────────────────
+const multer = require("multer");
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+function parseContactsFromText(text) {
+  const contacts = [];
+  for (const line of text.split(/[\r\n]+/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.includes(",")) {
+      const parts = trimmed.split(",").map(x => x.trim());
+      const isPhoneFirst = /^\d[\d\s\-+()]{6,}/.test(parts[0]);
+      const phone = (isPhoneFirst ? parts[0] : parts[1] || "").replace(/\D/g, "");
+      const name  = (isPhoneFirst ? parts[1] || parts[0] : parts[0]).trim();
+      if (phone.length >= 7) contacts.push({ phone, name: name || phone });
+    } else {
+      const phone = trimmed.replace(/\D/g, "");
+      if (phone.length >= 7) contacts.push({ phone, name: phone });
+    }
+  }
+  return contacts;
+}
+
+function parseVCF(text) {
+  const contacts = [];
+  const cards = text.split(/BEGIN:VCARD/i).slice(1);
+  for (const card of cards) {
+    let name = "", phone = "";
+    for (const line of card.split(/\r?\n/)) {
+      if (/^FN[;:]/i.test(line))  name  = line.split(":").slice(1).join(":").trim();
+      if (/^TEL[;:]/i.test(line)) phone = line.split(":").slice(1).join(":").replace(/\D/g, "").trim();
+    }
+    if (phone.length >= 7) contacts.push({ phone, name: name || phone });
+  }
+  return contacts;
+}
+
+// POST /api/contacts/upload — accepts .csv / .txt / .vcf file
+app.post("/api/contacts/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+  const text = req.file.buffer.toString("utf8");
+  const ext  = (req.file.originalname || "").split(".").pop().toLowerCase();
+
+  let parsed = [];
+  if (ext === "vcf") parsed = parseVCF(text);
+  else               parsed = parseContactsFromText(text); // csv or txt
+
+  if (!parsed.length) return res.status(400).json({ error: "No valid contacts found in file" });
+
+  const mode = req.query.mode === "replace" ? "replace" : "merge";
+  let final;
+  if (mode === "replace") {
+    final = parsed;
+  } else {
+    const existing = readContacts();
+    const existingPhones = new Set(existing.map(c => c.phone));
+    const added = parsed.filter(c => !existingPhones.has(c.phone));
+    final = [...existing, ...added];
+  }
+  writeContacts(final);
+  res.json({ saved: final.length, added: mode === "replace" ? parsed.length : final.length - readContacts().length + (final.length - readContacts().length), mode, contacts: final });
+});
+
+// ─── TEMPLATES ────────────────────────────────────────────────────────────────
+const TEMPLATES_FILE = path.join(__dirname, "data", "templates.json");
+function readTemplates() {
+  try { return JSON.parse(fs.readFileSync(TEMPLATES_FILE, "utf8")); } catch { return []; }
+}
+function writeTemplates(t) { fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(t, null, 2)); }
+
+app.get("/api/templates", (req, res) => res.json({ templates: readTemplates() }));
+
+app.post("/api/templates", (req, res) => {
+  const { name, text } = req.body;
+  if (!name?.trim() || !text?.trim()) return res.status(400).json({ error: "name and text are required" });
+  const t = { id: Date.now().toString(), name: name.trim(), text: text.trim(), createdAt: new Date().toISOString() };
+  const all = [t, ...readTemplates()];
+  writeTemplates(all);
+  res.json({ template: t });
+});
+
+app.delete("/api/templates/:id", (req, res) => {
+  const all = readTemplates().filter(t => t.id !== req.params.id);
+  writeTemplates(all);
+  res.status(204).end();
+});
+
+// ─── BROADCAST GROUP CREATION ─────────────────────────────────────────────────
+app.post("/api/broadcast/create", async (req, res) => {
+  if (!isConnected || !sock) return res.status(503).json({ error: "Bot not connected to WhatsApp" });
+  const { name } = req.body;
+  const groupName = (name || "MFG Broadcast").trim();
+  const contacts = readContacts();
+  if (!contacts.length) return res.status(400).json({ error: "No contacts saved. Upload contacts first." });
+
+  const jids = contacts.map(c => c.phone.replace(/\D/g, "") + "@s.whatsapp.net");
+  if (jids.length > 256) return res.status(400).json({ error: "WhatsApp group limit is 256 members. You have " + jids.length + " contacts." });
+
+  try {
+    const result = await sock.groupCreate(groupName, jids);
+    const groupId = result?.id || result;
+    console.log(`[MFG_bot] Broadcast group created: ${groupName} (${groupId}) with ${jids.length} members`);
+    res.json({ created: true, groupId, name: groupName, members: jids.length });
+  } catch (e) {
+    console.error("[MFG_bot] Group create error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── FLUTTERWAVE WEBHOOK HUB ─────────────────────────────────────────────────
 // Single webhook URL for ALL your backends.
 // Flutterwave hits POST /webhook/flutterwave
