@@ -409,12 +409,12 @@ async function downloadFromYtDlp(query) {
     const args = [
       "--no-warnings",
       "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
-      "--no-playlist", "--max-filesize", "15m",
+      "--no-playlist", "--max-filesize", "50m",
       "--match-filter", "duration > 60",
       "-o", `${tmpBase}.%(ext)s`,
       "--print", "before_dl:%(title)s",
       "--quiet",
-      `scsearch5:${query}`
+      `ytsearch5:${query}`
     ];
 
     console.log(`[MFG_bot] yt-dlp searching: "${query}"`);
@@ -982,16 +982,16 @@ async function connectToWhatsApp() {
         if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
       }
     };
-    // Listen for the first non-null connection state — that's the cue
+    // Listen for the "connecting" state — that's when handshake is done but creds not yet registered
     const pairListener = ({ connection }) => {
-      if (connection && !pairRequested) {
+      if (connection === "connecting" && !pairRequested) {
         sock.ev.off("connection.update", pairListener);
-        tryRequest(connection);
+        tryRequest("connecting");
       }
     };
     sock.ev.on("connection.update", pairListener);
-    // Safety fallback: if no event fires within 8s, try anyway
-    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 8000);
+    // Safety fallback: if "connecting" never fires within 12s, try anyway
+    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 12000);
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
@@ -2518,7 +2518,7 @@ async function connectToWhatsApp() {
           continue;
         }
         if (cmd === "bigshot" || cmd === "features") {
-          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎤 Voice clone: ${settings.voiceCloneEnabled?"🟢 (ElevenLabs)":"⚪ needs API key"}\n🎵 Music download: 🟢\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .voice .download .song .music .ytinfo .vv .calc`);
+          await send(`🔥 BIG-SHOT FEATURES STATUS\n\n🤖 AI: ${settings.aiEnabled?"🟢":"🔴"}\n👋 Disclaimer: ${settings.aiDisclaimer?"🟢":"🔴"}\n🎙 Voice transcribe: ${settings.transcribeVoice?"🟢":"🔴"}\n👁 Vision (sees images): ${settings.visionEnabled?"🟢":"🔴"}\n🛡 Anti-scam: ${settings.antiScam?"🟢":"🔴"}\n🌗 Mood/time: ${settings.moodAware?"🟢":"🔴"}\n🎂 Birthdays: ${settings.birthdayWishes?"🟢":"🔴"}\n👑 Auto-takeover: ${settings.autoTakeover?"🟢":"🔴"} (${settings.takeoverMinutes}m)\n📢 Proactive: ${settings.proactiveText?"🟢":"🔴"} (10s, 30m cooldown)\n🎵 Music download: 🟢 (full tracks via YouTube)\n\nchats: ${allChats.length} | facts: ${Object.keys(contactFacts).length} contacts | scam alerts: ${scamAlerts.length}\n\ncommands: .disclaimer .transcribe .vision .takeover .scam .facts .aiat .mood .birthdays .download .song .music .ytinfo .vv .calc`);
           continue;
         }
 
@@ -2533,20 +2533,21 @@ async function connectToWhatsApp() {
             `  • bug reports\n` +
             `  • or if you wish to become an admin of this bot 👑\n\n` +
             `here are the most useful things i can do for you:\n\n` +
-            `🎵 *.song <name>* — find & download any song as MP3\n` +
-            `📥 *.download <YouTube link>* — download any YouTube audio\n` +
-            `ℹ️ *.music* — all music download commands\n` +
+            `🎵 *.song <name>* — find & download any full song as MP3\n` +
+            `⏬ *.download <name>* — same as .song\n` +
+            `🛒 *.smm list* — browse SMM services (followers, likes, views)\n` +
+            `📦 *.smm buy <id> <link> <qty>* — place an SMM order\n` +
             `🤖 *.ai* — chat with me, i reply to anything\n` +
             `🎙 voice notes — i transcribe & reply\n` +
             `🖼 images — i can see them & reply\n` +
             `🌦 *.weather <city>* — current weather\n` +
             `📖 *.define <word>* — dictionary lookup\n` +
+            `💱 *.nairarate* — live USD/GBP/EUR → NGN rates\n` +
             `🎲 *.joke .fact .quote .truth .dare .8ball*\n` +
             `🧮 *.calc .tip .bmi .password .uuid*\n` +
             `📝 *.note .todo .save* — personal notes\n` +
             `👋 *.gm .gn .hbd* — greetings\n\n` +
-            `type *.list* to see all 200+ commands by category\n` +
-            `type *.menu* for a quick overview\n\n` +
+            `type *.list* to see all commands by category\n\n` +
             `_built with love by teddymfg_ ❤️`);
           continue;
         }
@@ -2794,7 +2795,7 @@ async function connectToWhatsApp() {
 
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `╔══════════════════════╗\n║  🤖 *MFG_BOT COMMANDS* 🤖  ║\n╚══════════════════════╝\n_built by teddymfg • +2349132883869_\n\n━━━━━━━━━━━━━━━━━━━━\n🛒 *SMM PANEL*\n━━━━━━━━━━━━━━━━━━━━\n📋 *.smm list* — browse all service categories\n📂 *.smm cat <#>* — view services in a category\n🔍 *.smm search <keyword>* — find services by name\n📦 *.smm buy <id> <link> <qty>* — place an order\n   _e.g. .smm buy 1234 https://instagram.com/page 500_\n📊 *.smm status <order_id>* — check order progress\n📋 *.smm myorders* — your order history\n\n👑 _Owner only:_\n💰 *.smm balance* — panel USD balance\n📈 *.smm markup <pct>* — set price markup %\n💱 *.smm rate <ngn/usd>* — set exchange rate\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *WALLET (NGN)*\n━━━━━━━━━━━━━━━━━━━━\n💳 *.wallet* — check your NGN balance\n💸 *.wallet topup <amount>* — add funds (min ₦100)\n   _e.g. .wallet topup 5000_\n📋 *.wallet history* — your transaction log\n\n👑 _Owner only:_\n🏦 *.wallet credit <phone> <amount>* — top up a user\n   _e.g. .wallet credit 08012345678 5000_\n\n_💡 Wallet balance auto-deducts on SMM orders_\n\n━━━━━━━━━━━━━━━━━━━━\n📢 *AUTO-REPLY* _(owner only)_\n━━━━━━━━━━━━━━━━━━━━\n📋 *.autoreply list* — see all keyword triggers\n✅ *.autoreply set <keyword> <response>*\n   _e.g. .autoreply set followers 📊 Type .smm list!_\n❌ *.autoreply del <keyword>* — remove a trigger\n🗑 *.autoreply clear* — remove all triggers\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *USER MANAGEMENT*\n━━━━━━━━━━━━━━━━━━━━\n✅ *.register* or *.register <name>* — sign up as a user\n\n👑 _Owner only:_\n👥 *.users* — list all registered users + wallet balances\n📊 *.revenue* — business stats (orders, spend, top services)\n\n━━━━━━━━━━━━━━━━━━━━\n⭐ *TOP COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n🟢 *.online* — cover mode on (AI + stays online)\n🔴 *.offline* — turn off cover mode\n👋 *.listall* — personalized welcome\n🆔 *.whoami* — bot identity\n\n━━━━━━━━━━━━━━━━━━━━\n🎵 *MUSIC DOWNLOADS*\n━━━━━━━━━━━━━━━━━━━━\n🎶 *.song <name>* — full MP3 (e.g. .song Burna Boy Last Last)\n▶️ *.play <name>* — same as .song\n⏬ *.download <name>* — download by song name\n⚡ *.dl <name>* — fastest alias\n🎵 *.music* — full music menu\nℹ️ *.songinfo <name>* — title, artist, album, duration\n\n━━━━━━━━━━━━━━━━━━━━\n🏦 *GHOST BANK MFG*\n━━━━━━━━━━━━━━━━━━━━\n💳 *.pay* — create or view your account\n💰 *.pay balance* — check your balance\n📋 *.pay history* — last 10 transactions\n🏦 *.bank* — quick account view (alias)\n💱 *.nairarate* — live USD/GBP/EUR → NGN rates\n\n━━━━━━━━━━━━━━━━━━━━\n🌐 *LIVE TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n🌤 *.weather <city>* — live weather\n📖 *.define <word>* — dictionary\n🔗 *.shorten <url>* — shrink links\n🌍 *.ip <address>* — geolocate IP\n\n━━━━━━━━━━━━━━━━━━━━\n🤖 *AI & BRAIN*\n━━━━━━━━━━━━━━━━━━━━\n🤖 *.answer <question>* — ask AI anything (5-min session)\n   _e.g. .answer what is forex trading?_\n*.ai on/off/status/mode/reset/prompt/delay/typing*\n*.style* — manage style mirroring\n*.learnme / .learnme view / .learnme clear*\n🎙 *.transcribe on/off* — voice → text\n👁 *.vision on/off* — read images\n🌗 *.mood on/off* — time-of-day tone\n🚨 *.scam on/off/log* — scam detection\n⚙️ *.bigshot* — all big-shot toggles\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — TAGGING*\n━━━━━━━━━━━━━━━━━━━━\n📣 *.tagall <msg>* — notify everyone\n👻 *.hidetag <msg>* — invisible mentions\n🎖 *.tagadmins <msg>*\n🔊 *.everyone / .all <msg>*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — CONTROL* _(needs admin)_\n━━━━━━━━━━━━━━━━━━━━\n🚫 *.kick @user* (or reply + .kick)\n➕ *.add <number>*\n⬆️ *.promote @user* / ⬇️ *.demote @user*\n🔇 *.mute / .unmute*\n🔒 *.lock / .unlock*\n✏️ *.setname <name>* / *.setdesc <desc>*\n🔄 *.revoke* (reset group link)\n🚪 *.leave*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — INFO*\n━━━━━━━━━━━━━━━━━━━━\n*.groupinfo / .members / .admins / .link*\n📊 *.poll Q | opt1 | opt2 | opt3*\n🗑 *.del* — reply to delete a message\n👁 *.vv* — reveal view-once photo/video`;
+          const part1 = `╔══════════════════════╗\n║  🤖 *MFG_BOT COMMANDS* 🤖  ║\n╚══════════════════════╝\n_built by teddymfg • +2349132883869_\n\n━━━━━━━━━━━━━━━━━━━━\n🛒 *SMM PANEL*\n━━━━━━━━━━━━━━━━━━━━\n📋 *.smm list* — browse all service categories\n📂 *.smm cat <#>* — view services in a category\n🔍 *.smm search <keyword>* — find services by name\n📦 *.smm buy <id> <link> <qty>* — place an order\n   _e.g. .smm buy 1234 https://instagram.com/page 500_\n📊 *.smm status <order_id>* — check order progress\n📋 *.smm myorders* — your order history\n\n👑 _Owner only:_\n💰 *.smm balance* — panel USD balance\n📈 *.smm markup <pct>* — set price markup %\n💱 *.smm rate <ngn/usd>* — set exchange rate\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *WALLET (NGN)*\n━━━━━━━━━━━━━━━━━━━━\n💳 *.wallet* — check your NGN balance\n📋 *.wallet history* — your transaction log\n\n👑 _Owner only:_\n🏦 *.wallet credit <phone> <amount>* — top up a user\n   _e.g. .wallet credit 08012345678 5000_\n\n_💡 Wallet balance auto-deducts on SMM orders_\n\n━━━━━━━━━━━━━━━━━━━━\n📢 *AUTO-REPLY* _(owner only)_\n━━━━━━━━━━━━━━━━━━━━\n📋 *.autoreply list* — see all keyword triggers\n✅ *.autoreply set <keyword> <response>*\n   _e.g. .autoreply set followers 📊 Type .smm list!_\n❌ *.autoreply del <keyword>* — remove a trigger\n🗑 *.autoreply clear* — remove all triggers\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *USER MANAGEMENT*\n━━━━━━━━━━━━━━━━━━━━\n✅ *.register* or *.register <name>* — sign up as a user\n\n👑 _Owner only:_\n👥 *.users* — list all registered users + wallet balances\n📊 *.revenue* — business stats (orders, spend, top services)\n\n━━━━━━━━━━━━━━━━━━━━\n⭐ *TOP COMMANDS*\n━━━━━━━━━━━━━━━━━━━━\n🟢 *.online* — cover mode on (AI + stays online)\n🔴 *.offline* — turn off cover mode\n👋 *.listall* — personalized welcome\n🆔 *.whoami* — bot identity\n\n━━━━━━━━━━━━━━━━━━━━\n🎵 *MUSIC DOWNLOADS*\n━━━━━━━━━━━━━━━━━━━━\n🎶 *.song <name>* — full MP3 (e.g. .song Burna Boy Last Last)\n▶️ *.play <name>* — same as .song\n⏬ *.download <name>* — download by song name\n⚡ *.dl <name>* — fastest alias\n🎵 *.music* — full music menu\nℹ️ *.songinfo <name>* — title, artist, album, duration\n\n━━━━━━━━━━━━━━━━━━━━\n💱 *RATES & CRYPTO*\n━━━━━━━━━━━━━━━━━━━━\n💱 *.nairarate* — live USD/GBP/EUR → NGN rates\n💰 *.crypto <coin>* — live crypto price (BTC, ETH, SOL...)\n💱 *.convertngn <amount> <currency>* — convert NGN\n\n━━━━━━━━━━━━━━━━━━━━\n🌐 *LIVE TOOLS*\n━━━━━━━━━━━━━━━━━━━━\n🌤 *.weather <city>* — live weather\n📖 *.define <word>* — dictionary\n🔗 *.shorten <url>* — shrink links\n🌍 *.ip <address>* — geolocate IP\n\n━━━━━━━━━━━━━━━━━━━━\n🤖 *AI & BRAIN*\n━━━━━━━━━━━━━━━━━━━━\n🤖 *.answer <question>* — ask AI anything (5-min session)\n   _e.g. .answer what is forex trading?_\n*.ai on/off/status/mode/reset/prompt/delay/typing*\n*.style* — manage style mirroring\n*.learnme / .learnme view / .learnme clear*\n🎙 *.transcribe on/off* — voice → text\n👁 *.vision on/off* — read images\n🌗 *.mood on/off* — time-of-day tone\n🚨 *.scam on/off/log* — scam detection\n⚙️ *.bigshot* — all big-shot toggles\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — TAGGING*\n━━━━━━━━━━━━━━━━━━━━\n📣 *.tagall <msg>* — notify everyone\n👻 *.hidetag <msg>* — invisible mentions\n🎖 *.tagadmins <msg>*\n🔊 *.everyone / .all <msg>*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — CONTROL* _(needs admin)_\n━━━━━━━━━━━━━━━━━━━━\n🚫 *.kick @user* (or reply + .kick)\n➕ *.add <number>*\n⬆️ *.promote @user* / ⬇️ *.demote @user*\n🔇 *.mute / .unmute*\n🔒 *.lock / .unlock*\n✏️ *.setname <name>* / *.setdesc <desc>*\n🔄 *.revoke* (reset group link)\n🚪 *.leave*\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *GROUPS — INFO*\n━━━━━━━━━━━━━━━━━━━━\n*.groupinfo / .members / .admins / .link*\n📊 *.poll Q | opt1 | opt2 | opt3*\n🗑 *.del* — reply to delete a message\n👁 *.vv* — reveal view-once photo/video`;
 
           const partUpgraded = `━━━━━━━━━━━━━━━━━━━━\n🆕 *NEW FEATURES (v6.7.21)*\n━━━━━━━━━━━━━━━━━━━━\n\n✏️ *EDIT MESSAGES*\n*.say <text>* — bot sends a tracked message\n*.editlast <new text>* — edit bot's last reply\n\n📌 *CHAT PIN*\n*.pin* — pin chat to top\n*.unpin* — unpin\n\n📰 *CHANNELS*\n*.channel create <name>*\n*.channel info / follow / post*\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE SEND*\n*.vvideo* — re-send as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n*.statusreact <emoji>* — react to every status\n*.statusreact off* — turn off\n_(alias: .sreact)_\n\n📊 *POLL VOTES*\n*.pollvotes* — reply to poll to see results\n_(alias: .votes)_\n\n`;
 
@@ -3673,8 +3674,8 @@ async function handlePair(req, res) {
   const codePromise = new Promise((resolve) => {
     pairCodeResolve = resolve;
     setTimeout(() => {
-      if (pairCodeResolve) { pairCodeResolve({ success: false, error: "timeout — try again" }); pairCodeResolve = null; }
-    }, 30000);
+      if (pairCodeResolve) { pairCodeResolve({ success: false, error: "timeout — WhatsApp took too long. Try again." }); pairCodeResolve = null; }
+    }, 50000);
   });
 
   // Tear down the existing socket to force a fresh connection in pairing mode
