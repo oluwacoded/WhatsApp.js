@@ -1390,6 +1390,70 @@ async function connectToWhatsApp() {
         await send(`sup maker 👋 i'm your bot. all commands unlocked. type .menu to see what i can do.`);
       }
 
+      // ── Campaign wizard intercept (owner-only multi-step flow) ───────────
+      if (campaignWizard.active && isFromMe && !from.endsWith("@g.us")) {
+        if (campaignWizard.step === 'awaiting_message') {
+          // Owner just typed their campaign message
+          if (text && text.trim() && !text.startsWith(pfx)) {
+            campaignWizard.message = text.trim();
+            campaignWizard.step = 'awaiting_contacts';
+            await send(`✅ *Message saved!*\n\n📎 *Step 2/2 — Send your contacts*\n\nYou can:\n• Send your contacts VCF file (export from phone contacts)\n• Paste phone numbers, one per line\n\n⚠️ Only Nigerian (+234) numbers will be messaged.\n\nSend the file or numbers now 👇`);
+            continue;
+          }
+        } else if (campaignWizard.step === 'awaiting_contacts') {
+          // Owner sent a document (VCF file)
+          if (isDoc) {
+            try {
+              const docMsg = msg.message?.documentMessage;
+              const buf = await downloadMediaMessage(msg, "buffer", {});
+              const vcfText = buf.toString("utf8");
+              // Parse VCF
+              const parsed = parseVCF(vcfText);
+              // Filter only +234 Nigerian numbers
+              const nigerianContacts = parsed.filter(c => {
+                const digits = (c.phone || "").replace(/\D/g, "");
+                return digits.startsWith("234") && digits.length >= 12;
+              });
+              if (!nigerianContacts.length) {
+                await send(`❌ No valid +234 Nigerian numbers found in the VCF file.\n\nMake sure your contacts have +234 numbers. Try again 👇`);
+                continue;
+              }
+              writeContacts(nigerianContacts);
+              const campaignMsg = campaignWizard.message;
+              resetWizard();
+              await send(`✅ *${nigerianContacts.length} Nigerian contacts loaded!*\n\n🚀 Starting campaign now...\n\n📋 Message:\n_${campaignMsg.slice(0,120)}${campaignMsg.length>120?"...":""}_\n\n⏱ Rate: 30/hour → 1hr rest → continues automatically.\n\nSend *.campaign status* to check progress or *.campaign stop* to cancel.`);
+              runCampaign(nigerianContacts, campaignMsg).catch(e => console.error("[Campaign]", e.message));
+            } catch (e) {
+              await send(`❌ Couldn't read that file: ${e.message}\n\nPlease send a .vcf file or paste numbers line by line.`);
+            }
+            continue;
+          }
+          // Owner pasted phone numbers as text
+          if (text && text.trim() && !text.startsWith(pfx)) {
+            const lines = text.split(/[\r\n,;]+/).map(l => l.trim()).filter(Boolean);
+            const parsed = lines.map(l => {
+              const digits = l.replace(/\D/g, "");
+              return { phone: digits, name: digits };
+            }).filter(c => c.phone.length >= 7);
+            // Filter only +234 Nigerian numbers
+            const nigerianContacts = parsed.filter(c => {
+              const d = c.phone;
+              return d.startsWith("234") && d.length >= 12;
+            });
+            if (!nigerianContacts.length) {
+              await send(`❌ No valid +234 Nigerian numbers found.\n\nNumbers should start with 234... (e.g. 2348012345678).\n\nTry again 👇`);
+              continue;
+            }
+            writeContacts(nigerianContacts);
+            const campaignMsg = campaignWizard.message;
+            resetWizard();
+            await send(`✅ *${nigerianContacts.length} Nigerian contacts loaded!*\n\n🚀 Starting campaign now...\n\n📋 Message:\n_${campaignMsg.slice(0,120)}${campaignMsg.length>120?"...":""}_\n\n⏱ Rate: 30/hour → 1hr rest → continues automatically.\n\nSend *.campaign status* to check progress or *.campaign stop* to cancel.`);
+            runCampaign(nigerianContacts, campaignMsg).catch(e => console.error("[Campaign]", e.message));
+            continue;
+          }
+        }
+      }
+
       const lowerText = text.toLowerCase();
 
       // ── Urgent call override ───────────────────────────────────────────
@@ -2201,6 +2265,37 @@ async function connectToWhatsApp() {
             writeJSON("settings.json", settings);
             await send(`✅ auto-react set to *${emoji}* — I'll react to every incoming message with this emoji.`);
           }
+          continue;
+        }
+
+        // .campaign — full campaign wizard from WhatsApp (owner only)
+        if (cmd === "campaign") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+
+          if (sub === "stop") {
+            if (campaignState.running) { campaignState.running = false; resetWizard(); await send("🛑 Campaign stopped."); }
+            else { await send("No campaign running."); }
+            continue;
+          }
+          if (sub === "status") {
+            if (campaignState.running) {
+              const eta = campaignState.cooldownEndsAt ? `\n⏳ Cooldown until: ${new Date(campaignState.cooldownEndsAt).toLocaleTimeString()}` : "";
+              await send(`📊 *Campaign Status*\n\n✅ Sent: ${campaignState.sent}\n❌ Failed: ${campaignState.failed}\n🚫 Not on WA: ${campaignState.notOnWA}\n📋 Total: ${campaignState.total}\n🔄 Current: ${campaignState.current || "—"}${eta}\n\nSend *.campaign stop* to cancel.`);
+            } else {
+              await send(`No campaign running.\n\n${campaignState.sent || 0} sent last run.`);
+            }
+            continue;
+          }
+
+          if (campaignState.running) {
+            await send(`⚠️ A campaign is already running (${campaignState.sent}/${campaignState.total} sent).\n\nSend *.campaign stop* to cancel it first, or *.campaign status* to check progress.`);
+            continue;
+          }
+
+          // Start wizard
+          campaignWizard = { active: true, step: 'awaiting_message', message: null, from };
+          await send(`🚀 *Campaign Setup — Step 1/2*\n\nWhat message do you want to send to your contacts?\n\n💡 Tip: Use {name} to personalise — e.g. _Hey {name}, check this out!_\n\nType your message now 👇`);
           continue;
         }
 
@@ -3976,6 +4071,15 @@ let campaignState = {
   dailyCap: DAILY_SEND_CAP
 };
 
+// ── Campaign wizard state (for .campaign WhatsApp command) ─────────────────
+let campaignWizard = {
+  active: false,
+  step: null,   // 'awaiting_message' | 'awaiting_contacts'
+  message: null,
+  from: null,
+};
+function resetWizard() { campaignWizard = { active: false, step: null, message: null, from: null }; }
+
 function campaignLog(entry) {
   campaignState.log.unshift({ time: new Date().toISOString(), ...entry });
   if (campaignState.log.length > 50) campaignState.log.pop();
@@ -4088,9 +4192,10 @@ async function runCampaign(contacts, message) {
   const MAX_TYPE_MAIN   = 10000;
   const MIN_INNER_DELAY = 12 * 1000;   // 12–30 s between opener and main msg
   const MAX_INNER_DELAY = 30 * 1000;
-  const minBatch        = 3;           // 3 contacts per batch
-  const maxBatch        = 3;
-  const COOLDOWN_MS     = 2 * 60 * 1000; // 2 min rest after every 3 contacts
+  const HOUR_CAP        = 30;          // max sends per hour window
+  const HOUR_COOLDOWN_MS = 60 * 60 * 1000; // 1-hour rest after hitting hourly cap
+  let sentThisHour      = 0;
+  let hourWindowStart   = Date.now();
 
   // ── Classify contacts — warm first, cold last ─────────────────────────────
   // Warm = has ever messaged the bot (bidirectional history = much safer)
@@ -4150,9 +4255,25 @@ async function runCampaign(contacts, message) {
     campaignState.cooldown = false;
     campaignState.cooldownEndsAt = null;
 
-    // ── Step 1: Check the number is actually on WhatsApp ──────────────────
+    // ── Step 1: Wait for connection if bot dropped (disconnection resilience) ─
+    if (!sock || !isConnected) {
+      campaignLog({ status: "paused", text: "Bot disconnected — waiting up to 5 min to reconnect..." });
+      campaignState.cooldown = true;
+      const reconnectDeadline = Date.now() + 5 * 60 * 1000;
+      while ((!sock || !isConnected) && Date.now() < reconnectDeadline && campaignState.running) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      campaignState.cooldown = false;
+      if (!campaignState.running) break;
+      if (!sock || !isConnected) {
+        campaignLog({ status: "stopped", text: "Could not reconnect in 5 min — campaign paused. Run .campaign again when connected." });
+        break;
+      }
+      campaignLog({ status: "info", text: "Reconnected — resuming campaign." });
+    }
+
+    // ── Step 1b: Check the number is actually on WhatsApp ─────────────────
     try {
-      if (!sock || !isConnected) throw new Error("Bot not connected");
       const [result] = await sock.onWhatsApp(phone);
       if (!result?.exists) {
         campaignState.notOnWA++;
@@ -4235,31 +4356,32 @@ async function runCampaign(contacts, message) {
       campaignLog({ status: "failed", phone, name, error: err.message });
     }
 
-    // ── Step 7: Delays + cooldown ──────────────────────────────────────────
+    // ── Step 7: Hourly cap (30/hr) + inter-message delay ──────────────────
+    // Reset hour window if needed
+    if (Date.now() - hourWindowStart >= 60 * 60 * 1000) {
+      sentThisHour = 0;
+      hourWindowStart = Date.now();
+    }
+    sentThisHour++;
+
+    if (sentThisHour >= HOUR_CAP && i < shuffled.length - 1 && campaignState.running) {
+      campaignState.cooldown       = true;
+      campaignState.cooldownEndsAt = new Date(Date.now() + HOUR_COOLDOWN_MS).toISOString();
+      campaignLog({ status: "cooldown", text: `Hit ${HOUR_CAP} contacts this hour — resting 1 hour then continuing automatically` });
+      await idleBrowse();
+      const cooldownEnd = Date.now() + HOUR_COOLDOWN_MS;
+      while (Date.now() < cooldownEnd && campaignState.running) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      campaignState.cooldown       = false;
+      campaignState.cooldownEndsAt = null;
+      sentThisHour = 0;
+      hourWindowStart = Date.now();
+    }
+
     if (i < shuffled.length - 1 && campaignState.running) {
-
-      if (sentInBatch >= currentBatchSize) {
-        sentInBatch = 0;
-        currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
-
-        campaignState.cooldown       = true;
-        campaignState.cooldownEndsAt = new Date(Date.now() + COOLDOWN_MS).toISOString();
-        campaignLog({ status: "cooldown", text: `Batch done — resting 2 min + browsing to protect your account` });
-
-        // During the cooldown, do idle browsing (looks like real WA usage)
-        const cooldownEnd = Date.now() + COOLDOWN_MS;
-        await idleBrowse();
-        while (Date.now() < cooldownEnd && campaignState.running) {
-          await new Promise(r => setTimeout(r, 1000));
-        }
-        campaignState.cooldown       = false;
-        campaignState.cooldownEndsAt = null;
-      }
-
-      if (campaignState.running) {
-        const msgDelay = MIN_MSG_DELAY + Math.floor(Math.random() * (MAX_MSG_DELAY - MIN_MSG_DELAY));
-        await new Promise(r => setTimeout(r, msgDelay));
-      }
+      const msgDelay = MIN_MSG_DELAY + Math.floor(Math.random() * (MAX_MSG_DELAY - MIN_MSG_DELAY));
+      await new Promise(r => setTimeout(r, msgDelay));
     }
   }
 
