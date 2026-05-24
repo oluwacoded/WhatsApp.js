@@ -1277,6 +1277,61 @@ async function connectToWhatsApp() {
         } catch (e) { /* silent — react failure is non-critical */ }
       }
 
+      // ── Campaign wizard intercept — MUST be before the auto-learn continue ──
+      // The auto-learn block below has a `continue` that would swallow owner
+      // plain-text messages before the wizard ever sees them. Check here first.
+      if (campaignWizard.active && isFromMe && !from.endsWith("@g.us")) {
+        const _isDoc = !!msg.message?.documentMessage;
+        if (campaignWizard.step === 'awaiting_message') {
+          if (text && text.trim() && !text.startsWith(pfx)) {
+            campaignWizard.message = text.trim();
+            campaignWizard.step = 'awaiting_contacts';
+            await send(`✅ *Message saved!*\n\n📎 *Step 2/2 — Send your contacts*\n\nYou can:\n• Send your contacts .vcf file (export from your phone contacts)\n• Paste phone numbers, one per line\n\n⚠️ Only Nigerian (+234) numbers will be messaged.\n\nSend the file or numbers now 👇`);
+            continue;
+          }
+        } else if (campaignWizard.step === 'awaiting_contacts') {
+          if (_isDoc) {
+            try {
+              const buf = await downloadMediaMessage(msg, "buffer", {});
+              const vcfText = buf.toString("utf8");
+              const parsed = parseVCF(vcfText);
+              const nigerianContacts = parsed.filter(c => {
+                const digits = (c.phone || "").replace(/\D/g, "");
+                return digits.startsWith("234") && digits.length >= 12;
+              });
+              if (!nigerianContacts.length) {
+                await send(`❌ No +234 Nigerian numbers found in the file.\n\nMake sure contacts have +234 numbers, then try again 👇`);
+                continue;
+              }
+              writeContacts(nigerianContacts);
+              const campaignMsg = campaignWizard.message;
+              resetWizard();
+              await send(`✅ *${nigerianContacts.length} Nigerian contacts loaded!*\n\n🚀 Starting campaign now...\n\n📋 Message:\n_${campaignMsg.slice(0,120)}${campaignMsg.length>120?"...":""}_\n\n⏱ Rate: 30/hour → 1hr cooldown → auto-continues.\n\nSend *.campaign status* to check or *.campaign stop* to cancel.`);
+              runCampaign(nigerianContacts, campaignMsg).catch(e => console.error("[Campaign]", e.message));
+            } catch (e) {
+              await send(`❌ Couldn't read that file: ${e.message}\n\nSend a .vcf file or paste numbers one per line.`);
+            }
+            continue;
+          }
+          if (text && text.trim() && !text.startsWith(pfx)) {
+            const lines = text.split(/[\r\n,;]+/).map(l => l.trim()).filter(Boolean);
+            const parsed = lines.map(l => ({ phone: l.replace(/\D/g, ""), name: l.replace(/\D/g, "") }))
+                                .filter(c => c.phone.length >= 7);
+            const nigerianContacts = parsed.filter(c => c.phone.startsWith("234") && c.phone.length >= 12);
+            if (!nigerianContacts.length) {
+              await send(`❌ No +234 Nigerian numbers found.\n\nNumbers must start with 234 (e.g. 2348012345678).\n\nTry again 👇`);
+              continue;
+            }
+            writeContacts(nigerianContacts);
+            const campaignMsg = campaignWizard.message;
+            resetWizard();
+            await send(`✅ *${nigerianContacts.length} Nigerian contacts loaded!*\n\n🚀 Starting campaign now...\n\n📋 Message:\n_${campaignMsg.slice(0,120)}${campaignMsg.length>120?"...":""}_\n\n⏱ Rate: 30/hour → 1hr cooldown → auto-continues.\n\nSend *.campaign status* to check or *.campaign stop* to cancel.`);
+            runCampaign(nigerianContacts, campaignMsg).catch(e => console.error("[Campaign]", e.message));
+            continue;
+          }
+        }
+      }
+
       // ── Auto-learn from EVERY message the owner sends (silent, automatic) ──
       if (isFromMe && !text.startsWith(pfx)) {
         // Capture status posts (owner posting to status@broadcast)
@@ -1388,70 +1443,6 @@ async function connectToWhatsApp() {
         userData[from].greeted = true;
         writeJSON("users.json", userData);
         await send(`sup maker 👋 i'm your bot. all commands unlocked. type .menu to see what i can do.`);
-      }
-
-      // ── Campaign wizard intercept (owner-only multi-step flow) ───────────
-      if (campaignWizard.active && isFromMe && !from.endsWith("@g.us")) {
-        if (campaignWizard.step === 'awaiting_message') {
-          // Owner just typed their campaign message
-          if (text && text.trim() && !text.startsWith(pfx)) {
-            campaignWizard.message = text.trim();
-            campaignWizard.step = 'awaiting_contacts';
-            await send(`✅ *Message saved!*\n\n📎 *Step 2/2 — Send your contacts*\n\nYou can:\n• Send your contacts VCF file (export from phone contacts)\n• Paste phone numbers, one per line\n\n⚠️ Only Nigerian (+234) numbers will be messaged.\n\nSend the file or numbers now 👇`);
-            continue;
-          }
-        } else if (campaignWizard.step === 'awaiting_contacts') {
-          // Owner sent a document (VCF file)
-          if (isDoc) {
-            try {
-              const docMsg = msg.message?.documentMessage;
-              const buf = await downloadMediaMessage(msg, "buffer", {});
-              const vcfText = buf.toString("utf8");
-              // Parse VCF
-              const parsed = parseVCF(vcfText);
-              // Filter only +234 Nigerian numbers
-              const nigerianContacts = parsed.filter(c => {
-                const digits = (c.phone || "").replace(/\D/g, "");
-                return digits.startsWith("234") && digits.length >= 12;
-              });
-              if (!nigerianContacts.length) {
-                await send(`❌ No valid +234 Nigerian numbers found in the VCF file.\n\nMake sure your contacts have +234 numbers. Try again 👇`);
-                continue;
-              }
-              writeContacts(nigerianContacts);
-              const campaignMsg = campaignWizard.message;
-              resetWizard();
-              await send(`✅ *${nigerianContacts.length} Nigerian contacts loaded!*\n\n🚀 Starting campaign now...\n\n📋 Message:\n_${campaignMsg.slice(0,120)}${campaignMsg.length>120?"...":""}_\n\n⏱ Rate: 30/hour → 1hr rest → continues automatically.\n\nSend *.campaign status* to check progress or *.campaign stop* to cancel.`);
-              runCampaign(nigerianContacts, campaignMsg).catch(e => console.error("[Campaign]", e.message));
-            } catch (e) {
-              await send(`❌ Couldn't read that file: ${e.message}\n\nPlease send a .vcf file or paste numbers line by line.`);
-            }
-            continue;
-          }
-          // Owner pasted phone numbers as text
-          if (text && text.trim() && !text.startsWith(pfx)) {
-            const lines = text.split(/[\r\n,;]+/).map(l => l.trim()).filter(Boolean);
-            const parsed = lines.map(l => {
-              const digits = l.replace(/\D/g, "");
-              return { phone: digits, name: digits };
-            }).filter(c => c.phone.length >= 7);
-            // Filter only +234 Nigerian numbers
-            const nigerianContacts = parsed.filter(c => {
-              const d = c.phone;
-              return d.startsWith("234") && d.length >= 12;
-            });
-            if (!nigerianContacts.length) {
-              await send(`❌ No valid +234 Nigerian numbers found.\n\nNumbers should start with 234... (e.g. 2348012345678).\n\nTry again 👇`);
-              continue;
-            }
-            writeContacts(nigerianContacts);
-            const campaignMsg = campaignWizard.message;
-            resetWizard();
-            await send(`✅ *${nigerianContacts.length} Nigerian contacts loaded!*\n\n🚀 Starting campaign now...\n\n📋 Message:\n_${campaignMsg.slice(0,120)}${campaignMsg.length>120?"...":""}_\n\n⏱ Rate: 30/hour → 1hr rest → continues automatically.\n\nSend *.campaign status* to check progress or *.campaign stop* to cancel.`);
-            runCampaign(nigerianContacts, campaignMsg).catch(e => console.error("[Campaign]", e.message));
-            continue;
-          }
-        }
       }
 
       const lowerText = text.toLowerCase();
