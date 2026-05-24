@@ -2271,8 +2271,11 @@ async function connectToWhatsApp() {
           }
           if (sub === "status") {
             if (campaignState.running) {
+              const watHour = (new Date().getUTCHours() + 1) % 24;
+              const safeHourInfo = !isSafeHour() ? `\n⏸ *Waiting for safe hours* (now ${watHour}:xx WAT — resumes at 8 am WAT)` : "";
               const eta = campaignState.cooldownEndsAt ? `\n⏳ Cooldown until: ${new Date(campaignState.cooldownEndsAt).toLocaleTimeString()}` : "";
-              await send(`📊 *Campaign Status*\n\n✅ Sent: ${campaignState.sent}\n❌ Failed: ${campaignState.failed}\n🚫 Not on WA: ${campaignState.notOnWA}\n📋 Total: ${campaignState.total}\n🔄 Current: ${campaignState.current || "—"}${eta}\n\nSend *.campaign stop* to cancel.`);
+              const skipped = campaignState.skipped || 0;
+              await send(`📊 *Campaign Status*\n\n✅ Sent: ${campaignState.sent}\n❌ Failed: ${campaignState.failed}\n🚫 Not on WA: ${campaignState.notOnWA}\n⏭ Skipped: ${skipped}\n📋 Total: ${campaignState.total}\n🔄 Current: ${campaignState.current || "—"}${eta}${safeHourInfo}\n\nSend *.campaign stop* to cancel.`);
             } else {
               await send(`No campaign running.\n\n${campaignState.sent || 0} sent last run.`);
             }
@@ -4127,14 +4130,17 @@ function isWarmContact(phone) {
   return !!(u && (u.ownerMessages?.length || u.greeted || u.registered));
 }
 
-// ── Time-of-day safety gate: only send 8 am – 9 pm ───────────────────────────
+// ── Time-of-day safety gate: only send 8 am – 9 pm WAT (Nigerian time) ───────
+// Server runs in UTC; Nigerian time is WAT = UTC+1.
 function isSafeHour() {
-  const h = new Date().getHours();
-  return h >= 8 && h < 21;
+  const watHour = (new Date().getUTCHours() + 1) % 24; // UTC+1 = WAT
+  return watHour >= 8 && watHour < 21;
 }
 async function waitForSafeHour(state) {
   if (isSafeHour()) return;
-  campaignLog({ status: 'paused', text: 'Outside safe hours (8 am–9 pm) — waiting for 8 am to protect your account' });
+  const watHour = (new Date().getUTCHours() + 1) % 24;
+  campaignLog({ status: 'paused', text: `Outside safe hours (8 am–9 pm WAT) — current WAT hour: ${watHour}. Waiting for 8 am WAT to protect your account` });
+  console.log(`[Campaign] Waiting for safe hour — current WAT hour: ${watHour}`);
   while (!isSafeHour() && state.running) {
     await new Promise(r => setTimeout(r, 60 * 1000));
   }
@@ -4202,6 +4208,8 @@ async function runCampaign(contacts, message) {
   let sentInBatch = 0;
   let currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
 
+  console.log(`[Campaign] Starting — ${shuffled.length} contacts (${warm.length} warm, ${cold.length} cold)`);
+
   for (let i = 0; i < shuffled.length; i++) {
     if (!campaignState.running) {
       campaignLog({ status: "stopped", text: "Campaign stopped by user" });
@@ -4209,11 +4217,15 @@ async function runCampaign(contacts, message) {
     }
 
     // ── Time-of-day safety gate ────────────────────────────────────────────
+    const watHourNow = (new Date().getUTCHours() + 1) % 24;
+    console.log(`[Campaign] Contact ${i+1}/${shuffled.length} — WAT hour: ${watHourNow}, isSafe: ${isSafeHour()}`);
     await waitForSafeHour(campaignState);
     if (!campaignState.running) break;
 
     // ── Daily cap guards ───────────────────────────────────────────────────
-    if (getDailySendCount() >= DAILY_SEND_CAP) {
+    const dailyCount = getDailySendCount();
+    console.log(`[Campaign] Daily count: ${dailyCount}/${DAILY_SEND_CAP}`);
+    if (dailyCount >= DAILY_SEND_CAP) {
       campaignLog({ status: "stopped", text: `Daily cap of ${DAILY_SEND_CAP} reached. Resume tomorrow.` });
       break;
     }
@@ -4264,6 +4276,7 @@ async function runCampaign(contacts, message) {
     }
 
     // ── Step 1b: Check the number is actually on WhatsApp ─────────────────
+    console.log(`[Campaign] Checking WA for ${phone} (${name})`);
     try {
       const [result] = await sock.onWhatsApp(phone);
       if (!result?.exists) {
@@ -4271,12 +4284,15 @@ async function runCampaign(contacts, message) {
         campaignState.skipped++;
         campaignState.checking = false;
         campaignLog({ status: "skipped", phone, name, error: "Not on WhatsApp" });
+        console.log(`[Campaign] ❌ ${phone} — not on WhatsApp`);
         continue;
       }
+      console.log(`[Campaign] ✅ ${phone} — on WhatsApp, sending...`);
     } catch (err) {
       campaignState.skipped++;
       campaignState.checking = false;
       campaignLog({ status: "skipped", phone, name, error: "WA check failed: " + err.message });
+      console.log(`[Campaign] ⚠️ WA check failed for ${phone}: ${err.message}`);
       continue;
     }
 
@@ -4334,6 +4350,7 @@ async function runCampaign(contacts, message) {
     } catch (_) {}
 
     const finalMsg = buildCampaignMessage(message, name);
+    console.log(`[Campaign] Sending main msg to ${phone} (${name})`);
     try {
       await sock.sendMessage(jid, { text: finalMsg });
       const daily = incrementDailySend();
