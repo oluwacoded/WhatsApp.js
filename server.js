@@ -3868,19 +3868,39 @@ function writeContacts(list) {
   fs.writeFileSync(CONTACTS_FILE, JSON.stringify(list, null, 2));
 }
 
+// ── Daily send cap tracking ─────────────────────────────────────────────────
+const DAILY_SEND_CAP = 200; // max messages per 24-hour window
+function getDailySendCount() {
+  const rec = readJSON("daily_sends.json", { date: "", count: 0 });
+  const today = new Date().toISOString().slice(0, 10);
+  if (rec.date !== today) return 0;
+  return rec.count || 0;
+}
+function incrementDailySend() {
+  const today = new Date().toISOString().slice(0, 10);
+  const rec = readJSON("daily_sends.json", { date: today, count: 0 });
+  const count = rec.date === today ? (rec.count || 0) + 1 : 1;
+  writeJSON("daily_sends.json", { date: today, count });
+  return count;
+}
+
 let campaignState = {
   running: false,
   total: 0,
   sent: 0,
   failed: 0,
   skipped: 0,
+  notOnWA: 0,
   current: null,
+  checking: false,
   log: [],
   startedAt: null,
   stoppedAt: null,
   message: "",
   cooldown: false,
-  cooldownEndsAt: null
+  cooldownEndsAt: null,
+  dailySent: 0,
+  dailyCap: DAILY_SEND_CAP
 };
 
 function campaignLog(entry) {
@@ -3889,28 +3909,38 @@ function campaignLog(entry) {
 }
 
 async function runCampaign(contacts, message) {
-  campaignState.running = true;
-  campaignState.total   = contacts.length;
-  campaignState.sent    = 0;
-  campaignState.failed  = 0;
-  campaignState.skipped = 0;
-  campaignState.log     = [];
-  campaignState.startedAt = new Date().toISOString();
-  campaignState.stoppedAt = null;
-  campaignState.message   = message;
-  campaignState.cooldown  = false;
+  campaignState.running  = true;
+  campaignState.total    = contacts.length;
+  campaignState.sent     = 0;
+  campaignState.failed   = 0;
+  campaignState.skipped  = 0;
+  campaignState.notOnWA  = 0;
+  campaignState.checking = false;
+  campaignState.log      = [];
+  campaignState.startedAt     = new Date().toISOString();
+  campaignState.stoppedAt     = null;
+  campaignState.message       = message;
+  campaignState.cooldown      = false;
   campaignState.cooldownEndsAt = null;
+  campaignState.dailySent     = getDailySendCount();
+  campaignState.dailyCap      = DAILY_SEND_CAP;
 
-  // How many messages to send before a long cooldown
-  const BATCH_SIZE = 3;
-  // Short delay between every message: 8–15 seconds (randomised)
-  const MIN_MSG_DELAY = 8000;
-  const MAX_MSG_DELAY = 15000;
-  // Long cooldown after every BATCH_SIZE messages: 60–90 seconds (randomised)
-  const MIN_COOLDOWN  = 60000;
-  const MAX_COOLDOWN  = 90000;
+  // ── Timing constants (all randomised to mimic human behaviour) ──────────────
+  // Short gap between every individual message: 30–90 s
+  const MIN_MSG_DELAY  = 30000;
+  const MAX_MSG_DELAY  = 90000;
+  // Typing simulation before each message: 2–5 s
+  const MIN_TYPE_DELAY = 2000;
+  const MAX_TYPE_DELAY = 5000;
+  // Batch size: randomised 2–4 messages before a long cooldown
+  const minBatch = 2;
+  const maxBatch = 4;
+  // Long cooldown after each batch: 3–6 minutes
+  const MIN_COOLDOWN = 3 * 60 * 1000;
+  const MAX_COOLDOWN = 6 * 60 * 1000;
 
   let sentInBatch = 0;
+  let currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
 
   for (let i = 0; i < contacts.length; i++) {
     if (!campaignState.running) {
@@ -3918,20 +3948,58 @@ async function runCampaign(contacts, message) {
       break;
     }
 
-    const c = contacts[i];
+    // ── Daily cap guard ────────────────────────────────────────────────────
+    if (getDailySendCount() >= DAILY_SEND_CAP) {
+      campaignLog({ status: "stopped", text: `Daily cap of ${DAILY_SEND_CAP} messages reached. Resume tomorrow.` });
+      break;
+    }
+
+    const c     = contacts[i];
     const phone = (c.phone || c).replace(/\D/g, "");
     const name  = c.name || phone;
-    campaignState.current = name;
+    const jid   = phone + "@s.whatsapp.net";
+
+    campaignState.current  = name;
+    campaignState.checking = true;
     campaignState.cooldown = false;
     campaignState.cooldownEndsAt = null;
 
-    const jid = phone + "@s.whatsapp.net";
-    const personalised = message.replace(/\{name\}/gi, name);
-
+    // ── Step 1: Check the number is actually on WhatsApp ──────────────────
     try {
       if (!sock || !isConnected) throw new Error("Bot not connected");
+      const [result] = await sock.onWhatsApp(phone);
+      if (!result?.exists) {
+        campaignState.notOnWA++;
+        campaignState.skipped++;
+        campaignState.checking = false;
+        campaignLog({ status: "skipped", phone, name, error: "Not on WhatsApp" });
+        continue; // skip — no failed send flag on the account
+      }
+    } catch (err) {
+      // If the check itself fails (network hiccup), skip the contact safely
+      campaignState.skipped++;
+      campaignState.checking = false;
+      campaignLog({ status: "skipped", phone, name, error: "WA check failed: " + err.message });
+      continue;
+    }
+
+    campaignState.checking = false;
+
+    // ── Step 2: Typing indicator — makes it look human ────────────────────
+    try {
+      await sock.sendPresenceUpdate("composing", jid);
+      const typeMs = MIN_TYPE_DELAY + Math.floor(Math.random() * (MAX_TYPE_DELAY - MIN_TYPE_DELAY));
+      await new Promise(r => setTimeout(r, typeMs));
+      await sock.sendPresenceUpdate("paused", jid);
+    } catch (_) { /* non-fatal */ }
+
+    // ── Step 3: Send the personalised message ─────────────────────────────
+    const personalised = message.replace(/\{name\}/gi, name);
+    try {
       await sock.sendMessage(jid, { text: personalised });
+      const daily = incrementDailySend();
       campaignState.sent++;
+      campaignState.dailySent = daily;
       sentInBatch++;
       campaignLog({ status: "sent", phone, name });
     } catch (err) {
@@ -3939,28 +4007,29 @@ async function runCampaign(contacts, message) {
       campaignLog({ status: "failed", phone, name, error: err.message });
     }
 
-    // If this isn't the last contact, apply delays
+    // ── Step 4: Delays between messages ───────────────────────────────────
     if (i < contacts.length - 1 && campaignState.running) {
 
-      // After every BATCH_SIZE messages, take a long cooldown break
-      if (sentInBatch >= BATCH_SIZE) {
+      // Long cooldown after a full batch
+      if (sentInBatch >= currentBatchSize) {
         sentInBatch = 0;
-        const cooldownMs = MIN_COOLDOWN + Math.floor(Math.random() * (MAX_COOLDOWN - MIN_COOLDOWN));
-        campaignState.cooldown = true;
-        campaignState.cooldownEndsAt = new Date(Date.now() + cooldownMs).toISOString();
-        campaignLog({ status: "cooldown", text: `Cooling down for ${Math.round(cooldownMs / 1000)}s to keep the account safe` });
+        // Pick a fresh random batch size for the next round
+        currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
 
-        // Wait out the cooldown, checking every second so Stop works immediately
+        const cooldownMs = MIN_COOLDOWN + Math.floor(Math.random() * (MAX_COOLDOWN - MIN_COOLDOWN));
+        campaignState.cooldown      = true;
+        campaignState.cooldownEndsAt = new Date(Date.now() + cooldownMs).toISOString();
+        campaignLog({ status: "cooldown", text: `Batch done — cooling down ${Math.round(cooldownMs / 60000)}m to protect your account` });
+
         const deadline = Date.now() + cooldownMs;
         while (Date.now() < deadline && campaignState.running) {
           await new Promise(r => setTimeout(r, 1000));
         }
-
-        campaignState.cooldown = false;
+        campaignState.cooldown      = false;
         campaignState.cooldownEndsAt = null;
       }
 
-      // Short random delay between every individual message
+      // Short random gap between individual messages
       if (campaignState.running) {
         const msgDelay = MIN_MSG_DELAY + Math.floor(Math.random() * (MAX_MSG_DELAY - MIN_MSG_DELAY));
         await new Promise(r => setTimeout(r, msgDelay));
@@ -3968,12 +4037,16 @@ async function runCampaign(contacts, message) {
     }
   }
 
-  campaignState.running = false;
-  campaignState.current = null;
-  campaignState.cooldown = false;
+  campaignState.running        = false;
+  campaignState.current        = null;
+  campaignState.checking       = false;
+  campaignState.cooldown       = false;
   campaignState.cooldownEndsAt = null;
-  campaignState.stoppedAt = new Date().toISOString();
-  campaignLog({ status: "done", text: `Finished: ${campaignState.sent} sent, ${campaignState.failed} failed` });
+  campaignState.stoppedAt      = new Date().toISOString();
+  campaignLog({
+    status: "done",
+    text: `Finished — ${campaignState.sent} sent, ${campaignState.failed} failed, ${campaignState.notOnWA} not on WhatsApp`
+  });
 }
 
 // GET /api/contacts

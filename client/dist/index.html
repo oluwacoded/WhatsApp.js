@@ -373,6 +373,7 @@
     .log-stopped { color: var(--warn); }
     .log-done { color: var(--accent); font-weight: 700; }
     .log-cooldown { color: #f5c400; font-style: italic; }
+    .log-skipped  { color: var(--muted); font-style: italic; }
     #start-btn { min-width: 130px; }
     #stop-btn  { background: var(--danger); color: #fff; }
 
@@ -556,7 +557,7 @@
       <div class="tab-panel" id="tab-campaign">
         <p class="hint" style="margin-bottom:10px;">Write the message below or <strong>pick a saved template</strong>. Use <strong>{name}</strong> for personalisation.</p>
         <textarea id="camp-message" placeholder="Hey {name}! 👋 I just wanted to reach out..." style="min-height:160px;"></textarea>
-        <div class="hint" style="margin-top:6px;">Sends in batches of 3 with 8–15s between each message, then a 60–90s cooldown — keeps your account safe from WhatsApp bans.</div>
+        <div class="hint" style="margin-top:6px;">🛡 <strong>Account-safe mode:</strong> Verifies each number is on WhatsApp before sending, simulates typing, sends in random batches of 2–4 with 30–90s gaps, then a 3–6 min cooldown. Hard cap: 200 msgs/day.</div>
         <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center;">
           <button id="start-btn" onclick="startCampaign()">▶ Start Campaign</button>
           <button id="stop-btn"  onclick="stopCampaign()" style="display:none;">⏹ Stop</button>
@@ -584,8 +585,11 @@
           <span>Total: <strong id="p-total">0</strong></span>
           <span>Sent: <strong id="p-sent" style="color:var(--accent);">0</strong></span>
           <span>Failed: <strong id="p-failed" style="color:var(--danger);">0</strong></span>
+          <span>Skipped: <strong id="p-skipped" style="color:var(--muted);">0</strong></span>
+          <span>Not on WA: <strong id="p-notwa" style="color:var(--warn);">0</strong></span>
           <span>Status: <strong id="p-status">Idle</strong></span>
         </div>
+        <div id="p-dailycap" style="font-size:12px;color:var(--muted);margin-top:6px;margin-bottom:2px;"></div>
         <div class="progress-bar-wrap">
           <div class="progress-bar" id="p-bar" style="width:0%"></div>
         </div>
@@ -1002,31 +1006,49 @@
       const r = await fetch("/api/campaign/status");
       const d = await r.json();
       const pct = d.total > 0 ? Math.round(((d.sent + d.failed) / d.total) * 100) : 0;
-      document.getElementById("p-total").textContent  = d.total;
-      document.getElementById("p-sent").textContent   = d.sent;
-      document.getElementById("p-failed").textContent = d.failed;
+      document.getElementById("p-total").textContent   = d.total;
+      document.getElementById("p-sent").textContent    = d.sent;
+      document.getElementById("p-failed").textContent  = d.failed;
+      document.getElementById("p-skipped").textContent = d.skipped || 0;
+      document.getElementById("p-notwa").textContent   = d.notOnWA || 0;
+
       const statusLabel = d.running
-        ? (d.cooldown ? "Cooling Down ⏸" : "Running ▶")
+        ? (d.cooldown ? "Cooling Down ⏸" : d.checking ? "Checking WA… 🔍" : "Running ▶")
         : (d.stoppedAt ? "Finished ✅" : "Idle");
       document.getElementById("p-status").textContent = statusLabel;
       document.getElementById("p-bar").style.width = pct + "%";
-      document.getElementById("p-current").textContent = d.running && d.current && !d.cooldown ? "Now sending to: " + d.current : "";
+
+      // Current contact line
+      const currEl = document.getElementById("p-current");
+      if (d.running && d.current && !d.cooldown) {
+        currEl.textContent = (d.checking ? "🔍 Verifying WhatsApp: " : "📤 Sending to: ") + d.current;
+      } else { currEl.textContent = ""; }
+
+      // Daily cap badge
+      const capEl = document.getElementById("p-dailycap");
+      if (d.dailyCap) {
+        const remaining = Math.max(0, d.dailyCap - (d.dailySent || 0));
+        capEl.textContent = `Daily cap: ${d.dailySent || 0} / ${d.dailyCap} sent today — ${remaining} remaining`;
+        capEl.style.color = remaining < 20 ? "var(--danger)" : "var(--muted)";
+      }
 
       // Cooldown banner with live countdown
       const cooldownEl = document.getElementById("p-cooldown");
       const cooldownSecs = document.getElementById("p-cooldown-secs");
       if (d.cooldown && d.cooldownEndsAt) {
         const secsLeft = Math.max(0, Math.round((new Date(d.cooldownEndsAt) - Date.now()) / 1000));
+        const minsLeft = Math.floor(secsLeft / 60);
+        const sLeft    = secsLeft % 60;
         cooldownEl.style.display = "block";
-        cooldownSecs.textContent = secsLeft;
+        cooldownSecs.textContent = minsLeft > 0 ? `${minsLeft}m ${sLeft}s` : `${secsLeft}s`;
       } else {
         cooldownEl.style.display = "none";
       }
 
       if (d.log?.length) {
         document.getElementById("camp-log").innerHTML = d.log.map(entry => {
-          const cls  = { sent:"log-sent", failed:"log-failed", stopped:"log-stopped", done:"log-done", cooldown:"log-cooldown" }[entry.status] || "";
-          const icon = { sent:"✓", failed:"✗", done:"★", cooldown:"⏸" }[entry.status] || "•";
+          const cls  = { sent:"log-sent", failed:"log-failed", skipped:"log-skipped", stopped:"log-stopped", done:"log-done", cooldown:"log-cooldown" }[entry.status] || "";
+          const icon = { sent:"✓", failed:"✗", skipped:"↷", done:"★", cooldown:"⏸" }[entry.status] || "•";
           const label = entry.name || entry.text || entry.phone || "";
           return `<div class="log-row ${cls}">${icon} ${label}${entry.error ? " — " + entry.error : ""}</div>`;
         }).join("");
