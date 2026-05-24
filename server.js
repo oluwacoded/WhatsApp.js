@@ -807,7 +807,17 @@ const SMM_API_URL = "https://reallysimplesocial.com/api/v2";
 const _SMM_KEY_AT_STARTUP = process.env.SMM_API_KEY || "";
 const _SMM_KEY_CACHE_FILE = path.join(__dirname, "data", ".smm_key_cache");
 if (_SMM_KEY_AT_STARTUP) {
+  // Persist to hidden cache file
   try { fs.writeFileSync(_SMM_KEY_CACHE_FILE, _SMM_KEY_AT_STARTUP, "utf8"); } catch {}
+  // Also persist into settings.json so it survives even if env var is cleared
+  try {
+    const _sFile = path.join(__dirname, "data", "settings.json");
+    const _s = JSON.parse(fs.readFileSync(_sFile, "utf8") || "{}");
+    if (_s.smmApiKey !== _SMM_KEY_AT_STARTUP) {
+      _s.smmApiKey = _SMM_KEY_AT_STARTUP;
+      fs.writeFileSync(_sFile, JSON.stringify(_s, null, 2));
+    }
+  } catch {}
 }
 function getSMMKey() {
   if (_SMM_KEY_AT_STARTUP) return _SMM_KEY_AT_STARTUP;
