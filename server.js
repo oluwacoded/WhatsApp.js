@@ -3869,7 +3869,7 @@ function writeContacts(list) {
 }
 
 // ── Daily send cap tracking ─────────────────────────────────────────────────
-const DAILY_SEND_CAP = 200; // max messages per 24-hour window
+const DAILY_SEND_CAP = 1000; // max messages per 24-hour window
 function getDailySendCount() {
   const rec = readJSON("daily_sends.json", { date: "", count: 0 });
   const today = new Date().toISOString().slice(0, 10);

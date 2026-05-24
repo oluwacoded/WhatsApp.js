@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "zXR83cAKiD6tYCnw9zDgS"
+uri = "file://MFG_BOT_FRONTEND_PROMPT.md"
+type = "text"
+title = "MFG Bot — Complete Frontend Rebuild Prompt"
