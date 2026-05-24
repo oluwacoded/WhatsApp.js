@@ -4608,13 +4608,13 @@ app.get("*", (req, res) => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 5000;
 
 // ─── Anti-Sleep Keep-Alive (Railway / Replit) ────────────────────────────────
 // Ping ourselves every 2 minutes so the process never idles out on Railway.
 // Railway free tier sleeps after ~30min of no traffic — this prevents that.
 setInterval(() => {
-  const p = process.env.PORT || 8080;
+  const p = process.env.PORT || 5000;
   fetch(`http://localhost:${p}/api/status`).catch(() => {});
 }, 2 * 60 * 1000);
 
