@@ -462,10 +462,11 @@ async function downloadFromYtDlp(query) {
       "--no-warnings",
       "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
       "--no-playlist", "--max-filesize", "15m",
+      "--match-filter", "duration > 60",
       "-o", `${tmpBase}.%(ext)s`,
       "--print", "before_dl:%(title)s",
       "--quiet",
-      `scsearch3:${query}`
+      `scsearch5:${query}`
     ];
 
     console.log(`[MFG_bot] yt-dlp searching: "${query}"`);
@@ -852,10 +853,20 @@ function fallbackReply(userText, jid) {
 
 // ─── SMM Panel (reallysimplesocial.com) ──────────────────────────────────────
 const SMM_API_URL = "https://reallysimplesocial.com/api/v2";
-// Cache the key at module load time — process.env may not be reliably
-// accessible inside deep async callbacks on some Replit environments
+// Cache the key at module load time — also persisted to disk so it survives
+// across restarts even if process.env is stale in a zombie instance
 const _SMM_KEY_AT_STARTUP = process.env.SMM_API_KEY || "";
-function getSMMKey() { return _SMM_KEY_AT_STARTUP || process.env.SMM_API_KEY || settings.smmApiKey || ""; }
+const _SMM_KEY_CACHE_FILE = path.join(__dirname, "data", ".smm_key_cache");
+if (_SMM_KEY_AT_STARTUP) {
+  try { fs.writeFileSync(_SMM_KEY_CACHE_FILE, _SMM_KEY_AT_STARTUP, "utf8"); } catch {}
+}
+function getSMMKey() {
+  if (_SMM_KEY_AT_STARTUP) return _SMM_KEY_AT_STARTUP;
+  if (process.env.SMM_API_KEY) return process.env.SMM_API_KEY;
+  if (settings.smmApiKey) return settings.smmApiKey;
+  try { const k = fs.readFileSync(_SMM_KEY_CACHE_FILE, "utf8").trim(); if (k) return k; } catch {}
+  return "";
+}
 function getSMMMarkup() { return parseFloat(settings.smmMarkup || 0) / 100; }
 
 async function smmRequest(data) {
@@ -4534,8 +4545,12 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`[MFG_bot] Port ${PORT} in use — exiting so workflow can restart cleanly`);
-    process.exit(1);
+    console.error(`[MFG_bot] Port ${PORT} in use — killing old process and retrying...`);
+    const { execSync } = require("child_process");
+    try { execSync(`fuser -k ${PORT}/tcp`, { stdio: "ignore" }); } catch {}
+    setTimeout(() => {
+      server.listen(PORT, "0.0.0.0");
+    }, 2000);
   } else {
     console.error("[MFG_bot] Server error:", err);
     process.exit(1);
