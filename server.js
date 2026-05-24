@@ -1794,6 +1794,35 @@ async function connectToWhatsApp() {
         const EIGHTBALL = ["yes, definitely 🎱","it is certain 🎱","without a doubt 🎱","yes, go for it 🎱","signs point to yes 🎱","ask again later 🎱","cannot predict now 🎱","concentrate and ask again 🎱","don't count on it 🎱","my reply is no 🎱","my sources say no 🎱","outlook not so good 🎱","very doubtful 🎱","absolutely not 🎱","better not tell you now 🎱"];
         const FORTUNES = ["something unexpected will bring you joy this week","the answer you've been waiting for is closer than you think","your efforts are about to pay off — keep going","someone is thinking about you right now","a small decision you make today will have a big impact","success comes to those who don't stop when they're tired","your next move will surprise even yourself","what you're looking for is already within you","expect a message from an old friend soon","the next 48 hours will shift something for you"];
 
+        const DISPLAY_3D = [
+          '```\n   ╔══════════╗\n  ╱┆          ╱║\n ╔════════════╗║\n ║ ╚══════════╬╝\n ║╱           ║╱\n ╚════════════╝\n     🎲 CUBE```',
+          '```\n        ▲\n       ▲█▲\n      ▲███▲\n     ▲█████▲\n    ▲███████▲\n   ▲█████████▲\n  ▔▔▔▔▔▔▔▔▔▔▔▔▔\n    🏔 PYRAMID```',
+          '```\n    ◇◆◇◆◇\n   ◆███████◆\n  ◆█████████◆\n ◆███████████◆\n  ◆█████████◆\n   ◆███████◆\n    ◇◆◇◆◇\n    💎 DIAMOND```',
+          '```\n╔══╗\n║  ╠══╗\n╚══╣  ╠══╗\n   ╚══╣  ╠══╗\n      ╚══╣  ║\n         ╚══╝\n  🪜 STAIRCASE```',
+          '```\n      ████\n    ████████\n   ██████████\n  ████████████\n  ████████████\n   ██████████\n    ████████\n      ████\n    🌍 SPHERE```',
+          '```\n   ▲   ▲   ▲\n  ▲█▲ ▲█▲ ▲█▲\n ████████████\n ████████████\n ▀▀▀▀▀▀▀▀▀▀▀▀\n   👑 CROWN```',
+          '```\n      ╱▲╲\n     ╱███╲\n    ╱█████╲\n   ╱███████╲\n   ║███████║\n   ║███████║\n   ╚═══════╝\n   🚀 ROCKET```',
+          '```\n        ✦\n      ✦✦✦✦✦\n    ✦✦✦✦✦✦✦✦✦\n  ✦✦✦✦✦✦✦✦✦✦✦✦✦\n    ✦✦✦✦✦✦✦✦✦\n      ✦✦✦✦✦\n        ✦\n   ⭐ STARBURST```',
+          '```\n ╭────╮  ╭────╮\n╱  ╭──╯  ╰──╮  ╲\n╲  ╰──╮  ╭──╯  ╱\n ╰────╯  ╰────╯\n    ♾ INFINITY```',
+          '```\n   ╭──────────╮\n  ╱  ★  1st ★  ╲\n ║  ╭────────╮  ║\n ║  │  CHAMP │  ║\n  ╲ ╰────────╯ ╱\n    ╰────┬────╯\n   ╔═════╧═════╗\n   ╚═══════════╝\n   🏆 TROPHY```',
+          '```\n  ╱╲\n ╱██╲\n╱████╲\n▔▔╱╲▔▔\n  ╱  ╲\n ╱    ╲\n╱      ╲\n  ⚡ LIGHTNING```',
+          '```\n   ╭──────────╮\n  ╱   ₿  ₿  ₿  ╲\n ║  ╭──────────╮ ║\n ║  │ 3D COIN  │ ║\n  ╲ ╰──────────╯╱\n   ╰────────────╯\n   🪙 BITCOIN```',
+          '```\n ██╗   ██╗███████╗\n ██║   ██║██╔════╝\n ██║   ██║█████╗\n ╚██╗ ██╔╝██╔══╝\n  ╚████╔╝ ███████╗\n   ╚═══╝  ╚══════╝\n   🤖 MFG BOT```',
+          '```\n  ◢████████◣\n ████████████\n ██ ◉    ◉ ██\n ██   ▾    ██\n ██  ╭──╮  ██\n ████████████\n  ◥████████◤\n   👾 ALIEN```',
+          '```\n      ▓▓▓\n    ▓▓▓▓▓▓▓\n   ▓▓░░░░░▓▓\n  ▓▓░▓░░░▓░▓▓\n  ▓▓░░░░░░░▓▓\n  ▓▓░▓░░░▓░▓▓\n  ▓▓░░▓▓▓░░▓▓\n   ▓▓░░░░░▓▓\n    ▓▓▓▓▓▓▓\n   💀 SKULL```',
+          '```\n  ┌─────────────┐\n  │  ╔═══════╗  │\n  │  ║ ◈ ◈ ◈ ║  │\n  │  ║       ║  │\n  │  ╚═══════╝  │\n  └──────┬──────┘\n         │\n  ┌──────┴──────┐\n  │  ██  ██  ██ │\n  └─────────────┘\n   🖥 COMPUTER```',
+          '```\n    ╭───────╮\n   ╱  ╭───╮  ╲\n  ╱   │ ❤ │   ╲\n ║    ╰───╯    ║\n ║  ╭───────╮  ║\n  ╲ │ LOVE  │ ╱\n   ╲╰───────╯╱\n    ╰─────────╯\n   ❤ 3D HEART```',
+          '```\n   ___________\n  /  _________/╲\n /  /          ╲ ╲\n/__/____________╲_╲\n╲  ╲            ╱ ╱\n ╲  ╲__________╱ ╱\n  ╲____________╱╱\n  💼 BRIEFCASE```',
+          '```\n      ▲▲▲\n    ▲▲▲▲▲▲▲\n   ▲▲  ▲  ▲▲\n  ▲▲   ▲   ▲▲\n  ▲▲  ▲▲▲  ▲▲\n ▲▲▲▲▲▲▲▲▲▲▲▲▲\n  ▔▔▔▔▔▔▔▔▔▔▔\n   🌲 PINE TREE```',
+          '```\n  ╔══╦══╦══╗\n  ║  ║  ║  ║\n  ╠══╬══╬══╣\n  ║  ║ ✕║  ║\n  ╠══╬══╬══╣\n  ║  ║  ║  ║\n  ╚══╩══╩══╝\n   ❌ TIC TAC TOE```',
+        ];
+
+        if (cmd === "display" && args[0] === "3d") {
+          const art = DISPLAY_3D[Math.floor(Math.random() * DISPLAY_3D.length)];
+          await send(art);
+          continue;
+        }
+
         // ── TEXT TOOLS ───────────────────────────────────────────────────
         if (cmd === "upper") { await send(args.join(" ").toUpperCase() || "give me text: .upper <text>"); continue; }
         if (cmd === "lower") { await send(args.join(" ").toLowerCase() || "give me text: .lower <text>"); continue; }
