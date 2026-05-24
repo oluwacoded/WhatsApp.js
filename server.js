@@ -3869,7 +3869,7 @@ function writeContacts(list) {
 }
 
 // ── Daily send cap tracking ─────────────────────────────────────────────────
-const DAILY_SEND_CAP = 1000; // max messages per 24-hour window
+const DAILY_SEND_CAP = 200; // max messages per 24-hour window (kept low to avoid WA ban)
 function getDailySendCount() {
   const rec = readJSON("daily_sends.json", { date: "", count: 0 });
   const today = new Date().toISOString().slice(0, 10);
@@ -3908,6 +3908,32 @@ function campaignLog(entry) {
   if (campaignState.log.length > 50) campaignState.log.pop();
 }
 
+// ── Casual warm-up openers (sent BEFORE the real message to open a real convo) ──
+const CAMPAIGN_OPENERS = [
+  "How far", "How are u", "Hi", "how u de", "yo", "hey",
+  "sup", "How body", "how you dey", "how e go", "wazzup",
+  "how na", "e don tey", "save up", "long time", "wyd",
+  "you good?", "you there?", "oya talk", "how market",
+  "how life", "how today", "you dey?", "hi there", "hello",
+  "howdy", "hey you", "what's good", "how's things", "bro hi",
+  "sis hi", "yo yo", "holla", "what's up", "big sup"
+];
+
+// ── Spintax engine: {word1|word2|word3} → picks one randomly ─────────────────
+function spinText(template) {
+  return template.replace(/\{([^{}]+)\}/g, (_, choices) => {
+    const opts = choices.split("|");
+    return opts[Math.floor(Math.random() * opts.length)];
+  });
+}
+
+// ── Personalise + spin a message ─────────────────────────────────────────────
+function buildCampaignMessage(template, name) {
+  let msg = template.replace(/\{name\}/gi, name);
+  msg = spinText(msg);
+  return msg;
+}
+
 async function runCampaign(contacts, message) {
   campaignState.running  = true;
   campaignState.total    = contacts.length;
@@ -3925,24 +3951,33 @@ async function runCampaign(contacts, message) {
   campaignState.dailySent     = getDailySendCount();
   campaignState.dailyCap      = DAILY_SEND_CAP;
 
-  // ── Timing constants (all randomised to mimic human behaviour) ──────────────
-  // Short gap between every individual message: 30–90 s
-  const MIN_MSG_DELAY  = 30000;
-  const MAX_MSG_DELAY  = 90000;
-  // Typing simulation before each message: 2–5 s
-  const MIN_TYPE_DELAY = 2000;
-  const MAX_TYPE_DELAY = 5000;
-  // Batch size: randomised 2–4 messages before a long cooldown
-  const minBatch = 2;
-  const maxBatch = 4;
-  // Long cooldown after each batch: 3–6 minutes
-  const MIN_COOLDOWN = 3 * 60 * 1000;
-  const MAX_COOLDOWN = 6 * 60 * 1000;
+  // ── Timing constants (stealth mode — very human-like) ──────────────────────
+  // Gap between each message: 60–180 s (1–3 min — hard to flag as bot)
+  const MIN_MSG_DELAY  = 60 * 1000;
+  const MAX_MSG_DELAY  = 180 * 1000;
+  // Typing simulation for opener: 2–6 s
+  const MIN_TYPE_OPENER = 2000;
+  const MAX_TYPE_OPENER = 6000;
+  // Typing simulation for main message: 4–10 s (longer msg = longer typing)
+  const MIN_TYPE_MAIN   = 4000;
+  const MAX_TYPE_MAIN   = 10000;
+  // Gap between opener and main message within same contact: 12–30 s
+  const MIN_INNER_DELAY = 12 * 1000;
+  const MAX_INNER_DELAY = 30 * 1000;
+  // Batch size: 1–2 contacts before a long cooldown
+  const minBatch = 1;
+  const maxBatch = 2;
+  // Long cooldown after each batch: 12–25 minutes
+  const MIN_COOLDOWN = 12 * 60 * 1000;
+  const MAX_COOLDOWN = 25 * 60 * 1000;
+
+  // Shuffle contacts so there's no detectable order pattern
+  const shuffled = [...contacts].sort(() => Math.random() - 0.5);
 
   let sentInBatch = 0;
   let currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
 
-  for (let i = 0; i < contacts.length; i++) {
+  for (let i = 0; i < shuffled.length; i++) {
     if (!campaignState.running) {
       campaignLog({ status: "stopped", text: "Campaign stopped by user" });
       break;
@@ -3954,7 +3989,7 @@ async function runCampaign(contacts, message) {
       break;
     }
 
-    const c     = contacts[i];
+    const c     = shuffled[i];
     const phone = (c.phone || c).replace(/\D/g, "");
     const name  = c.name || phone;
     const jid   = phone + "@s.whatsapp.net";
@@ -3973,10 +4008,9 @@ async function runCampaign(contacts, message) {
         campaignState.skipped++;
         campaignState.checking = false;
         campaignLog({ status: "skipped", phone, name, error: "Not on WhatsApp" });
-        continue; // skip — no failed send flag on the account
+        continue;
       }
     } catch (err) {
-      // If the check itself fails (network hiccup), skip the contact safely
       campaignState.skipped++;
       campaignState.checking = false;
       campaignLog({ status: "skipped", phone, name, error: "WA check failed: " + err.message });
@@ -3985,18 +4019,47 @@ async function runCampaign(contacts, message) {
 
     campaignState.checking = false;
 
-    // ── Step 2: Typing indicator — makes it look human ────────────────────
+    // ── Step 2: Randomly go "available" first (looks like human opening app) ──
+    try {
+      if (Math.random() > 0.4) {
+        await sock.sendPresenceUpdate("available", jid);
+        await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
+      }
+    } catch (_) {}
+
+    // ── Step 3: Send a random casual opener ───────────────────────────────
+    const opener = CAMPAIGN_OPENERS[Math.floor(Math.random() * CAMPAIGN_OPENERS.length)];
     try {
       await sock.sendPresenceUpdate("composing", jid);
-      const typeMs = MIN_TYPE_DELAY + Math.floor(Math.random() * (MAX_TYPE_DELAY - MIN_TYPE_DELAY));
-      await new Promise(r => setTimeout(r, typeMs));
+      const openerTypeMs = MIN_TYPE_OPENER + Math.floor(Math.random() * (MAX_TYPE_OPENER - MIN_TYPE_OPENER));
+      await new Promise(r => setTimeout(r, openerTypeMs));
       await sock.sendPresenceUpdate("paused", jid);
-    } catch (_) { /* non-fatal */ }
+      await sock.sendMessage(jid, { text: opener });
+      campaignLog({ status: "opener", phone, name, text: opener });
+    } catch (err) {
+      campaignState.failed++;
+      campaignLog({ status: "failed", phone, name, error: "Opener failed: " + err.message });
+      continue;
+    }
 
-    // ── Step 3: Send the personalised message ─────────────────────────────
-    const personalised = message.replace(/\{name\}/gi, name);
+    // ── Step 4: Natural pause — like the person is reading/typing back ────
+    const innerDelay = MIN_INNER_DELAY + Math.floor(Math.random() * (MAX_INNER_DELAY - MIN_INNER_DELAY));
+    await new Promise(r => setTimeout(r, innerDelay));
+
+    if (!campaignState.running) break;
+
+    // ── Step 5: Typing simulation for main message ────────────────────────
     try {
-      await sock.sendMessage(jid, { text: personalised });
+      await sock.sendPresenceUpdate("composing", jid);
+      const mainTypeMs = MIN_TYPE_MAIN + Math.floor(Math.random() * (MAX_TYPE_MAIN - MIN_TYPE_MAIN));
+      await new Promise(r => setTimeout(r, mainTypeMs));
+      await sock.sendPresenceUpdate("paused", jid);
+    } catch (_) {}
+
+    // ── Step 6: Send the main campaign message (personalised + spun) ──────
+    const finalMsg = buildCampaignMessage(message, name);
+    try {
+      await sock.sendMessage(jid, { text: finalMsg });
       const daily = incrementDailySend();
       campaignState.sent++;
       campaignState.dailySent = daily;
@@ -4007,29 +4070,28 @@ async function runCampaign(contacts, message) {
       campaignLog({ status: "failed", phone, name, error: err.message });
     }
 
-    // ── Step 4: Delays between messages ───────────────────────────────────
-    if (i < contacts.length - 1 && campaignState.running) {
+    // ── Step 7: Delays between contacts ───────────────────────────────────
+    if (i < shuffled.length - 1 && campaignState.running) {
 
       // Long cooldown after a full batch
       if (sentInBatch >= currentBatchSize) {
         sentInBatch = 0;
-        // Pick a fresh random batch size for the next round
         currentBatchSize = minBatch + Math.floor(Math.random() * (maxBatch - minBatch + 1));
 
         const cooldownMs = MIN_COOLDOWN + Math.floor(Math.random() * (MAX_COOLDOWN - MIN_COOLDOWN));
-        campaignState.cooldown      = true;
+        campaignState.cooldown       = true;
         campaignState.cooldownEndsAt = new Date(Date.now() + cooldownMs).toISOString();
-        campaignLog({ status: "cooldown", text: `Batch done — cooling down ${Math.round(cooldownMs / 60000)}m to protect your account` });
+        campaignLog({ status: "cooldown", text: `Batch done — resting ${Math.round(cooldownMs / 60000)}m to protect your account` });
 
         const deadline = Date.now() + cooldownMs;
         while (Date.now() < deadline && campaignState.running) {
           await new Promise(r => setTimeout(r, 1000));
         }
-        campaignState.cooldown      = false;
+        campaignState.cooldown       = false;
         campaignState.cooldownEndsAt = null;
       }
 
-      // Short random gap between individual messages
+      // Short random gap between individual contacts
       if (campaignState.running) {
         const msgDelay = MIN_MSG_DELAY + Math.floor(Math.random() * (MAX_MSG_DELAY - MIN_MSG_DELAY));
         await new Promise(r => setTimeout(r, msgDelay));
