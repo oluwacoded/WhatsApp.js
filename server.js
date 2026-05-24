@@ -960,15 +960,15 @@ async function connectToWhatsApp() {
   });
 
   // ─── Pairing Code Request ─────────────────────────────────────────────────
-  // Calling requestPairingCode immediately throws "Connection Closed" (socket
-  // hasn't finished noise handshake). Calling after a setTimeout produces a
-  // code WA hasn't registered ("Couldn't link device"). The correct moment is
-  // when the socket emits its FIRST connection.update event (state becomes
-  // "connecting"), which means the handshake is done but creds aren't yet.
+  // CORRECT BAILEYS TIMING: requestPairingCode must be called when the QR
+  // event fires for the first time. That's the moment WhatsApp's noise
+  // handshake is complete and the server is waiting for either a QR scan OR
+  // a pairing code — any earlier call throws "Connection Closed".
   if (usingPairingCode && !sock.authState.creds.registered) {
     const phone = pendingPairPhone;
     pendingPairPhone = null;
     let pairRequested = false;
+
     const tryRequest = async (trigger) => {
       if (pairRequested) return;
       pairRequested = true;
@@ -979,23 +979,47 @@ async function connectToWhatsApp() {
         if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
       } catch (e) {
         console.error(`[MFG_bot] Pairing code error (trigger=${trigger}):`, e.message);
-        if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
+        // Retry once after 2s in case of transient error
+        if (!pairRequested || trigger === "qr") {
+          setTimeout(async () => {
+            try {
+              console.log(`[MFG_bot] Retry requestPairingCode for ${phone}...`);
+              const code2 = await sock.requestPairingCode(phone);
+              console.log(`[MFG_bot] Pairing code (retry): ${code2}`);
+              if (pairCodeResolve) { pairCodeResolve({ success: true, code: code2 }); pairCodeResolve = null; }
+            } catch (e2) {
+              console.error(`[MFG_bot] Pairing code retry failed:`, e2.message);
+              if (pairCodeResolve) { pairCodeResolve({ success: false, error: e2.message }); pairCodeResolve = null; }
+            }
+          }, 2000);
+        } else {
+          if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
+        }
       }
     };
-    // Listen for the "connecting" state — that's when handshake is done but creds not yet registered
-    const pairListener = ({ connection }) => {
-      if (connection === "connecting" && !pairRequested) {
+
+    // Fire when QR event arrives — this is the correct Baileys moment
+    const pairListener = (update) => {
+      if (update.qr && !pairRequested) {
         sock.ev.off("connection.update", pairListener);
-        tryRequest("connecting");
+        // Don't expose QR to dashboard when in pairing mode
+        hasQr = false; currentQr = null;
+        tryRequest("qr");
       }
     };
     sock.ev.on("connection.update", pairListener);
-    // Safety fallback: if "connecting" never fires within 12s, try anyway
-    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 12000);
+    // Safety fallback: 20s in case QR event never fires
+    setTimeout(() => {
+      if (!pairRequested) {
+        sock.ev.off("connection.update", pairListener);
+        tryRequest("timeout-fallback");
+      }
+    }, 20000);
+
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
-    if (pairCodeResolve) { pairCodeResolve({ success: false, error: "already registered — logout first" }); pairCodeResolve = null; }
+    if (pairCodeResolve) { pairCodeResolve({ success: false, error: "already registered — logout first to re-pair" }); pairCodeResolve = null; }
   }
 
   sock.ev.on("connection.update", (update) => {
