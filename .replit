@@ -41,3 +41,8 @@ externalPort = 8080
 [deployment]
 deploymentTarget = "vm"
 run = ["node", "server.js"]
+
+[userenv]
+
+[userenv.shared]
+TG_API_HASH = "ffcc36998d90d7e16b1f96632560844b"

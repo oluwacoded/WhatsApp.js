@@ -22,6 +22,7 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const pino = require("pino");
+const tgBot = require("./telegram_bot");
 
 const app = express();
 app.use(cors());
@@ -1048,6 +1049,10 @@ async function connectToWhatsApp() {
       isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
       hasEverConnected = true; consecutive401s = 0;
       console.log("[MFG_bot] Connected to WhatsApp");
+      // Auto-reconnect Telegram if a saved session exists
+      tgBot.autoConnect(async (msg) => {
+        try { await sock.sendMessage(OWNER_JID, { text: msg }); } catch {}
+      }).catch(() => {});
       // Greet the operator — but only once per 10 minutes to prevent reconnection spam
       const now = Date.now();
       const timeSinceLastGreet = now - (connectToWhatsApp._lastGreetSentAt || 0);
@@ -3549,6 +3554,145 @@ async function connectToWhatsApp() {
               await send("❌ Couldn't get an answer right now. Try again.");
             }
           } catch (e) { await send("❌ AI error: " + e.message); }
+          continue;
+        }
+
+        // ── .tg — Telegram Userbot Control ────────────────────────────────
+        if (cmd === "tg" || cmd === "telegram") {
+          if (!senderIsOwner) { await send("❌ Owner only."); continue; }
+          const sub  = (args[0] || "").toLowerCase();
+          const rest = args.slice(1).join(" ").trim();
+
+          const tgNotify = async (msg) => {
+            try { await send(msg); } catch {}
+          };
+
+          // .tg setup <api_id>  — save the numeric API ID
+          if (sub === "setup" || sub === "apiid" || sub === "setid") {
+            const id = parseInt(rest || args[0]);
+            if (!id || isNaN(id)) {
+              await send("Usage: .tg setup <API_ID>\n\nGet your API ID (the number) from:\nmy.telegram.org/apps\n\nYou already gave me the API Hash — I just need the number.");
+              continue;
+            }
+            tgBot.saveConfig({ apiId: id, apiHash: process.env.TG_API_HASH || tgBot.getApiHash() });
+            await send(`✅ Telegram API ID saved: ${id}\n\nNow send:\n.tg connect +2349132883869\n\n(use your actual Telegram phone number)`);
+            continue;
+          }
+
+          // .tg connect <phone>  — start login
+          if (sub === "connect" || sub === "login" || sub === "start") {
+            const phone = rest || args[0] || "+2349132883869";
+            if (!tgBot.getApiId()) {
+              await send("❌ Set your API ID first:\n.tg setup <your_api_id>\n\nGet it from: my.telegram.org/apps");
+              continue;
+            }
+            await send("⏳ Connecting to Telegram...");
+            tgBot.connect(tgNotify, phone).catch(e => tgNotify("❌ " + e.message));
+            continue;
+          }
+
+          // .tg code <xxxxx>  — enter the OTP Telegram sent
+          if (sub === "code") {
+            const code = rest || args[0];
+            if (!code) { await send("Usage: .tg code <5-digit-code>"); continue; }
+            const resolved = tgBot.resolveCode(code);
+            if (!resolved) await send("⚠️ No login waiting for a code right now. Start with .tg connect first.");
+            continue;
+          }
+
+          // .tg 2fa <password>  — enter 2FA cloud password
+          if (sub === "2fa" || sub === "password" || sub === "pass") {
+            const pw = args.slice(1).join(" ").trim() || rest;
+            if (!pw) { await send("Usage: .tg 2fa <your_cloud_password>"); continue; }
+            const resolved = tgBot.resolve2FA(pw);
+            if (!resolved) await send("⚠️ No login waiting for a 2FA password right now.");
+            continue;
+          }
+
+          // .tg disconnect / .tg logout
+          if (sub === "disconnect" || sub === "logout" || sub === "off") {
+            await tgBot.disconnect();
+            await send("🔌 Telegram disconnected.");
+            continue;
+          }
+
+          // .tg me / .tg status  — connection info
+          if (sub === "me" || sub === "status" || sub === "info" || !sub) {
+            if (!tgBot.isConnected()) {
+              const hasId   = !!tgBot.getApiId();
+              const hasHash = !!tgBot.getApiHash();
+              await send(
+                `📱 *Telegram Status: Disconnected*\n\n` +
+                `API ID: ${hasId ? "✅ Set" : "❌ Missing — .tg setup <id>"}\n` +
+                `API Hash: ${hasHash ? "✅ Set" : "❌ Missing"}\n\n` +
+                `To connect: .tg connect +2349132883869`
+              );
+              continue;
+            }
+            const me = await tgBot.getMe();
+            const cs = tgBot.getCampaignStatus();
+            let status = `📱 *Telegram Connected* ✅\n\n`;
+            if (me) status += `Account: @${me.username || "N/A"} (${me.firstName || ""} ${me.lastName || ""})\nPhone: +${me.phone || "N/A"}\n`;
+            if (cs) {
+              status += `\n📊 *Campaign Running:*\n`;
+              status += `✔️ Sent: ${cs.sent} / ${cs.total} (${cs.percent}%)\n`;
+              status += `❌ Failed: ${cs.failed}\n`;
+              status += `⏱ Elapsed: ${cs.elapsed} min | ~${cs.remain} min left`;
+            } else {
+              status += `\nNo campaign running.\nStart one: .tg campaign`;
+            }
+            await send(status);
+            continue;
+          }
+
+          // .tg campaign  — start bulk campaign
+          if (sub === "campaign" || sub === "blast" || sub === "send") {
+            if (!tgBot.isConnected()) { await send("❌ Not connected. Send .tg connect first."); continue; }
+            if (tgBot.getCampaignStatus()) { await send("⚠️ Campaign already running. Send .tg stop to cancel."); continue; }
+
+            // Check if a VCF was sent as a document
+            if (msg.message?.documentMessage || msg.message?.documentWithCaptionMessage) {
+              try {
+                const buf = await downloadMediaMessage(msg, "buffer", {});
+                const vcfText = buf.toString("utf8");
+                const contacts = tgBot.parseVCF(vcfText);
+                if (!contacts.length) { await send("❌ No valid contacts found in the VCF file."); continue; }
+                const campaignMsg = rest || "Hey {name}! 👋";
+                await tgBot.startCampaign(contacts, campaignMsg, tgNotify);
+              } catch (e) { await send("❌ Could not read VCF: " + e.message); }
+              continue;
+            }
+
+            await send(
+              `📱 *Telegram Campaign Setup*\n\n` +
+              `Send a VCF contacts file as a document with your message in the caption.\n\n` +
+              `OR send:\n.tg campaign <phone1>,<phone2>,... | <your message>\n\n` +
+              `*Tip:* Use {name} in your message to personalise per contact.\n\n` +
+              `Rate: 30 msgs/min (Telegram safe limit)`
+            );
+            continue;
+          }
+
+          // .tg stop  — stop campaign
+          if (sub === "stop" || sub === "cancel" || sub === "pause") {
+            const stopped = tgBot.stopCampaign();
+            await send(stopped ? "⏹ Telegram campaign stopped." : "ℹ️ No campaign is running.");
+            continue;
+          }
+
+          // .tg help
+          await send(
+            `📱 *Telegram Commands*\n\n` +
+            `*.tg setup <api_id>* — set your numeric API ID\n` +
+            `*.tg connect <phone>* — connect (triggers OTP)\n` +
+            `*.tg code <xxxxx>* — enter the OTP code\n` +
+            `*.tg 2fa <password>* — enter 2FA password\n` +
+            `*.tg status* — connection & campaign info\n` +
+            `*.tg campaign* — start bulk campaign\n` +
+            `*.tg stop* — stop running campaign\n` +
+            `*.tg disconnect* — log out\n\n` +
+            `_Get API credentials: my.telegram.org/apps_`
+          );
           continue;
         }
 
