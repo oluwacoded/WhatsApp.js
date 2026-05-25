@@ -1059,11 +1059,10 @@ async function connectToWhatsApp() {
       tgBot.autoConnect(async (msg) => {
         try { await sock.sendMessage(OWNER_JID, { text: msg }); } catch {}
       }).catch(() => {});
-      // Greet the operator — but only once per 10 minutes to prevent reconnection spam
-      const now = Date.now();
-      const timeSinceLastGreet = now - (connectToWhatsApp._lastGreetSentAt || 0);
-      const shouldGreet = timeSinceLastGreet > 10 * 60 * 1000;
-      if (shouldGreet) connectToWhatsApp._lastGreetSentAt = now;
+      // Greet ONCE per calendar day only — reconnections within the same day stay silent
+      const todayDate = new Date().toISOString().slice(0, 10);
+      const shouldGreet = connectToWhatsApp._lastGreetDate !== todayDate;
+      if (shouldGreet) connectToWhatsApp._lastGreetDate = todayDate;
       setTimeout(async () => {
         try {
           const selfJid = sock.user.id;
