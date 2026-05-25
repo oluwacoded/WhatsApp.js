@@ -51,8 +51,19 @@ let tgCampaign = {
 function getConfig() { return tgConfig; }
 function isConnected() { return tgClient && tgClient.connected; }
 
-function getApiId()   { return parseInt(process.env.TG_API_ID  || tgConfig.apiId  || "0"); }
-function getApiHash() { return process.env.TG_API_HASH || tgConfig.apiHash || ""; }
+function getApiId() {
+  if (process.env.TG_API_ID) return parseInt(process.env.TG_API_ID);
+  if (tgConfig.apiId)        return parseInt(tgConfig.apiId);
+  // Re-read from disk in case the file was written after module load
+  try { const d = JSON.parse(fs.readFileSync(CONFIG_FILE,"utf8")); if (d.apiId) { tgConfig = d; return parseInt(d.apiId); } } catch {}
+  return 0;
+}
+function getApiHash() {
+  if (process.env.TG_API_HASH) return process.env.TG_API_HASH;
+  if (tgConfig.apiHash)        return tgConfig.apiHash;
+  try { const d = JSON.parse(fs.readFileSync(CONFIG_FILE,"utf8")); if (d.apiHash) { tgConfig = d; return d.apiHash; } } catch {}
+  return "";
+}
 
 // ─── save helpers ──────────────────────────────────────────────────────────
 

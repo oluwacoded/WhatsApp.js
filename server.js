@@ -825,10 +825,16 @@ if (_SMM_KEY_AT_STARTUP) {
   } catch {}
 }
 function getSMMKey() {
-  if (_SMM_KEY_AT_STARTUP) return _SMM_KEY_AT_STARTUP;
+  // Check every source fresh on every call — never depend on startup-time caching
   if (process.env.SMM_API_KEY) return process.env.SMM_API_KEY;
-  if (settings.smmApiKey) return settings.smmApiKey;
+  if (_SMM_KEY_AT_STARTUP)     return _SMM_KEY_AT_STARTUP;
+  if (settings.smmApiKey)      return settings.smmApiKey;
   try { const k = fs.readFileSync(_SMM_KEY_CACHE_FILE, "utf8").trim(); if (k) return k; } catch {}
+  // Last resort: re-read settings.json directly from disk
+  try {
+    const disk = JSON.parse(fs.readFileSync(path.join(__dirname, "data", "settings.json"), "utf8"));
+    if (disk.smmApiKey) { settings.smmApiKey = disk.smmApiKey; return disk.smmApiKey; }
+  } catch {}
   return "";
 }
 function getSMMMarkup() { return parseFloat(settings.smmMarkup || 0) / 100; }
