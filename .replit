@@ -46,3 +46,4 @@ run = ["node", "server.js"]
 
 [userenv.shared]
 TG_API_HASH = "ffcc36998d90d7e16b1f96632560844b"
+TG_API_ID = "36645376"
