@@ -448,12 +448,16 @@
   <!-- ── QR Section ── -->
   <div id="qr-section">
     <div class="card">
-      <div class="card-title">Scan QR Code</div>
-      <div id="qr-canvas-wrap">
-        <img id="qr-img" src="" alt="QR Code" />
-        <p>Open WhatsApp → Settings → Linked Devices → Link a Device → scan this code</p>
+      <div class="card-title">📷 Scan QR Code</div>
+      <div style="background:rgba(37,211,102,0.08);border:1px solid rgba(37,211,102,0.3);border-radius:8px;padding:10px 14px;font-size:13px;color:var(--accent);margin-bottom:14px;text-align:center;">
+        ⚡ QR is live — <strong>scan it NOW</strong> before it expires<br>
+        <span style="color:var(--muted);font-size:12px;">Expires in: <strong id="qr-countdown" style="color:var(--accent);">60s</strong> — auto-refreshes when expired</span>
       </div>
-      <div class="divider">or use phone number pairing below</div>
+      <div id="qr-canvas-wrap">
+        <img id="qr-img" src="" alt="QR Code" style="border-radius:8px;" />
+        <p style="margin-top:10px;font-size:13px;">WhatsApp → ⋮ menu → <strong>Linked Devices</strong> → <strong>Link a Device</strong> → scan</p>
+      </div>
+      <div class="divider">can't scan? use phone number pairing below — it's easier on mobile</div>
     </div>
   </div>
 
@@ -704,15 +708,38 @@
     return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
   }
 
-  // ── Render QR — uses server-side image endpoint ──
+  // ── Render QR — uses server-side image endpoint + live countdown ──
   let qrTimestamp = 0;
+  let qrCountdownInterval = null;
   function renderQr() {
     const img = document.getElementById("qr-img");
     const ts = Date.now();
     img.src = api("/api/qr/image") + "?t=" + ts;
     qrTimestamp = ts;
     qrRendered = true;
+    // Start 60-second countdown
+    if (qrCountdownInterval) clearInterval(qrCountdownInterval);
+    let secsLeft = 58;
+    const cdEl = document.getElementById("qr-countdown");
+    if (cdEl) cdEl.textContent = secsLeft + "s";
+    qrCountdownInterval = setInterval(() => {
+      secsLeft--;
+      const cd = document.getElementById("qr-countdown");
+      if (cd) {
+        if (secsLeft <= 0) {
+          cd.textContent = "Refreshing…";
+          clearInterval(qrCountdownInterval);
+          qrCountdownInterval = null;
+        } else {
+          cd.textContent = secsLeft + "s";
+          cd.style.color = secsLeft <= 15 ? "var(--danger)" : "var(--accent)";
+        }
+      }
+    }, 1000);
   }
+
+  // ── Safe element helper — never throws on missing elements ──
+  function el(id) { return document.getElementById(id) || {}; }
 
   // ── Poll /api/status ──
   async function pollStatus() {
@@ -722,22 +749,23 @@
       const d = await r.json();
 
       // Stats
-      document.getElementById("s-uptime").textContent = fmtUptime(d.uptime || 0);
-      document.getElementById("s-msgs").textContent   = d.messageCount ?? "—";
-      document.getElementById("s-chats").textContent  = d.chatCount ?? "—";
-      document.getElementById("s-ai").textContent     = d.aiEnabled ? "ON" : "OFF";
+      el("s-uptime").textContent = fmtUptime(d.uptime || 0);
+      el("s-msgs").textContent   = d.messageCount ?? "—";
+      el("s-chats").textContent  = d.chatCount ?? "—";
+      el("s-ai").textContent     = d.aiEnabled ? "ON" : "OFF";
 
-      const pulse  = document.getElementById("pulse-dot");
-      const badge  = document.getElementById("status-badge");
+      const pulse   = document.getElementById("pulse-dot");
+      const badge   = document.getElementById("status-badge");
       const connSec = document.getElementById("connected-section");
       const qrSec   = document.getElementById("qr-section");
       const pairSec = document.getElementById("pair-section");
       const danger  = document.getElementById("danger-card");
-
       const campSec = document.getElementById("campaign-section");
 
+      // Guard: if any critical element is missing, skip DOM updates
+      if (!pulse || !badge || !connSec || !qrSec || !pairSec || !danger || !campSec) return;
+
       if (d.connected) {
-        // CONNECTED
         pulse.className = "pulse";
         badge.className = ""; badge.textContent = "Online";
         connSec.className = "show";
@@ -750,34 +778,36 @@
         lastConnected = true;
 
       } else if (d.hasQr) {
-        // QR available
         pulse.className = "pulse qr";
         badge.className = "qr"; badge.textContent = "Waiting QR";
         connSec.className = "";
         qrSec.className   = "show";
         pairSec.style.display  = "block";
         danger.style.display   = "none";
-        campSec.className = "";
+        campSec.className = "";   // ← hide campaign when not connected
         lastConnected = false;
-
-        // Render QR from server-side image endpoint
         renderQr();
 
       } else {
-        // OFFLINE / disconnected
         pulse.className = "pulse offline";
         badge.className = "offline"; badge.textContent = "Offline";
         connSec.className = "";
         qrSec.className   = "";
         pairSec.style.display  = "block";
         danger.style.display   = "none";
-        campSec.className = "";
+        campSec.className = "";   // ← hide campaign when offline
         qrRendered = false;
         lastConnected = false;
       }
 
     } catch (e) {
-      document.getElementById("status-badge").textContent = "Unreachable";
+      // On network error: mark unreachable AND hide campaign so it can't be used
+      const badge   = document.getElementById("status-badge");
+      const campSec = document.getElementById("campaign-section");
+      const danger  = document.getElementById("danger-card");
+      if (badge)   { badge.textContent = "Unreachable"; badge.className = "offline"; }
+      if (campSec) campSec.className = "";
+      if (danger)  danger.style.display = "none";
     }
   }
 
@@ -1071,49 +1101,57 @@
   async function pollCampaign() {
     try {
       const r = await fetch("/api/campaign/status");
+      if (!r.ok) return;
       const d = await r.json();
-      const pct = d.total > 0 ? Math.round(((d.sent + d.failed) / d.total) * 100) : 0;
-      document.getElementById("p-total").textContent   = d.total;
-      document.getElementById("p-sent").textContent    = d.sent;
-      document.getElementById("p-failed").textContent  = d.failed;
-      document.getElementById("p-skipped").textContent = d.skipped || 0;
-      document.getElementById("p-notwa").textContent   = d.notOnWA || 0;
+      const total  = d.total  || 0;
+      const sent   = d.sent   || 0;
+      const failed = d.failed || 0;
+      const pct = total > 0 ? Math.round(((sent + failed) / total) * 100) : 0;
+
+      el("p-total").textContent   = total;
+      el("p-sent").textContent    = sent;
+      el("p-failed").textContent  = failed;
+      el("p-skipped").textContent = d.skipped || 0;
+      el("p-notwa").textContent   = d.notOnWA || 0;
 
       const statusLabel = d.running
         ? (d.cooldown ? "Cooling Down ⏸" : d.checking ? "Checking WA… 🔍" : "Running ▶")
         : (d.stoppedAt ? "Finished ✅" : "Idle");
-      document.getElementById("p-status").textContent = statusLabel;
-      document.getElementById("p-bar").style.width = pct + "%";
+      el("p-status").textContent = statusLabel;
+      const bar = document.getElementById("p-bar");
+      if (bar) bar.style.width = pct + "%";
 
-      // Current contact line
       const currEl = document.getElementById("p-current");
-      if (d.running && d.current && !d.cooldown) {
-        currEl.textContent = (d.checking ? "🔍 Verifying WhatsApp: " : "📤 Sending to: ") + d.current;
-      } else { currEl.textContent = ""; }
+      if (currEl) {
+        if (d.running && d.current && !d.cooldown) {
+          currEl.textContent = (d.checking ? "🔍 Verifying WhatsApp: " : "📤 Sending to: ") + d.current;
+        } else { currEl.textContent = ""; }
+      }
 
-      // Daily cap badge
       const capEl = document.getElementById("p-dailycap");
-      if (d.dailyCap) {
+      if (capEl && d.dailyCap) {
         const remaining = Math.max(0, d.dailyCap - (d.dailySent || 0));
         capEl.textContent = `Daily cap: ${d.dailySent || 0} / ${d.dailyCap} sent today — ${remaining} remaining`;
         capEl.style.color = remaining < 20 ? "var(--danger)" : "var(--muted)";
       }
 
-      // Cooldown banner with live countdown
-      const cooldownEl = document.getElementById("p-cooldown");
+      const cooldownEl   = document.getElementById("p-cooldown");
       const cooldownSecs = document.getElementById("p-cooldown-secs");
-      if (d.cooldown && d.cooldownEndsAt) {
-        const secsLeft = Math.max(0, Math.round((new Date(d.cooldownEndsAt) - Date.now()) / 1000));
-        const minsLeft = Math.floor(secsLeft / 60);
-        const sLeft    = secsLeft % 60;
-        cooldownEl.style.display = "block";
-        cooldownSecs.textContent = minsLeft > 0 ? `${minsLeft}m ${sLeft}s` : `${secsLeft}s`;
-      } else {
-        cooldownEl.style.display = "none";
+      if (cooldownEl && cooldownSecs) {
+        if (d.cooldown && d.cooldownEndsAt) {
+          const secsLeft = Math.max(0, Math.round((new Date(d.cooldownEndsAt) - Date.now()) / 1000));
+          const minsLeft = Math.floor(secsLeft / 60);
+          const sLeft    = secsLeft % 60;
+          cooldownEl.style.display = "block";
+          cooldownSecs.textContent = minsLeft > 0 ? `${minsLeft}m ${sLeft}s` : `${secsLeft}s`;
+        } else {
+          cooldownEl.style.display = "none";
+        }
       }
 
-      if (d.log?.length) {
-        document.getElementById("camp-log").innerHTML = d.log.map(entry => {
+      const logEl = document.getElementById("camp-log");
+      if (logEl && d.log?.length) {
+        logEl.innerHTML = d.log.map(entry => {
           const cls  = { sent:"log-sent", failed:"log-failed", skipped:"log-skipped", stopped:"log-stopped", done:"log-done", cooldown:"log-cooldown" }[entry.status] || "";
           const icon = { sent:"✓", failed:"✗", skipped:"↷", done:"★", cooldown:"⏸" }[entry.status] || "•";
           const label = entry.name || entry.text || entry.phone || "";
@@ -1123,15 +1161,18 @@
       if (!d.running && campPollInterval) {
         clearInterval(campPollInterval);
         campPollInterval = null;
-        document.getElementById("start-btn").disabled = false;
-        document.getElementById("stop-btn").style.display = "none";
+        const startBtn = document.getElementById("start-btn");
+        const stopBtn  = document.getElementById("stop-btn");
+        if (startBtn) startBtn.disabled = false;
+        if (stopBtn)  stopBtn.style.display = "none";
       }
     } catch {}
   }
 
   // ── Init ──
   loadContacts();
-  setInterval(() => { if (campPollInterval) pollCampaign(); }, 2000);
+  // Single outer interval — only fires when a campaign is actively running
+  setInterval(() => { if (campPollInterval) pollCampaign(); }, 3000);
 </script>
 </body>
 </html>
