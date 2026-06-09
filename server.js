@@ -111,11 +111,7 @@ delete settings.paymentsEnabled;
 // so every writeJSON("settings.json", settings) call silently wipes the key from disk.
 if (process.env.SMM_API_KEY) settings.smmApiKey = process.env.SMM_API_KEY;
 
-let tokenData = readJSON("tokenData.json", {
-  validTokens: [ "a7F9kLm2Qx8P", "Zr4Tn8Vy1Bc6", "pQ5mX2sL9dKe", "H8uJ3wRt7Nz1", "yL0cV6kPq4Xm", "T9bF2nGh5Wr8", "mX7qL1zCv9Dt", "R4pNk8Jw2Ys5", "vD6tQ3mLp1Xc", "K2yW9nFr5Tb7", "cM8xQ4vL1zHp", "P5rT7nYk2Wd9", "fJ3mX8qLc6Vz", "N1wK4tRp9Ys2", "zQ7vM2xLf5Dc", "B9kT3nWy8Rp1", "gL4xQ7mVc2Dt", "W6pNz1kY5Rf8", "tX2mL9qCv4Jh", "Y8rK5nWp1Dz3", "qF7vM2xLc9Tb", "D1kY4nRp8Ws5", "mQ9xL2vTc7Fh", "R5pNz8kW1Dy4", "cX3mL7qVf2Tn", "T8rK1nWp5Dz9", "zF4vM7xLc2Tb", "B1kY9nRp4Ws8", "gQ5xL2vTc8Fh", "W7pNz1kY4Rf9", "tX8mL3qCv5Jh", "Y2rK9nWp1Dz6", "qF5vM8xLc4Tb", "D7kY1nRp9Ws2", "mQ4xL8vTc5Fh", "R1pNz7kW2Dy9", "cX5mL9qVf1Tn", "T2rK8nWp4Dz7", "zF1vM5xLc9Tb", "B8kY2nRp6Ws4", "gQ7xL1vTc5Fh", "W9pNz4kY2Rf8", "tX6mL3qCv1Jh", "Y5rK8nWp2Dz9", "qF1vM4xLc7Tb", "D9kY5nRp2Ws8", "mQ3xL7vTc1Fh", "R8pNz2kW5Dy4", "cX1mL6qV9Tn3", "T5rK2nWp8Dz1", "zF9vM3xLc7Tb", "B4kY8nRp1Ws5", "gQ2xL9vTc6Fh", "W1pNz5kY8Rf3", "tX4mL7qCv2Jh", "Y9rK1nWp6Dz5", "qF3vM8xLc2Tb", "D5kY7nRp4Ws1", "mQ1xL6vTc9Fh", "R2pNz8kW3Dy7", "cX9mL4qV1Tn5", "T7rK3nWp9Dz2", "zF2vM6xLc8Tb", "B5kY1nRp7Ws9", "gQ8xL4vTc2Fh", "W3pNz9kY1Rf6", "tX5mL2qCv8Jh", "Y1rK7nWp4Dz9", "qF6vM3xLc5Tb", "D8kY2nRp9Ws4", "mQ7xL1vTc3Fh", "R4pNz6kW8Dy2", "cX2mL9qV5Tn1", "T1rK8nWp3Dz7", "zF5vM7xLc4Tb", "B2kY9nRp6Ws1", "gQ4xL8vTc5Fh", "W6pNz1kY7Rf2", "tX9mL3qCv4Jh", "Y7rK5nWp1Dz8", "qF2vM9xLc6Tb", "D4kY7nRp3Ws5", "mQ8xL1vTc2Fh", "R9pNz5kW4Dy1", "cX6mL2qV8Tn7", "T3rK9nWp5Dz1", "zF7vM4xLc1Tb", "B1kY5nRp8Ws3", "gQ9xL2vTc4Fh", "W5pNz8kY1Rf7", "tX1mL6qCv9Jh", "Y4rK2nWp7Dz5", "qF8vM1xLc3Tb", "D2kY6nRp9Ws4", "mQ5xL7vTc1Fh", "R3pNz4kW8Dy2", "cX7mL1qV5Tn9", "T9rK4nWp2Dz6", "zF3vM8xLc5Tb", "B6kY1nRp7Ws2" ],
-  usedTokens: {},
-  authorizedUsers: {}
-});
+
 
 // Ensure maker is recognized
 if (!settings.systemPrompt.includes("+23409132883869")) {
