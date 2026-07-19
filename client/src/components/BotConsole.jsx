@@ -93,7 +93,7 @@ function ConnectivityTab({ bot }) {
     if (!phone.trim()) return
     setPairLoading(true); setPairError(null); setPairCode(null)
     try {
-      const d = await post('/api/pair', { phone: phone.trim() })
+      const d = await post('/api/pair', { phone: phone.trim() }, { timeoutMs: 95000 })
       setPairCode(d.code)
     } catch (e) {
       setPairError(e.message || 'Failed to get code. Make sure bot is in waiting state.')
