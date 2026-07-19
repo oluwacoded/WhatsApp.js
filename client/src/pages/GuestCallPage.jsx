@@ -34,7 +34,12 @@ export default function GuestCallPage() {
   const initAudio = useCallback(async () => {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:true, noiseSuppression:true }, video: false })
-      streamRef.current = s; return true
+      streamRef.current = s
+      // iOS Safari: unlock AudioContext after user gesture
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      if (ctx.state === 'suspended') await ctx.resume()
+      ctx.close()
+      return true
     } catch { return false }
   }, [])
 
@@ -49,8 +54,13 @@ export default function GuestCallPage() {
 
       const createPeer = (targetId) => {
         const pc = new RTCPeerConnection({ iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }
-        ]})
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+          { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+        ], iceTransportPolicy: 'all' })
         streamRef.current?.getTracks().forEach(t => pc.addTrack(t, streamRef.current))
         pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate, targetId }) }
         pc.ontrack = (e) => {
