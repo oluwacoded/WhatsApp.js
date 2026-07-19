@@ -133,6 +133,7 @@ let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
+let lastGreetTime = 0;         // debounce: prevent greeting flood on rapid reconnections
 let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
 
 // ── PROPER BAILEYS RETRY STORE ───────────────────────────────────────────────
@@ -777,14 +778,21 @@ async function connectToWhatsApp() {
       isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
       hasEverConnected = true; consecutive401s = 0;
       console.log("[MFG_bot] Connected to WhatsApp");
-      // Greet the owner on every fresh connection
-      setTimeout(async () => {
-        try {
-          await sock.sendMessage(OWNER_JID, {
-            text: `mfg_bot online ✅\n\nyou're linked. i'm ready.\n\nmodel: openai/gpt-oss-120b via groq\nai: ${settings.aiEnabled ? "on" : "off"}\n\nyou're my maker. i listen to you first.`
-          });
-        } catch (e) { console.log("[MFG_bot] Could not message owner:", e.message); }
-      }, 3000);
+      // Greet owner on reconnect — but debounce to once per 5 min so rapid
+      // reconnections (pairing retries, network blips) don't flood the chat.
+      const now = Date.now();
+      if (now - lastGreetTime > 5 * 60 * 1000) {
+        lastGreetTime = now;
+        setTimeout(async () => {
+          try {
+            await sock.sendMessage(OWNER_JID, {
+              text: `mfg_bot online ✅\n\nyou're linked. i'm ready.\n\nmodel: openai/gpt-oss-120b via groq\nai: ${settings.aiEnabled ? "on" : "off"}\n\nyou're my maker. i listen to you first.`
+            });
+          } catch (e) { console.log("[MFG_bot] Could not message owner:", e.message); }
+        }, 3000);
+      } else {
+        console.log(`[MFG_bot] Reconnected quickly — skipping greeting (last sent ${Math.round((now - lastGreetTime)/1000)}s ago)`);
+      }
     }
     if (connection === "close") {
       isConnected = false;
