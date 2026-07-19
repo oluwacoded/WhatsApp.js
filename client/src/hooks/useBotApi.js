@@ -80,17 +80,20 @@ export function useBotApi(bot) {
     return p
   }
 
+  async function readError(res) {
+    try { const d = await res.json(); return d.error || d.message || `HTTP ${res.status}` } catch { return `HTTP ${res.status}` }
+  }
+
   const get = async (path) => {
     const prefix = await resolvePrefix()
-    // If path already has /api, strip prefix to avoid double
     const cleanPath = path.startsWith('/api/') ? path.replace('/api', '') : path
     const url = `${baseUrl}${prefix}${cleanPath}`
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) throw new Error(await readError(res))
     return res.json()
   }
 
-  const post = async (path, body) => {
+  const post = async (path, body, { timeoutMs = 8000 } = {}) => {
     const prefix = await resolvePrefix()
     const cleanPath = path.startsWith('/api/') ? path.replace('/api', '') : path
     const url = `${baseUrl}${prefix}${cleanPath}`
@@ -98,9 +101,9 @@ export function useBotApi(bot) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(timeoutMs)
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) throw new Error(await readError(res))
     return res.json()
   }
 
@@ -109,7 +112,7 @@ export function useBotApi(bot) {
     const cleanPath = path.startsWith('/api/') ? path.replace('/api', '') : path
     const url = `${baseUrl}${prefix}${cleanPath}`
     const res = await fetch(url, { method: 'DELETE', signal: AbortSignal.timeout(8000) })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) throw new Error(await readError(res))
     return res.json()
   }
 
