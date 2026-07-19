@@ -3477,6 +3477,7 @@ io.on("connection", (socket) => {
   socket.on("webrtc-answer",    (d) => io.to(d.targetId).emit("webrtc-answer",    { answer: d.answer,       targetId: socket.id }));
   socket.on("ice-candidate",    (d) => io.to(d.targetId).emit("ice-candidate",    { candidate: d.candidate, targetId: socket.id }));
   socket.on("voice-mode-change",(d) => socket.to(d.roomCode).emit("peer-voice-mode", { fromId: socket.id, mode: d.mode }));
+  socket.on("audio-chunk",     (d) => socket.to(d.roomCode).emit("audio-chunk",     { chunk: d.chunk, sampleRate: d.sampleRate, from: socket.id }));
   function handleLeave(sock, roomCode) {
     sock.leave(roomCode);
     roomParticipants.get(roomCode)?.delete(sock.id);
