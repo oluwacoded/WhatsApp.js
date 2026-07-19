@@ -180,9 +180,21 @@ export default function CallRoomPage({ code, onLeave }) {
         ], iceTransportPolicy: 'all' })
         processedRef.current?.getTracks().forEach(t => pc.addTrack(t, processedRef.current))
         pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate, targetId }) }
+        pc.oniceconnectionstatechange = () => {
+          const s = pc.iceConnectionState
+          if (s === 'connected' || s === 'completed') setStatus('🟢 Audio connected')
+          else if (s === 'failed') setStatus('🔴 Audio failed — refresh')
+          else if (s === 'checking') setStatus('🟡 Connecting audio…')
+        }
         pc.ontrack = (e) => {
           let el = audioRefs.current.get(targetId)
-          if (!el) { el = new Audio(); el.autoplay = true; audioRefs.current.set(targetId, el) }
+          if (!el) {
+            el = document.createElement('audio')
+            el.autoplay = true
+            el.setAttribute('playsinline', '')
+            document.body.appendChild(el)
+            audioRefs.current.set(targetId, el)
+          }
           el.srcObject = e.streams[0]; el.play().catch(()=>{})
         }
         peersRef.current.set(targetId, pc); return pc
