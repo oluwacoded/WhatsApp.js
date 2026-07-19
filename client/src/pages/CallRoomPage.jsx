@@ -1,27 +1,36 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
-import { Mic, MicOff, PhoneOff, Play, Square, Sparkles, Copy, Check } from 'lucide-react'
+import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Play, Square } from 'lucide-react'
 
-const BASE_VOICES_FALLBACK = [
-  { voiceId: 'natural',              name: 'Natural',      emoji: '🎙️', description: 'Your real voice' },
-  { voiceId: 'pNInz6obpgDQGcFmaJgB', name: 'Deep Male',   emoji: '🔵', description: 'Low, authoritative' },
-  { voiceId: 'TxGEqnHWrfWFTfGW9XjX', name: 'Casual Male', emoji: '💬', description: 'Young, relaxed' },
-  { voiceId: 'EXAVITQu4vr4xnSDxMaL', name: 'Warm Female', emoji: '🌸', description: 'Soft, intimate' },
-  { voiceId: '21m00Tcm4TlvDq8ikWAM', name: 'Clear Female', emoji: '✨', description: 'Crisp, professional' },
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+]
+
+const DEFAULT_VOICES = [
+  { voiceId: 'natural',              name: 'Natural',    emoji: '🎙️', description: 'Your real voice' },
+  { voiceId: 'pNInz6obpgDQGcFmaJgB', name: 'Deep Male', emoji: '🎭', description: 'Low, authoritative' },
+  { voiceId: 'TxGEqnHWrfWFTfGW9XjX', name: 'Casual',   emoji: '💬', description: 'Young, relaxed' },
+  { voiceId: 'EXAVITQu4vr4xnSDxMaL', name: 'Warm',     emoji: '🌸', description: 'Soft, intimate' },
+  { voiceId: '21m00Tcm4TlvDq8ikWAM', name: 'Clear',    emoji: '✨', description: 'Crisp, professional' },
 ]
 
 export default function CallRoomPage({ code, onLeave }) {
-  const [isConnected, setIsConnected]   = useState(false)
-  const [isMuted, setIsMuted]           = useState(false)
-  const [peersCount, setPeersCount]     = useState(0)
-  const [voiceId, setVoiceId]           = useState('natural')
-  const [baseVoices, setBaseVoices]     = useState(BASE_VOICES_FALLBACK)
-  const [celebVoices, setCelebVoices]   = useState([])
-  const [activeTab, setActiveTab]       = useState('base')
-  const [celebGender, setCelebGender]   = useState('male')
-  const [previewing, setPreviewing]     = useState(null)
-  const [copied, setCopied]             = useState(false)
-  const [status, setStatus]             = useState('Connecting…')
+  const [iceState, setIceState]       = useState('new')
+  const [isMuted, setIsMuted]         = useState(false)
+  const [peersCount, setPeersCount]   = useState(0)
+  const [voiceId, setVoiceId]         = useState('natural')
+  const [baseVoices, setBaseVoices]   = useState(DEFAULT_VOICES)
+  const [celebVoices, setCelebVoices] = useState([])
+  const [activeTab, setActiveTab]     = useState('base')
+  const [copied, setCopied]           = useState(false)
+  const [timer, setTimer]             = useState(0)
+  const [volume, setVolume]           = useState(0)
+  const [previewing, setPreviewing]   = useState(null)
 
   const socketRef    = useRef(null)
   const peersRef     = useRef(new Map())
@@ -31,15 +40,16 @@ export default function CallRoomPage({ code, onLeave }) {
   const analyserRef  = useRef(null)
   const audioRefs    = useRef(new Map())
   const processorRef = useRef(null)
-  const celebDestRef = useRef(null)
   const sampleBufRef = useRef([])
   const transformRef = useRef(false)
-  const canvasRef    = useRef(null)
+  const iceQueueRef  = useRef(new Map())
+  const timerRef     = useRef(null)
   const rafRef       = useRef(0)
   const previewRef   = useRef(null)
-  const iceQueueRef  = useRef(new Map())
 
   const guestUrl = `${window.location.origin}/guest/${code}`
+  const isLive   = iceState === 'connected' || iceState === 'completed'
+  const isFailed = iceState === 'failed' || iceState === 'disconnected'
 
   const copyLink = () => {
     navigator.clipboard.writeText(guestUrl).then(() => {
@@ -47,31 +57,47 @@ export default function CallRoomPage({ code, onLeave }) {
     })
   }
 
-  // Load voices
+  const formatTime = (s) =>
+    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+
   useEffect(() => {
-    fetch('/api/call/voices/base').then(r => r.json()).then(d => { if (d.voices?.length) setBaseVoices(d.voices) }).catch(() => {})
-    fetch('/api/call/voices/celebrity').then(r => r.json()).then(d => { if (d.voices?.length) setCelebVoices(d.voices) }).catch(() => {})
+    fetch('/api/call/voices/base').then(r => r.json())
+      .then(d => { if (d.voices?.length) setBaseVoices(d.voices) }).catch(() => {})
+    fetch('/api/call/voices/celebrity').then(r => r.json())
+      .then(d => { if (d.voices?.length) setCelebVoices(d.voices) }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (isLive) {
+      timerRef.current = setInterval(() => setTimer(t => t + 1), 1000)
+    } else {
+      clearInterval(timerRef.current); setTimer(0)
+    }
+    return () => clearInterval(timerRef.current)
+  }, [isLive])
 
   const encodeWAV = (samples, sr) => {
     const buf = new ArrayBuffer(44 + samples.length * 2)
     const v = new DataView(buf)
     const ws = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)) }
-    ws(0,'RIFF'); v.setUint32(4,36+samples.length*2,true); ws(8,'WAVE'); ws(12,'fmt ')
-    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true)
-    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true)
-    ws(36,'data'); v.setUint32(40,samples.length*2,true)
+    ws(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ')
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true)
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true)
+    ws(36, 'data'); v.setUint32(40, samples.length * 2, true)
     let off = 44
     for (let i = 0; i < samples.length; i++) {
-      const s = Math.max(-1,Math.min(1,samples[i]))
-      v.setInt16(off, s < 0 ? s*0x8000 : s*0x7fff, true); off += 2
+      const s = Math.max(-1, Math.min(1, samples[i]))
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true); off += 2
     }
     return buf
   }
 
   const initAudio = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:true, noiseSuppression:true }, video: false })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true }, video: false
+      })
       streamRef.current = stream
       const ctx = new (window.AudioContext || window.webkitAudioContext)()
       audioCtxRef.current = ctx
@@ -80,13 +106,24 @@ export default function CallRoomPage({ code, onLeave }) {
       const analyser = ctx.createAnalyser(); analyser.fftSize = 256; analyserRef.current = analyser
       const dest = ctx.createMediaStreamDestination(); processedRef.current = dest.stream
       src.connect(analyser).connect(dest)
+      const tick = () => {
+        rafRef.current = requestAnimationFrame(tick)
+        const data = new Uint8Array(analyser.frequencyBinCount)
+        analyser.getByteFrequencyData(data)
+        setVolume(data.reduce((a, b) => a + b, 0) / data.length / 255)
+      }
+      tick()
       return true
-    } catch { setStatus('⚠️ Microphone access denied'); return false }
+    } catch { return false }
   }, [])
 
   const stopCelebTransform = useCallback(() => {
-    if (processorRef.current) { processorRef.current.disconnect(); processorRef.current.onaudioprocess = null; processorRef.current = null }
-    celebDestRef.current = null; sampleBufRef.current = []; transformRef.current = false
+    if (processorRef.current) {
+      processorRef.current.disconnect()
+      processorRef.current.onaudioprocess = null
+      processorRef.current = null
+    }
+    sampleBufRef.current = []; transformRef.current = false
   }, [])
 
   const startCelebTransform = useCallback((vid) => {
@@ -95,7 +132,7 @@ export default function CallRoomPage({ code, onLeave }) {
     const chunkSamples = Math.floor(sr * 2.0)
     const src = ctx.createMediaStreamSource(streamRef.current)
     const proc = ctx.createScriptProcessor(4096, 1, 1)
-    const dest = ctx.createMediaStreamDestination(); celebDestRef.current = dest
+    const dest = ctx.createMediaStreamDestination()
     src.connect(analyserRef.current); src.connect(proc); proc.connect(ctx.destination)
     sampleBufRef.current = []; let total = 0
     proc.onaudioprocess = (e) => {
@@ -104,24 +141,27 @@ export default function CallRoomPage({ code, onLeave }) {
       if (total >= chunkSamples && !transformRef.current) {
         transformRef.current = true
         const combined = new Float32Array(total); let off = 0
-        for (const c of sampleBufRef.current) { combined.set(c,off); off += c.length }
+        for (const c of sampleBufRef.current) { combined.set(c, off); off += c.length }
         sampleBufRef.current = []; total = 0
         fetch('/api/call/voice/transform', {
-          method:'POST', headers:{'Content-Type':'audio/wav','x-voice-id':vid}, body: encodeWAV(combined,sr)
+          method: 'POST', headers: { 'Content-Type': 'audio/wav', 'x-voice-id': vid },
+          body: encodeWAV(combined, sr)
         }).then(async r => {
-          if (!r.ok) throw new Error('STS failed')
+          if (!r.ok) throw new Error()
           const decoded = await ctx.decodeAudioData(await r.arrayBuffer())
           const bs = ctx.createBufferSource(); bs.buffer = decoded; bs.connect(dest); bs.start()
-        }).catch(()=>{}).finally(()=>{ transformRef.current = false })
+        }).catch(() => {}).finally(() => { transformRef.current = false })
       }
     }
     processorRef.current = proc
     const track = dest.stream.getAudioTracks()[0]
     if (track) {
       processedRef.current = dest.stream
-      peersRef.current.forEach(pc => { const s = pc.getSenders().find(s => s.track?.kind==='audio'); if (s) s.replaceTrack(track) })
+      peersRef.current.forEach(pc => {
+        const s = pc.getSenders().find(s => s.track?.kind === 'audio')
+        if (s) s.replaceTrack(track)
+      })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleVoiceChange = useCallback(async (vid) => {
@@ -137,10 +177,13 @@ export default function CallRoomPage({ code, onLeave }) {
         const dest = ctx.createMediaStreamDestination(); processedRef.current = dest.stream
         src.connect(analyserRef.current).connect(dest)
         const track = dest.stream.getAudioTracks()[0]
-        if (track) peersRef.current.forEach(pc => { const s = pc.getSenders().find(s => s.track?.kind==='audio'); if (s) s.replaceTrack(track) })
+        if (track) peersRef.current.forEach(pc => {
+          const s = pc.getSenders().find(s => s.track?.kind === 'audio')
+          if (s) s.replaceTrack(track)
+        })
       }
     }
-    if (socketRef.current) socketRef.current.emit('voice-mode-change', { roomCode: code, mode: vid })
+    socketRef.current?.emit('voice-mode-change', { roomCode: code, mode: vid })
   }, [code, initAudio, startCelebTransform, stopCelebTransform])
 
   const handlePreview = useCallback(async (vid, e) => {
@@ -150,7 +193,7 @@ export default function CallRoomPage({ code, onLeave }) {
     setPreviewing(vid)
     try {
       const r = await fetch(`/api/call/voice/preview/${vid}`)
-      if (!r.ok) throw new Error('failed')
+      if (!r.ok) throw new Error()
       const url = URL.createObjectURL(await r.blob())
       const audio = new Audio(url); previewRef.current = audio
       audio.onended = () => { setPreviewing(null); URL.revokeObjectURL(url) }
@@ -159,43 +202,29 @@ export default function CallRoomPage({ code, onLeave }) {
     } catch { setPreviewing(null) }
   }, [previewing])
 
-  // WebRTC setup
   useEffect(() => {
     if (!code) return
     let active = true
     const setup = async () => {
       const ok = await initAudio(); if (!ok || !active) return
       const socket = io({ path: '/api/socket.io' }); socketRef.current = socket
-      socket.on('connect',    () => { setIsConnected(true); setStatus('🟢 Connected'); socket.emit('join-room', code) })
-      socket.on('disconnect', () => { setIsConnected(false); setStatus('🔴 Disconnected') })
+      socket.on('connect',    () => socket.emit('join-room', code))
+      socket.on('disconnect', () => setIceState('disconnected'))
 
       const createPeer = (targetId) => {
-        const pc = new RTCPeerConnection({ iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun.cloudflare.com:3478' },
-          { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
-          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-        ], iceTransportPolicy: 'all' })
+        const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceTransportPolicy: 'all' })
         processedRef.current?.getTracks().forEach(t => pc.addTrack(t, processedRef.current))
         pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate, targetId }) }
-        pc.oniceconnectionstatechange = () => {
-          const s = pc.iceConnectionState
-          if (s === 'connected' || s === 'completed') setStatus('🟢 Audio connected')
-          else if (s === 'failed') setStatus('🔴 Audio failed — refresh')
-          else if (s === 'checking') setStatus('🟡 Connecting audio…')
-        }
+        pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState)
         pc.ontrack = (e) => {
           let el = audioRefs.current.get(targetId)
           if (!el) {
             el = document.createElement('audio')
-            el.autoplay = true
-            el.setAttribute('playsinline', '')
+            el.autoplay = true; el.setAttribute('playsinline', '')
             document.body.appendChild(el)
             audioRefs.current.set(targetId, el)
           }
-          el.srcObject = e.streams[0]; el.play().catch(()=>{})
+          el.srcObject = e.streams[0]; el.play().catch(() => {})
         }
         peersRef.current.set(targetId, pc); return pc
       }
@@ -207,7 +236,7 @@ export default function CallRoomPage({ code, onLeave }) {
 
       socket.on('room-peers',  (ids) => { setPeersCount(ids.length); ids.forEach(id => createPeer(id)) })
       socket.on('peer-joined', async (targetId) => {
-        setPeersCount(n => n+1); const pc = createPeer(targetId)
+        setPeersCount(n => n + 1); const pc = createPeer(targetId)
         const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
         socket.emit('webrtc-offer', { offer, targetId })
       })
@@ -227,175 +256,211 @@ export default function CallRoomPage({ code, onLeave }) {
       socket.on('ice-candidate', async ({ candidate, targetId }) => {
         const pc = peersRef.current.get(targetId)
         if (!pc?.remoteDescription) {
-          const q = iceQueueRef.current.get(targetId) ?? []; q.push(candidate); iceQueueRef.current.set(targetId, q); return
+          const q = iceQueueRef.current.get(targetId) ?? []
+          q.push(candidate); iceQueueRef.current.set(targetId, q); return
         }
         try { await pc.addIceCandidate(new RTCIceCandidate(candidate)) } catch {}
       })
       socket.on('peer-left', (targetId) => {
-        setPeersCount(n => Math.max(0,n-1))
+        setPeersCount(n => Math.max(0, n - 1))
         peersRef.current.get(targetId)?.close(); peersRef.current.delete(targetId)
-        const el = audioRefs.current.get(targetId); if (el) { el.srcObject = null; audioRefs.current.delete(targetId) }
+        const el = audioRefs.current.get(targetId)
+        if (el) { el.srcObject = null; el.remove(); audioRefs.current.delete(targetId) }
       })
     }
     setup()
     return () => {
       active = false; stopCelebTransform()
+      cancelAnimationFrame(rafRef.current)
+      clearInterval(timerRef.current)
       socketRef.current?.emit('leave-room', code); socketRef.current?.disconnect()
       peersRef.current.forEach(pc => pc.close()); peersRef.current.clear()
-      audioRefs.current.forEach(el => { el.srcObject = null }); audioRefs.current.clear()
+      audioRefs.current.forEach(el => { el.srcObject = null; el.remove() }); audioRefs.current.clear()
       streamRef.current?.getTracks().forEach(t => t.stop())
       audioCtxRef.current?.close()
-      cancelAnimationFrame(rafRef.current)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code])
-
-  // Waveform canvas
-  useEffect(() => {
-    const canvas = canvasRef.current; if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    const draw = () => {
-      rafRef.current = requestAnimationFrame(draw)
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      if (!analyserRef.current) return
-      const data = new Uint8Array(analyserRef.current.frequencyBinCount)
-      analyserRef.current.getByteFrequencyData(data)
-      const barW = canvas.width / data.length * 2.5; let x = 0
-      for (let i = 0; i < data.length; i++) {
-        const h = (data[i] / 255) * canvas.height
-        ctx.fillStyle = `rgba(139,92,246,${0.3 + (data[i]/255)*0.7})`
-        ctx.fillRect(x, canvas.height - h, barW - 1, h); x += barW + 1
-      }
-    }
-    draw()
-    return () => cancelAnimationFrame(rafRef.current)
-  }, [isConnected])
 
   const toggleMute = () => {
     const next = !isMuted; setIsMuted(next)
     processedRef.current?.getAudioTracks().forEach(t => { t.enabled = !next })
   }
 
-  const visibleCelebs = celebVoices.filter(v => v.gender === celebGender)
+  const currentVoice = [...baseVoices, ...celebVoices].find(v => v.voiceId === voiceId)
+  const glowIntensity = isLive && !isMuted ? volume : 0
 
   return (
-    <div className="flex flex-col h-full bg-gray-950 text-white rounded-xl overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800">
-        <div>
-          <p className="text-xs text-gray-400 font-mono">Room code</p>
-          <p className="text-lg font-bold tracking-widest text-purple-400">{code}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`text-xs px-2 py-1 rounded-full font-mono ${isConnected ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-400'}`}>
-            {status}
-          </span>
-          {peersCount > 0 && <span className="text-xs bg-purple-900/50 text-purple-300 px-2 py-1 rounded-full font-mono">{peersCount} in room</span>}
-        </div>
-      </div>
+    <div className="flex flex-col h-full text-white overflow-hidden"
+      style={{ background: 'linear-gradient(165deg,#0c0c1a 0%,#130a26 55%,#0c0c1a 100%)' }}>
 
-      {/* Guest link */}
-      <div className="px-4 py-2 bg-gray-900/50 border-b border-gray-800 flex items-center gap-2">
-        <p className="text-xs text-gray-400 truncate flex-1 font-mono">{guestUrl}</p>
-        <button onClick={copyLink} className="flex items-center gap-1 text-xs bg-purple-700 hover:bg-purple-600 text-white px-3 py-1 rounded-lg transition-colors">
-          {copied ? <><Check className="w-3 h-3" /> Copied</> : <><Copy className="w-3 h-3" /> Copy Link</>}
+      <style>{`
+        @keyframes ring-pulse {
+          0%,100% { transform:scale(1); opacity:0.5; }
+          50%      { transform:scale(1.07); opacity:0.15; }
+        }
+        @keyframes ring-pulse-2 {
+          0%,100% { transform:scale(1); opacity:0.3; }
+          50%      { transform:scale(1.12); opacity:0.08; }
+        }
+        .no-scrollbar::-webkit-scrollbar { display:none; }
+        .no-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
+      `}</style>
+
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 pt-6 pb-2">
+        <button onClick={onLeave}
+          className="w-9 h-9 flex items-center justify-center rounded-full transition-colors"
+          style={{ background: 'rgba(255,255,255,0.06)' }}>
+          <ChevronLeft className="w-5 h-5 text-gray-400" />
         </button>
+        <div className="text-center">
+          <p className="text-[10px] uppercase tracking-widest text-gray-600 font-mono">Private Call</p>
+          <p className="text-sm font-bold tracking-widest text-purple-400 font-mono">{code}</p>
+        </div>
+        <div className="w-9" />
       </div>
 
-      {/* Waveform */}
-      <div className="px-4 pt-3">
-        <canvas ref={canvasRef} width={400} height={48} className="w-full rounded-lg bg-gray-900/60" />
-      </div>
+      {/* Avatar + status */}
+      <div className="flex-1 flex flex-col items-center justify-center gap-5 px-6">
 
-      {/* Voice selector */}
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        {/* Tab bar */}
-        <div className="flex gap-2 mb-3">
-          {['base','celebrity'].map(t => (
-            <button key={t} onClick={() => setActiveTab(t)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize transition-colors ${activeTab===t ? 'bg-purple-700 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
-              {t === 'celebrity' ? '⭐ Celebrity' : '🎙️ Base'}
-            </button>
-          ))}
-          {activeTab === 'celebrity' && (
-            <div className="flex gap-1 ml-auto">
-              {['male','female'].map(g => (
-                <button key={g} onClick={() => setCelebGender(g)}
-                  className={`px-2 py-1 rounded text-xs capitalize transition-colors ${celebGender===g ? 'bg-purple-800 text-purple-200' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
-                  {g}
-                </button>
-              ))}
-            </div>
+        {/* Avatar with glow rings */}
+        <div className="relative flex items-center justify-center" style={{ width: 200, height: 200 }}>
+          <div className="absolute inset-0 rounded-full pointer-events-none" style={{
+            boxShadow: `0 0 ${50 + glowIntensity * 80}px ${15 + glowIntensity * 40}px rgba(139,92,246,${0.08 + glowIntensity * 0.28})`,
+            transition: 'box-shadow 0.1s ease'
+          }} />
+          <div className="absolute rounded-full pointer-events-none" style={{
+            width: 168, height: 168,
+            border: `1.5px solid rgba(139,92,246,${isLive ? 0.3 : 0.07})`,
+            animation: 'ring-pulse 2.4s ease-in-out infinite'
+          }} />
+          <div className="absolute rounded-full pointer-events-none" style={{
+            width: 188, height: 188,
+            border: `1px solid rgba(139,92,246,${isLive ? 0.18 : 0.04})`,
+            animation: 'ring-pulse-2 2.4s ease-in-out 0.8s infinite'
+          }} />
+          <div className="relative w-36 h-36 rounded-full flex items-center justify-center select-none" style={{
+            background: 'linear-gradient(145deg,#1e1535,#2d1c56)',
+            border: '1.5px solid rgba(139,92,246,0.4)',
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.06)'
+          }}>
+            <span className="text-5xl">{currentVoice?.emoji ?? '🎙️'}</span>
+          </div>
+        </div>
+
+        {/* Voice label */}
+        <div className="text-center">
+          <p className="text-white font-semibold text-xl tracking-tight">{currentVoice?.name ?? 'Natural'}</p>
+          {voiceId !== 'natural' && (
+            <p className="text-[11px] text-purple-400 font-mono mt-1 flex items-center gap-1.5 justify-center">
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+              AI Voice Active · ~2s delay
+            </p>
           )}
         </div>
 
-        {activeTab === 'base' && (
-          <div className="grid grid-cols-2 gap-2">
-            {baseVoices.map(v => {
-              const sel = voiceId === v.voiceId
-              return (
-                <button key={v.voiceId} onClick={() => handleVoiceChange(v.voiceId)}
-                  className={`relative flex flex-col items-center gap-1 p-3 rounded-xl border transition-all ${sel ? 'bg-purple-900/40 border-purple-500 text-purple-200' : 'bg-gray-900 border-gray-700 text-gray-300 hover:border-purple-700'}`}>
-                  <span className="text-2xl">{v.emoji}</span>
-                  <span className="text-xs font-semibold">{v.name}</span>
-                  {v.description && <span className="text-[10px] text-gray-500">{v.description}</span>}
-                  {sel && v.voiceId !== 'natural' && (
-                    <div className="flex items-center gap-1 text-[9px] text-purple-400 font-mono">
-                      <div className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" /> AI LIVE
-                    </div>
-                  )}
-                  {v.voiceId !== 'natural' && (
-                    <button onClick={(e) => handlePreview(v.voiceId, e)}
-                      className="absolute top-2 right-2 p-1 rounded-md bg-gray-800 hover:bg-purple-900 text-gray-400 hover:text-purple-300 transition-colors">
-                      {previewing === v.voiceId ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-                    </button>
-                  )}
-                </button>
-              )
-            })}
+        {/* Status pill */}
+        {isLive ? (
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5"
+              style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)' }}>
+              <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-green-400 text-xs font-mono font-semibold">LIVE · {formatTime(timer)}</span>
+            </div>
+            {peersCount > 0 && (
+              <div className="flex items-center gap-1 text-gray-600 text-xs">
+                <Users className="w-3 h-3" /><span>{peersCount}</span>
+              </div>
+            )}
+          </div>
+        ) : isFailed ? (
+          <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5"
+            style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)' }}>
+            <div className="w-1.5 h-1.5 rounded-full bg-red-400" />
+            <span className="text-red-400 text-xs font-mono font-semibold">CONNECTION FAILED — Refresh</span>
+          </div>
+        ) : peersCount > 0 ? (
+          <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5 animate-pulse"
+            style={{ background: 'rgba(234,179,8,0.08)', border: '1px solid rgba(234,179,8,0.2)' }}>
+            <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
+            <span className="text-yellow-400 text-xs font-mono font-semibold">CONNECTING AUDIO…</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5 animate-pulse"
+            style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
+            <div className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+            <span className="text-indigo-400 text-xs font-mono font-semibold">WAITING FOR GUEST…</span>
           </div>
         )}
 
-        {activeTab === 'celebrity' && (
-          <div className="grid grid-cols-2 gap-2">
-            {visibleCelebs.length === 0 && (
-              <div className="col-span-2 text-center py-8 text-gray-500 text-xs">Loading celebrity voices…</div>
-            )}
-            {visibleCelebs.map(v => {
-              const isPending = v.pending
-              const sel = !isPending && voiceId === v.voiceId
-              return (
-                <button key={v.voiceId} disabled={isPending} onClick={() => !isPending && handleVoiceChange(v.voiceId)}
-                  className={`relative flex flex-col items-center gap-1 p-3 rounded-xl border transition-all ${isPending ? 'opacity-40 cursor-not-allowed bg-gray-900 border-gray-800' : sel ? 'bg-purple-900/40 border-purple-500' : 'bg-gray-900 border-gray-700 hover:border-purple-700'}`}>
-                  <span className="text-3xl">{v.emoji}</span>
-                  <span className={`text-xs font-semibold ${sel ? 'text-purple-200' : 'text-gray-300'}`}>{v.name}</span>
-                  {isPending ? <span className="text-[9px] text-gray-600 font-mono">Unavailable</span>
-                    : <div className="flex items-center gap-1 text-[9px] text-gray-500 font-mono"><Sparkles className="w-2.5 h-2.5" /> AI Voice</div>}
-                  {!isPending && sel && <div className="absolute top-2 right-2 flex items-center gap-0.5 text-[8px] text-purple-400 font-mono bg-purple-900/60 px-1.5 py-0.5 rounded"><div className="w-1 h-1 rounded-full bg-purple-400 animate-pulse mr-1" />LIVE</div>}
-                  {!isPending && !sel && (
-                    <button onClick={(e) => handlePreview(v.voiceId, e)}
-                      className="absolute top-2 right-2 p-1 rounded-md bg-gray-800 hover:bg-purple-900 text-gray-400 hover:text-purple-300 transition-colors">
-                      {previewing === v.voiceId ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-                    </button>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        )}
-        <p className="text-center text-[9px] text-gray-600 font-mono mt-3">
-          {voiceId !== 'natural' ? 'ElevenLabs AI · ~2s processing delay' : 'Natural voice — no processing'}
-        </p>
+        {/* Copy guest link */}
+        <button onClick={copyLink}
+          className="w-full max-w-sm flex items-center justify-between gap-3 rounded-2xl px-4 py-3 transition-all"
+          style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <span className="text-xs text-gray-500 font-mono truncate">{guestUrl.replace(/https?:\/\//, '')}</span>
+          <span className={`flex items-center gap-1.5 text-xs font-semibold flex-shrink-0 transition-colors ${copied ? 'text-green-400' : 'text-purple-400'}`}>
+            {copied ? <><Check className="w-3.5 h-3.5" />Copied</> : <><Copy className="w-3.5 h-3.5" />Copy Link</>}
+          </span>
+        </button>
+      </div>
+
+      {/* Voice selector */}
+      <div className="px-4 pb-2">
+        <div className="flex gap-1.5 mb-2.5">
+          {['base', 'celebrity'].map(t => (
+            <button key={t} onClick={() => setActiveTab(t)}
+              className="px-3 py-1 rounded-full text-[11px] font-semibold transition-all"
+              style={activeTab === t
+                ? { background: 'rgba(139,92,246,0.9)', color: '#fff' }
+                : { background: 'rgba(255,255,255,0.06)', color: 'rgba(156,163,175,1)' }}>
+              {t === 'celebrity' ? '⭐ Celebrity' : '🎙️ Base'}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+          {(activeTab === 'base' ? baseVoices : celebVoices.filter(v => !v.pending)).map(v => {
+            const sel = voiceId === v.voiceId
+            return (
+              <button key={v.voiceId} onClick={() => handleVoiceChange(v.voiceId)}
+                className="flex-shrink-0 flex flex-col items-center gap-1 rounded-2xl px-3 py-2.5 transition-all min-w-[68px]"
+                style={sel
+                  ? { background: 'rgba(139,92,246,0.2)', border: '1.5px solid rgba(139,92,246,0.7)' }
+                  : { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                <span className="text-2xl leading-none">{v.emoji}</span>
+                <span className={`text-[10px] font-medium mt-0.5 ${sel ? 'text-purple-300' : 'text-gray-500'}`}>
+                  {(v.name ?? '').split(' ')[0]}
+                </span>
+                {v.voiceId !== 'natural' && (
+                  <button onClick={(e) => handlePreview(v.voiceId, e)}
+                    className="w-5 h-5 flex items-center justify-center rounded-full transition-colors"
+                    style={{ background: 'rgba(0,0,0,0.3)' }}>
+                    {previewing === v.voiceId
+                      ? <Square className="w-2 h-2 text-purple-400" />
+                      : <Play className="w-2 h-2 text-gray-500" />}
+                  </button>
+                )}
+              </button>
+            )
+          })}
+          {activeTab === 'celebrity' && celebVoices.filter(v => !v.pending).length === 0 && (
+            <p className="text-gray-700 text-xs py-4 px-2 animate-pulse">Loading…</p>
+          )}
+        </div>
       </div>
 
       {/* Controls */}
-      <div className="flex items-center justify-center gap-6 px-4 py-4 border-t border-gray-800 bg-gray-900">
+      <div className="flex items-center justify-center gap-8 px-6 py-5"
+        style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
         <button onClick={toggleMute}
-          className={`w-14 h-14 rounded-full border-2 flex items-center justify-center transition-all ${isMuted ? 'border-red-500 bg-red-900/30 text-red-400' : 'border-gray-600 bg-gray-800 text-gray-200 hover:border-purple-500 hover:text-purple-300'}`}>
-          {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+          className="w-14 h-14 rounded-full flex items-center justify-center transition-all"
+          style={isMuted
+            ? { background: 'rgba(239,68,68,0.15)', border: '1.5px solid rgba(239,68,68,0.4)' }
+            : { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}>
+          {isMuted ? <MicOff className="w-5 h-5 text-red-400" /> : <Mic className="w-5 h-5 text-gray-300" />}
         </button>
         <button onClick={onLeave}
-          className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white transition-all shadow-[0_0_20px_rgba(220,38,38,0.3)]">
+          className="w-16 h-16 rounded-full flex items-center justify-center text-white transition-all"
+          style={{ background: '#dc2626', boxShadow: '0 8px 32px rgba(220,38,38,0.4)' }}>
           <PhoneOff className="w-6 h-6" />
         </button>
       </div>
