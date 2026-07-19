@@ -2764,16 +2764,6 @@ app.post("/api/logout", (req, res) => {
   }
 });
 
-// Serve React for all non-API routes
-app.get("*", (req, res) => {
-  const indexPath = path.join(__dirname, "client/dist/index.html");
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res.send("MFG_bot Hub — building frontend... restart after build completes.");
-  }
-});
-
 // ─── Fake Call Rooms ─────────────────────────────────────────────────────────
 // In-memory store — rooms persist until server restart or explicit end.
 const callRooms = new Map(); // code -> { id, code, isActive, createdAt }
@@ -2914,6 +2904,16 @@ app.delete("/api/call/rooms/:code", (req, res) => {
   if (!room) return res.status(404).json({ error: "Room not found" });
   room.isActive = false;
   res.json({ success: true });
+});
+
+// Serve React for all non-API routes (MUST be last — after all API routes)
+app.get("*", (req, res) => {
+  const indexPath = path.join(__dirname, "client/dist/index.html");
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.send("MFG_bot Hub — building frontend... restart after build completes.");
+  }
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
