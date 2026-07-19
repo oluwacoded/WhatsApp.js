@@ -75,6 +75,7 @@ export default function CallRoomPage({ code, onLeave }) {
       streamRef.current = stream
       const ctx = new (window.AudioContext || window.webkitAudioContext)()
       audioCtxRef.current = ctx
+      if (ctx.state === 'suspended') await ctx.resume()
       const src = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser(); analyser.fftSize = 256; analyserRef.current = analyser
       const dest = ctx.createMediaStreamDestination(); processedRef.current = dest.stream
@@ -170,9 +171,13 @@ export default function CallRoomPage({ code, onLeave }) {
 
       const createPeer = (targetId) => {
         const pc = new RTCPeerConnection({ iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun.cloudflare.com:3478' }
-        ]})
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+          { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
+          { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+        ], iceTransportPolicy: 'all' })
         processedRef.current?.getTracks().forEach(t => pc.addTrack(t, processedRef.current))
         pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate, targetId }) }
         pc.ontrack = (e) => {
