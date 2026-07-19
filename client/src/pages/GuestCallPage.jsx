@@ -126,10 +126,26 @@ export default function GuestCallPage() {
       })
 
       socket.on('audio-chunk', ({ chunk, sampleRate }) => {
-        setAudioState(s => s === 'live' ? 'live' : 'live')
+        setAudioState('live')
         try {
           const floats = new Float32Array(chunk)
           playChunk(floats, sampleRate || ctx.sampleRate)
+        } catch {}
+      })
+
+      socket.on('audio-transformed', ({ audio }) => {
+        setAudioState('live')
+        try {
+          const copy = audio instanceof ArrayBuffer ? audio : audio.buffer
+          ctx.decodeAudioData(copy.slice(0), (decoded) => {
+            const src2 = ctx.createBufferSource()
+            src2.buffer = decoded
+            src2.connect(ctx.destination)
+            const now = ctx.currentTime
+            const startAt = Math.max(now + 0.05, nextPlayRef.current)
+            src2.start(startAt)
+            nextPlayRef.current = startAt + decoded.duration
+          })
         } catch {}
       })
     }
