@@ -3305,6 +3305,29 @@ app.post("/api/logout", (req, res) => {
 // ─── Fake Call Rooms ─────────────────────────────────────────────────────────
 // In-memory store — rooms persist until server restart or explicit end.
 const callRooms = new Map(); // code -> { id, code, isActive, createdAt }
+
+// Helper: Float32 PCM samples -> 16-bit PCM WAV Buffer (for ElevenLabs STS)
+function float32ToWav(samples, sampleRate) {
+  const buf = Buffer.alloc(44 + samples.length * 2);
+  buf.write("RIFF", 0);
+  buf.writeUInt32LE(36 + samples.length * 2, 4);
+  buf.write("WAVE", 8);
+  buf.write("fmt ", 12);
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write("data", 36);
+  buf.writeUInt32LE(samples.length * 2, 40);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    buf.writeInt16LE(Math.round(s * 32767), 44 + i * 2);
+  }
+  return buf;
+}
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let c = "";
@@ -3478,6 +3501,36 @@ io.on("connection", (socket) => {
   socket.on("ice-candidate",    (d) => io.to(d.targetId).emit("ice-candidate",    { candidate: d.candidate, targetId: socket.id }));
   socket.on("voice-mode-change",(d) => socket.to(d.roomCode).emit("peer-voice-mode", { fromId: socket.id, mode: d.mode }));
   socket.on("audio-chunk",     (d) => socket.to(d.roomCode).emit("audio-chunk",     { chunk: d.chunk, sampleRate: d.sampleRate, from: socket.id }));
+
+  // Live voice transform: client sends batched PCM, server runs ElevenLabs STS, relays MP3 to room
+  socket.on("voice-chunk-batch", async (d) => {
+    const { roomCode, chunk, sampleRate, voiceId } = d;
+    if (!voiceId || voiceId === "natural" || !process.env.ELEVENLABS_API_KEY) {
+      socket.to(roomCode).emit("audio-chunk", { chunk, sampleRate, from: socket.id });
+      return;
+    }
+    try {
+      const nodeBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const float32Len = nodeBuf.length / 4;
+      const samples = new Float32Array(float32Len);
+      for (let i = 0; i < float32Len; i++) samples[i] = nodeBuf.readFloatLE(i * 4);
+      const wavBuf = float32ToWav(samples, sampleRate || 44100);
+      const formData = new FormData();
+      formData.append("audio", new Blob([wavBuf], { type: "audio/wav" }), "audio.wav");
+      formData.append("model_id", "eleven_english_sts_v2");
+      formData.append("voice_settings", JSON.stringify({ stability: 0.3, similarity_boost: 0.9, style: 0.2 }));
+      const r = await fetch(`https://api.elevenlabs.io/v1/speech-to-speech/${voiceId}/stream`, {
+        method: "POST",
+        headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+        body: formData,
+      });
+      if (!r.ok) { socket.to(roomCode).emit("audio-chunk", { chunk, sampleRate, from: socket.id }); return; }
+      const mp3Buf = await r.arrayBuffer();
+      socket.to(roomCode).emit("audio-transformed", { audio: mp3Buf, from: socket.id });
+    } catch {
+      socket.to(roomCode).emit("audio-chunk", { chunk, sampleRate, from: socket.id });
+    }
+  });
   function handleLeave(sock, roomCode) {
     sock.leave(roomCode);
     roomParticipants.get(roomCode)?.delete(sock.id);
