@@ -44,6 +44,18 @@ export default function GuestCallPage() {
     return () => clearInterval(timerRef.current)
   }, [isLive])
 
+  // Base64 helpers — avoids binary socket.io frames breaking through Replit's proxy
+  const f32ToB64 = (arr) => {
+    const bytes = new Uint8Array(arr.buffer)
+    let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+    return btoa(s)
+  }
+  const b64ToF32 = (b64) => {
+    const s = atob(b64); const bytes = new Uint8Array(s.length)
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
+    return new Float32Array(bytes.buffer)
+  }
+
   const playChunk = useCallback((floats, sampleRate) => {
     const ctx = audioCtxRef.current
     if (!ctx) return
@@ -96,7 +108,7 @@ export default function GuestCallPage() {
           const raw = e.inputBuffer.getChannelData(0)
           if (mutedRef.current) return
           const copy = new Float32Array(raw)
-          socket.emit('audio-chunk', { roomCode: code, chunk: copy.buffer, sampleRate: ctx.sampleRate })
+          socket.emit('audio-chunk', { roomCode: code, chunk: f32ToB64(copy), sampleRate: ctx.sampleRate })
         }
 
         // Silent gain keeps graph active without echoing mic back to speaker
@@ -127,24 +139,19 @@ export default function GuestCallPage() {
 
       socket.on('audio-chunk', ({ chunk, sampleRate }) => {
         setAudioState('live')
-        try {
-          const floats = new Float32Array(chunk)
-          playChunk(floats, sampleRate || ctx.sampleRate)
-        } catch {}
+        try { playChunk(b64ToF32(chunk), sampleRate || ctx.sampleRate) } catch {}
       })
 
       socket.on('audio-transformed', ({ audio }) => {
         setAudioState('live')
         try {
-          const copy = audio instanceof ArrayBuffer ? audio : audio.buffer
-          ctx.decodeAudioData(copy.slice(0), (decoded) => {
-            const src2 = ctx.createBufferSource()
-            src2.buffer = decoded
-            src2.connect(ctx.destination)
+          const s = atob(audio); const bytes = new Uint8Array(s.length)
+          for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
+          ctx.decodeAudioData(bytes.buffer.slice(0), (decoded) => {
+            const src2 = ctx.createBufferSource(); src2.buffer = decoded; src2.connect(ctx.destination)
             const now = ctx.currentTime
             const startAt = Math.max(now + 0.05, nextPlayRef.current)
-            src2.start(startAt)
-            nextPlayRef.current = startAt + decoded.duration
+            src2.start(startAt); nextPlayRef.current = startAt + decoded.duration
           })
         } catch {}
       })
