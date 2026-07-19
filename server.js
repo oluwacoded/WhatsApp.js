@@ -751,8 +751,8 @@ async function connectToWhatsApp() {
       }
     };
     sock.ev.on("connection.update", pairListener);
-    // Safety fallback: if no event fires within 8s, try anyway
-    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 8000);
+    // Safety fallback: if no event fires within 25s, try anyway (Railway is slow)
+    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 25000);
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
@@ -3192,11 +3192,15 @@ app.get("/api/qr", (req, res) =>
 
 // Pairing code — restarts the socket in phone-pairing mode (no QR conflict)
 // Accepts: POST {phone}  OR  GET ?number=...  OR  GET ?phone=...
+let pairInProgress = false; // guard against double-calls
 async function handlePair(req, res) {
   const raw = req.body?.phone || req.body?.number || req.query?.phone || req.query?.number || "";
   const clean = String(raw).replace(/[^0-9]/g, "");
   if (!clean || clean.length < 10) return res.status(400).json({ error: "send your number with country code, digits only (e.g. 2349132883869)" });
   if (isConnected) return res.status(400).json({ error: "already connected — logout first to re-pair" });
+  if (pairInProgress) return res.status(429).json({ error: "pairing already in progress — wait a moment and try again" });
+
+  pairInProgress = true;
 
   // CRITICAL: WhatsApp rejects pairing codes if the auth folder has stale creds
   // from a previous (failed/expired) session. Wipe it so the new pairing is fresh.
@@ -3214,27 +3218,36 @@ async function handlePair(req, res) {
   console.log(`[MFG_bot] /api/pair — restarting socket in pairing mode for ${clean}`);
 
   // Create a Promise that resolves when the pairing code is ready (or times out)
+  // 90s timeout — Railway connections can be slow to handshake
   const codePromise = new Promise((resolve) => {
     pairCodeResolve = resolve;
     setTimeout(() => {
-      if (pairCodeResolve) { pairCodeResolve({ success: false, error: "timeout — try again" }); pairCodeResolve = null; }
-    }, 30000);
+      if (pairCodeResolve) {
+        pairCodeResolve({ success: false, error: "Timed out waiting for WhatsApp — check your number is correct (with country code, no +) and try again" });
+        pairCodeResolve = null;
+      }
+    }, 90000);
   });
 
-  // Tear down the existing socket to force a fresh connection in pairing mode
+  // Tear down the existing socket. removeAllListeners first so the disconnect
+  // handler doesn't fire a competing connectToWhatsApp() call.
   if (sock) {
     try { sock.ev.removeAllListeners(); sock.end(new Error("switching to pairing code")); } catch (e) {}
     sock = null;
   }
+  // Small pause so the old socket fully closes before we open a new one
+  await new Promise(r => setTimeout(r, 1200));
   connectToWhatsApp();
 
   const result = await codePromise;
+  pairInProgress = false;
+
   if (result.success) {
     const c = result.code;
     const pretty = c && c.length === 8 ? `${c.slice(0,4)}-${c.slice(4)}` : c;
     return res.json({ success: true, ok: true, code: pretty, raw: c, instructions: "WhatsApp → Settings → Linked Devices → Link a device → Link with phone number → enter this code (valid ~60s)" });
   }
-  return res.status(500).json({ error: result.error });
+  return res.status(500).json({ error: result.error || "Failed to get pairing code — try again" });
 }
 app.post("/api/pair", handlePair);
 app.get("/api/pair", handlePair);
