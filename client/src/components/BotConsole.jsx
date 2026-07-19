@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ArrowLeft, Wifi, WifiOff, Loader, RefreshCw, Save, Trash2, Radio, Zap, Settings, BookOpen, Link, ToggleLeft, ToggleRight, Send, AlertCircle, Phone } from 'lucide-react'
+import { ArrowLeft, Wifi, WifiOff, Loader, RefreshCw, Save, Trash2, Radio, Zap, Settings, BookOpen, Link, ToggleLeft, ToggleRight, Send, AlertCircle, Phone, Mic } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useBotStatus, useBotApi } from '../hooks/useBotApi'
 import CallRoomPage from '../pages/CallRoomPage'
+import VoiceChangerPage from '../pages/VoiceChangerPage'
 
 const COMMANDS = [
   { cmd: '.ai on/off', desc: 'Toggle AI replies', category: 'AI' },
@@ -547,7 +548,8 @@ const TABS = [
   { id: 'personality', label: 'Personality', icon: Zap },
   { id: 'commands', label: 'Commands', icon: BookOpen },
   { id: 'settings', label: 'Settings', icon: Settings },
-  { id: 'vcall', label: 'Voice Call', icon: Phone },
+  { id: 'vcall', label: 'Fake Call', icon: Phone },
+  { id: 'vchange', label: 'Voice Changer', icon: Mic },
 ]
 
 export default function BotConsole({ bot, onBack }) {
@@ -605,6 +607,7 @@ export default function BotConsole({ bot, onBack }) {
         {tab === 'commands' && <CommandsTab />}
         {tab === 'settings' && <SettingsTab bot={bot} />}
         {tab === 'vcall' && <FakeCallTab />}
+        {tab === 'vchange' && <VoiceChangerPage />}
       </main>
     </div>
   )
