@@ -17,6 +17,7 @@ export default function GuestCallPage() {
   const [isMuted, setIsMuted]     = useState(false)
   const [peersCount, setPeersCount] = useState(0)
   const [hasLeft, setHasLeft]     = useState(false)
+  const [iceState, setIceState]   = useState('waiting')
 
   const socketRef  = useRef(null)
   const peersRef   = useRef(new Map())
@@ -63,10 +64,23 @@ export default function GuestCallPage() {
         ], iceTransportPolicy: 'all' })
         streamRef.current?.getTracks().forEach(t => pc.addTrack(t, streamRef.current))
         pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate, targetId }) }
+        pc.oniceconnectionstatechange = () => {
+          const s = pc.iceConnectionState
+          if (s === 'connected' || s === 'completed') setIceState('connected')
+          else if (s === 'failed' || s === 'disconnected') setIceState('failed')
+          else setIceState(s)
+        }
         pc.ontrack = (e) => {
           let el = audioRefs.current.get(targetId)
-          if (!el) { el = new Audio(); el.autoplay = true; audioRefs.current.set(targetId, el) }
-          el.srcObject = e.streams[0]; el.play().catch(()=>{})
+          if (!el) {
+            el = document.createElement('audio')
+            el.autoplay = true
+            el.setAttribute('playsinline', '')
+            document.body.appendChild(el)
+            audioRefs.current.set(targetId, el)
+          }
+          el.srcObject = e.streams[0]
+          el.play().catch(() => {})
         }
         peersRef.current.set(targetId, pc); return pc
       }
@@ -171,12 +185,21 @@ export default function GuestCallPage() {
       </div>
 
       <div className="z-10 text-center">
-        <div className={`w-32 h-32 rounded-full border-4 flex items-center justify-center mx-auto mb-6 ${isConnected ? 'border-green-500 bg-green-900/20' : 'border-gray-700 bg-gray-900'}`}>
-          {isConnected
-            ? <div className="text-center"><div className="w-3 h-3 rounded-full bg-green-400 animate-pulse mx-auto mb-1" /><p className="text-green-400 text-xs font-mono">LIVE</p></div>
-            : <p className="text-gray-500 text-xs font-mono">Connecting…</p>}
+        <div className={`w-32 h-32 rounded-full border-4 flex items-center justify-center mx-auto mb-6 transition-all ${
+          iceState === 'connected' ? 'border-green-500 bg-green-900/20'
+          : iceState === 'failed'  ? 'border-red-500 bg-red-900/20'
+          : isConnected            ? 'border-yellow-500 bg-yellow-900/20 animate-pulse'
+          : 'border-gray-700 bg-gray-900'}`}>
+          {iceState === 'connected'
+            ? <div className="text-center"><div className="w-3 h-3 rounded-full bg-green-400 animate-pulse mx-auto mb-1" /><p className="text-green-400 text-xs font-mono">AUDIO LIVE</p></div>
+            : iceState === 'failed'
+            ? <p className="text-red-400 text-xs font-mono">FAILED</p>
+            : isConnected
+            ? <p className="text-yellow-400 text-xs font-mono">Connecting audio…</p>
+            : <p className="text-gray-500 text-xs font-mono">Joining…</p>}
         </div>
         {peersCount > 0 && <p className="text-gray-400 text-sm mb-4">{peersCount} other{peersCount !== 1 ? 's' : ''} in call</p>}
+        {iceState === 'failed' && <p className="text-red-400 text-xs mb-3">Audio connection failed — try refreshing</p>}
         <p className="text-gray-500 text-xs font-mono">End-to-end encrypted · WebRTC</p>
       </div>
 
