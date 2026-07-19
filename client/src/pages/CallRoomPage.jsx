@@ -33,6 +33,8 @@ export default function CallRoomPage({ code, onLeave }) {
   const rafRef       = useRef(0)
   const mutedRef     = useRef(false)
   const previewRef   = useRef(null)
+  const voiceIdRef   = useRef('natural')   // live-updated by voice selector
+  const chunkBufRef  = useRef([])          // accumulates Float32 samples for STS batching
 
   const guestUrl = `${window.location.origin}/guest/${code}`
   const isLive   = audioState === 'live'
@@ -47,6 +49,9 @@ export default function CallRoomPage({ code, onLeave }) {
     fetch('/api/call/voices/celebrity').then(r => r.json())
       .then(d => { if (d.voices?.length) setCelebVoices(d.voices) }).catch(() => {})
   }, [])
+
+  // Keep ref in sync so onaudioprocess can read it without stale closure
+  useEffect(() => { voiceIdRef.current = voiceId; chunkBufRef.current = [] }, [voiceId])
 
   useEffect(() => {
     if (isLive) {
@@ -115,12 +120,31 @@ export default function CallRoomPage({ code, onLeave }) {
         const processor = ctx.createScriptProcessor(4096, 1, 1)
         processorRef.current = processor
 
+        // Batch threshold: ~1.5 seconds of audio
+        const BATCH_SAMPLES = Math.round(ctx.sampleRate * 1.5)
+
         processor.onaudioprocess = (e) => {
           if (!active || !socket.connected) return
           if (mutedRef.current) return
           const raw = e.inputBuffer.getChannelData(0)
-          const copy = new Float32Array(raw)
-          socket.emit('audio-chunk', { roomCode: code, chunk: copy.buffer, sampleRate: ctx.sampleRate })
+          const vid = voiceIdRef.current
+
+          if (vid === 'natural') {
+            // Natural voice: relay raw chunks immediately, low latency
+            const copy = new Float32Array(raw)
+            socket.emit('audio-chunk', { roomCode: code, chunk: copy.buffer, sampleRate: ctx.sampleRate })
+          } else {
+            // Voice transform mode: accumulate until batch is large enough
+            chunkBufRef.current.push(new Float32Array(raw))
+            const totalSamples = chunkBufRef.current.reduce((n, f) => n + f.length, 0)
+            if (totalSamples >= BATCH_SAMPLES) {
+              const merged = new Float32Array(totalSamples)
+              let offset = 0
+              for (const f of chunkBufRef.current) { merged.set(f, offset); offset += f.length }
+              chunkBufRef.current = []
+              socket.emit('voice-chunk-batch', { roomCode: code, chunk: merged.buffer, sampleRate: ctx.sampleRate, voiceId: vid })
+            }
+          }
         }
 
         // Silent gain keeps graph active without echoing mic back to speaker
