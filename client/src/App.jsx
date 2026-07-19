@@ -15,19 +15,8 @@ const DEFAULT_BOTS = [
 const REMOVED_IDS = new Set(['ladies'])
 const REMOVED_URLS = new Set([])
 
-// Route: /guest/:code → render GuestCallPage (no auth needed)
-const pathname = window.location.pathname
-if (pathname.startsWith('/guest/')) {
-  const root = document.getElementById('root')
-  import('./pages/GuestCallPage').then(({ default: GCP }) => {
-    import('react-dom/client').then(({ createRoot }) => {
-      createRoot(root).render(<GCP />)
-    })
-  })
-}
-
 export default function App() {
-  // Guest call page — render standalone
+  // Guest call page — render standalone, no auth needed
   if (window.location.pathname.startsWith('/guest/')) {
     return <GuestCallPage />
   }
