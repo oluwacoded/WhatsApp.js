@@ -73,13 +73,16 @@ export default function GuestCallPage() {
       })
       socket.on('webrtc-offer', async ({ offer, targetId }) => {
         let pc = peersRef.current.get(targetId); if (!pc) pc = createPeer(targetId)
+        if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-remote-offer') return
         await pc.setRemoteDescription(new RTCSessionDescription(offer)); await drain(pc, targetId)
         const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
         socket.emit('webrtc-answer', { answer, targetId })
       })
       socket.on('webrtc-answer', async ({ answer, targetId }) => {
         const pc = peersRef.current.get(targetId)
-        if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(answer)); await drain(pc, targetId) }
+        if (pc && pc.signalingState === 'have-local-offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer)); await drain(pc, targetId)
+        }
       })
       socket.on('ice-candidate', async ({ candidate, targetId }) => {
         const pc = peersRef.current.get(targetId)
