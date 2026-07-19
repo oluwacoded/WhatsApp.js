@@ -68,6 +68,7 @@ const SETTINGS_DEFAULTS = {
   voiceCloneEnabled: false,     // Requires ELEVENLABS_API_KEY + voice ID
   voiceReplyMode: "off",        // "off" | "auto" (every reply) | "owner" (only when owner asks .voice me)
   paymentsEnabled: false,       // Requires PAYSTACK_SECRET or FLUTTERWAVE_SECRET
+  dmReactEmoji: null,           // Auto-react to every incoming DM with this emoji
   greeting: "yo. mfg_bot here.",
   systemPrompt: `You are texting AS the owner of this phone — you ARE them. Not a bot, not an assistant. Just them.
 
@@ -111,6 +112,13 @@ writeJSON("settings.json", settings);  // persist merged version so all flags ar
 
 let styleSamples = readJSON("style_samples.json", []);
 let userData = readJSON("users.json", {});
+
+// ─── New Feature Data ─────────────────────────────────────────────────────────
+let autoRules      = readJSON("autorules.json", []);
+let reminders      = readJSON("reminders.json", []);
+let scheduledMsgs  = readJSON("scheduled.json", []);
+let vipContacts    = new Set(readJSON("vip.json", []));
+let silenceConfig  = readJSON("silence.json", { enabled: false, startH: 23, endH: 7 });
 
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
@@ -969,6 +977,22 @@ async function connectToWhatsApp() {
       if (settings.autoReadStatus && from.endsWith("@broadcast")) {
         try { await sock.readMessages([msg.key]); } catch (e) {}
         continue;
+      }
+
+      // ── VIP ALERT: instant owner ping when a VIP contacts texts ──
+      if (!isFromMe && !isStale && vipContacts.has(from)) {
+        try {
+          const vipName = msg.pushName || from.split("@")[0];
+          const vipText = text ? `"${text.slice(0, 100)}"` : "(media / sticker)";
+          await sock.sendMessage(OWNER_JID, {
+            text: `🔥 *VIP ALERT*\n\n👤 ${vipName} (+${from.split("@")[0]}) just texted you!\n\n${vipText}\n\n_reply in that chat — takeover will silence my AI there for ${settings.takeoverMinutes}m_`
+          });
+        } catch (e) {}
+      }
+
+      // ── DM AUTO-REACT: react to every incoming DM with a configured emoji ──
+      if (!isFromMe && !isStale && settings.dmReactEmoji && !from.endsWith("@g.us") && !from.endsWith("@broadcast") && msg.message) {
+        try { await sock.sendMessage(from, { react: { text: settings.dmReactEmoji, key: msg.key } }); } catch (e) {}
       }
 
       // ── Detect message type — reply to EVERYTHING ─────────────────────
@@ -2175,6 +2199,451 @@ async function connectToWhatsApp() {
           continue;
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // ── 🚀 FUTURISTIC UPGRADE COMMANDS ────────────────────────────
+        // ═══════════════════════════════════════════════════════════════
+
+        // ── SMART REMINDERS ───────────────────────────────────────────
+        if (cmd === "remind") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          if (!args.length) {
+            await send("⏰ *Smart Reminders*\n\n.remind 30m call john back\n.remind 2h send the report\n.remind 9pm gym time\n.remind 8:30am meeting\n.remind tomorrow team call\n\n.reminders — see active\n.delreminder <id> — cancel one");
+            continue;
+          }
+          const timeStr = args[0].toLowerCase();
+          let fireAt = null, msgStart = 1;
+          const nowMs = Date.now();
+          if (/^\d+m(in)?$/.test(timeStr)) { fireAt = nowMs + parseInt(timeStr) * 60000; }
+          else if (/^\d+h(r|rs)?$/.test(timeStr)) { fireAt = nowMs + parseInt(timeStr) * 3600000; }
+          else if (/^\d+s$/.test(timeStr)) { fireAt = nowMs + parseInt(timeStr) * 1000; }
+          else if (/^\d+d$/.test(timeStr)) { fireAt = nowMs + parseInt(timeStr) * 86400000; }
+          else if (/^\d{1,2}:\d{2}$/.test(timeStr)) {
+            const [hh, mm] = timeStr.split(":").map(Number);
+            const t = new Date(); t.setHours(hh, mm, 0, 0);
+            if (t.getTime() < nowMs + 30000) t.setDate(t.getDate() + 1);
+            fireAt = t.getTime();
+          } else if (/^\d{1,2}(:\d{2})?(am|pm)$/.test(timeStr)) {
+            const isPm = timeStr.includes("pm");
+            const base = timeStr.replace(/am|pm/,"");
+            const [hh, mm] = base.includes(":") ? base.split(":").map(Number) : [parseInt(base), 0];
+            const h24 = isPm ? (hh < 12 ? hh + 12 : 12) : (hh === 12 ? 0 : hh);
+            const t = new Date(); t.setHours(h24, mm, 0, 0);
+            if (t.getTime() < nowMs + 30000) t.setDate(t.getDate() + 1);
+            fireAt = t.getTime();
+          } else if (timeStr === "tomorrow") {
+            msgStart = 2;
+            const nxt = args[1]?.toLowerCase();
+            if (nxt && /^\d{1,2}(:\d{2})?(am|pm)?$/.test(nxt)) {
+              const isPm = nxt.includes("pm");
+              const base = nxt.replace(/am|pm/,"");
+              const [hh, mm] = base.includes(":") ? base.split(":").map(Number) : [parseInt(base), 0];
+              const h24 = isPm ? (hh<12?hh+12:12) : (hh===12?0:hh);
+              const t = new Date(); t.setDate(t.getDate()+1); t.setHours(h24, mm, 0, 0);
+              fireAt = t.getTime(); msgStart = 3;
+            } else { const t = new Date(); t.setDate(t.getDate()+1); t.setHours(9, 0, 0, 0); fireAt = t.getTime(); }
+          }
+          if (!fireAt) { await send("couldn't parse that time 🤔\ntry: .remind 30m text | .remind 2h text | .remind 9pm text | .remind tomorrow text"); continue; }
+          const reminderText = args.slice(msgStart).join(" ").trim();
+          if (!reminderText) { await send("need a message: .remind 30m <your message here>"); continue; }
+          const rid = Date.now();
+          reminders.push({ id: rid, text: reminderText, fireAt, chat: from, createdAt: nowMs });
+          writeJSON("reminders.json", reminders);
+          const inMs = fireAt - nowMs;
+          const mins = Math.round(inMs / 60000);
+          const label = mins < 60 ? `${mins}m` : `${(mins/60).toFixed(1)}h`;
+          await send(`⏰ *Reminder set!* i'll ping you in *${label}*\n\n📝 "${reminderText}"\n\n_id: ${rid} — .delreminder ${rid} to cancel_`);
+          continue;
+        }
+        if (cmd === "reminders") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const active = reminders.filter(r => r.fireAt > Date.now());
+          if (!active.length) { await send("no active reminders. set one: .remind 30m <text>"); continue; }
+          const list = active.map(r => {
+            const mins = Math.round((r.fireAt - Date.now()) / 60000);
+            return `⏰ in ${mins < 60 ? mins+"m" : (mins/60).toFixed(1)+"h"}: "${r.text}" _(id: ${r.id})_`;
+          }).join("\n");
+          await send(`⏰ *Active Reminders (${active.length})*\n\n${list}\n\n_.delreminder <id> to cancel_`);
+          continue;
+        }
+        if (cmd === "delreminder" || cmd === "cancelreminder") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const rid = parseInt(args[0]);
+          if (!rid) { await send("usage: .delreminder <id>"); continue; }
+          const idx = reminders.findIndex(r => r.id === rid);
+          if (idx === -1) { await send("reminder not found."); continue; }
+          const txt = reminders[idx].text;
+          reminders.splice(idx, 1); writeJSON("reminders.json", reminders);
+          await send(`✅ cancelled: "${txt}"`);
+          continue;
+        }
+
+        // ── VIP CONTACTS ──────────────────────────────────────────────
+        if (cmd === "vip") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "add") {
+            let target = args[1] || ""; if (!target.includes("@")) target = target.replace(/[^0-9]/g,"") + "@s.whatsapp.net";
+            vipContacts.add(target); writeJSON("vip.json", [...vipContacts]);
+            await send(`🔥 *VIP added*: +${target.split("@")[0]}\n\nwhen they text you, i'll ping you here immediately no matter what.`);
+          } else if (sub === "remove" || sub === "del") {
+            let target = args[1] || ""; if (!target.includes("@")) target = target.replace(/[^0-9]/g,"") + "@s.whatsapp.net";
+            vipContacts.delete(target); writeJSON("vip.json", [...vipContacts]);
+            await send(`✅ removed from VIP: +${target.split("@")[0]}`);
+          } else if (sub === "list") {
+            const list = [...vipContacts].map(j => `👑 +${j.split("@")[0]}`).join("\n") || "(none)";
+            await send(`🔥 *VIP Contacts (${vipContacts.size})*\n\n${list}\n\n_when any of these text you, i ping you instantly_`);
+          } else if (sub === "clear") {
+            vipContacts.clear(); writeJSON("vip.json", []);
+            await send("✅ VIP list cleared.");
+          } else {
+            await send(`👑 *VIP System*\nactive VIPs: ${vipContacts.size}\n\n.vip add <number> — add someone\n.vip remove <number> — remove\n.vip list — show all VIPs\n.vip clear — remove all\n\nwhen a VIP texts, i immediately alert you here regardless of what i'm doing.`);
+          }
+          continue;
+        }
+
+        // ── AUTO-REPLY RULES ENGINE ───────────────────────────────────
+        if (cmd === "autorule" || cmd === "autoreply") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "add") {
+            const raw = args.slice(1).join(" ");
+            const sep = raw.indexOf("|");
+            if (sep === -1) { await send("usage: .autorule add <trigger> | <response>\nexample:\n.autorule add payment | account: 1234567890 GTBank (Teddy MFG)\n.autorule add price | dm me for pricing, i'll get back to you"); continue; }
+            const trigger = raw.slice(0, sep).trim(), response = raw.slice(sep + 1).trim();
+            if (!trigger || !response) { await send("need both trigger and response: .autorule add <trigger> | <response>"); continue; }
+            autoRules.push({ id: Date.now(), trigger, response, enabled: true, hits: 0, createdAt: new Date().toISOString() });
+            writeJSON("autorules.json", autoRules);
+            await send(`✅ *Auto-rule added!*\n\n🔑 Trigger: "${trigger}"\n💬 Response: "${response.slice(0, 80)}${response.length > 80 ? "..." : ""}"\n\nwhenever anyone texts anything containing "${trigger}", i'll auto-reply instantly.`);
+          } else if (sub === "list") {
+            if (!autoRules.length) { await send("no rules yet.\n.autorule add <trigger> | <response>"); continue; }
+            const list = autoRules.map((r,i) => `${i+1}. ${r.enabled?"🟢":"🔴"} "${r.trigger.slice(0,25)}" → "${r.response.slice(0,35)}..." (${r.hits||0} hits)`).join("\n");
+            await send(`🤖 *Auto-Reply Rules (${autoRules.length})*\n\n${list}\n\n.autorule del <#> | .autorule toggle <#>`);
+          } else if (sub === "del" || sub === "delete") {
+            const idx = (parseInt(args[1]) || 1) - 1;
+            if (!autoRules[idx]) { await send("rule not found."); continue; }
+            const t = autoRules[idx].trigger; autoRules.splice(idx, 1); writeJSON("autorules.json", autoRules);
+            await send(`✅ deleted: "${t}"`);
+          } else if (sub === "toggle") {
+            const idx = (parseInt(args[1]) || 1) - 1;
+            if (!autoRules[idx]) { await send("rule not found."); continue; }
+            autoRules[idx].enabled = !autoRules[idx].enabled; writeJSON("autorules.json", autoRules);
+            await send(`rule #${idx+1} "${autoRules[idx].trigger}" → ${autoRules[idx].enabled?"🟢 on":"🔴 off"}`);
+          } else if (sub === "clear") {
+            autoRules = []; writeJSON("autorules.json", autoRules);
+            await send("✅ all auto-rules cleared.");
+          } else {
+            await send(`🤖 *Auto-Reply Rules*\nactive: ${autoRules.filter(r=>r.enabled!==false).length}/${autoRules.length}\n\n.autorule add <trigger> | <response>\n.autorule list\n.autorule toggle <#>\n.autorule del <#>\n.autorule clear\n\n_keyword trigger → instant reply, fires before AI_`);
+          }
+          continue;
+        }
+
+        // ── SCHEDULED MESSAGES ────────────────────────────────────────
+        if (cmd === "schedule" || cmd === "sched") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "list" || sub === "ls") {
+            if (!scheduledMsgs.length) { await send("no scheduled messages.\n.schedule HH:MM here <message>\n.schedule HH:MM <number> <message>"); continue; }
+            const list = scheduledMsgs.map((s,i) => `${i+1}. ${s.time} daily → ${s.targetJid === from?"this chat":"+"+s.targetJid.split("@")[0]}: "${s.text.slice(0,40)}"`).join("\n");
+            await send(`📅 *Scheduled Messages (${scheduledMsgs.length})*\n\n${list}\n\n.schedule del <#> — cancel one`);
+          } else if (sub === "del" || sub === "delete") {
+            const idx = (parseInt(args[1]) || 1) - 1;
+            if (!scheduledMsgs[idx]) { await send("not found."); continue; }
+            const t = scheduledMsgs[idx].text.slice(0, 30); scheduledMsgs.splice(idx, 1); writeJSON("scheduled.json", scheduledMsgs);
+            await send(`✅ cancelled: "${t}..."`);
+          } else {
+            const timeStr = args[0];
+            if (!timeStr || !/^\d{1,2}:\d{2}$/.test(timeStr)) { await send("📅 *Scheduled Messages*\n\nusage: .schedule HH:MM here <message>\n       .schedule HH:MM <number> <message>\n\nexamples:\n.schedule 09:00 here good morning everyone!\n.schedule 14:30 2348012345678 don't forget the meeting\n\n.schedule list — see all\n.schedule del <#> — cancel"); continue; }
+            const targetRaw = args[1] || "here";
+            let targetJid = from;
+            if (targetRaw !== "here") targetJid = targetRaw.replace(/[^0-9]/g,"") + "@s.whatsapp.net";
+            const msgText = args.slice(2).join(" ").trim();
+            if (!msgText) { await send("need a message: .schedule HH:MM <here|number> <message>"); continue; }
+            scheduledMsgs.push({ id: Date.now(), time: timeStr, targetJid, text: msgText, createdAt: new Date().toISOString() });
+            writeJSON("scheduled.json", scheduledMsgs);
+            await send(`📅 *Scheduled!*\n\n⏰ ${timeStr} every day\n📍 ${targetRaw === "here" ? "this chat" : "+"+targetJid.split("@")[0]}\n💬 "${msgText.slice(0, 80)}"\n\n.schedule list — see all | .schedule del <#> — cancel`);
+          }
+          continue;
+        }
+
+        // ── SILENCE HOURS ─────────────────────────────────────────────
+        if (cmd === "silence") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "off") { silenceConfig.enabled = false; writeJSON("silence.json", silenceConfig); await send("🔊 silence hours OFF — i'll reply 24/7 again"); }
+          else if (sub === "on") { silenceConfig.enabled = true; writeJSON("silence.json", silenceConfig); await send(`🔕 silence hours ON — quiet from ${silenceConfig.startH}:00 to ${silenceConfig.endH}:00`); }
+          else if (args[0] && args[1] && /^\d{1,2}$/.test(args[0]) && /^\d{1,2}$/.test(args[1])) {
+            silenceConfig.startH = parseInt(args[0]); silenceConfig.endH = parseInt(args[1]);
+            silenceConfig.enabled = true; writeJSON("silence.json", silenceConfig);
+            await send(`🔕 *Silence hours set*: ${silenceConfig.startH}:00 → ${silenceConfig.endH}:00\nAI stays quiet in that window. .silence off to disable.`);
+          } else {
+            const h = new Date().getHours(); const s = silenceConfig.startH, e = silenceConfig.endH;
+            const inSilence = silenceConfig.enabled && (s < e ? (h >= s && h < e) : (h >= s || h < e));
+            await send(`🔕 *Silence Hours*\nstatus: ${silenceConfig.enabled?"🟢 on":"🔴 off"} | ${s}:00 → ${e}:00\nnow: ${inSilence?"🤫 in silence window":"🗣 active"}\n\n.silence 23 7 — quiet from 11pm to 7am\n.silence on / .silence off`);
+          }
+          continue;
+        }
+
+        // ── AI TRANSLATE (Groq) ───────────────────────────────────────
+        if (cmd === "translate" || cmd === "tr") {
+          const lang = args[0];
+          const ctx = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+          const quoted = ctx?.conversation || ctx?.extendedTextMessage?.text || "";
+          const toTranslate = args.slice(1).join(" ") || quoted;
+          if (!lang || !toTranslate) { await send("🌐 *Translate*\n\n.translate <language> <text>\nor reply to a message: .translate <language>\n\nexamples:\n.translate yoruba hello how are you\n.translate french good morning\n.translate pidgin I want to eat food\n.translate english e don do sha\n.translate spanish I miss you"); continue; }
+          await send("🌐 translating...");
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "You are a translator. Translate the user's text to the requested language. Return ONLY the translation — no explanation, no quotes, no labels." },
+                { role: "user", content: `Translate to ${lang}: ${toTranslate}` }
+              ], max_tokens: 500, temperature: 0.3 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`🌐 *${lang.charAt(0).toUpperCase()+lang.slice(1)}:*\n${result}`);
+          } catch (e) { await send("translation failed — try again later"); }
+          continue;
+        }
+
+        // ── AI SUMMARIZE (Groq) ───────────────────────────────────────
+        if (cmd === "summarize" || cmd === "sum" || cmd === "tldr") {
+          const ctx = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+          const quoted = ctx?.conversation || ctx?.extendedTextMessage?.text || "";
+          const toSum = args.join(" ") || quoted;
+          if (!toSum || toSum.length < 20) { await send("📋 *Summarize*\n\nreply to any long message with .summarize\nor .summarize <paste long text>\n\nalso: .sum or .tldr"); continue; }
+          await send("🧠 summarizing...");
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "Summarize in 3 clear, short bullet points. No preamble. Start bullets with •" },
+                { role: "user", content: toSum }
+              ], max_tokens: 300, temperature: 0.3 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`📋 *Summary:*\n\n${result}`);
+          } catch (e) { await send("summarize failed — try again"); }
+          continue;
+        }
+
+        // ── AI GRAMMAR FIX (Groq) ─────────────────────────────────────
+        if (cmd === "fix" || cmd === "grammar" || cmd === "correct") {
+          const ctx = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+          const quoted = ctx?.conversation || ctx?.extendedTextMessage?.text || "";
+          const toFix = args.join(" ") || quoted;
+          if (!toFix) { await send("reply to a message with .fix\nor .fix <text with errors>"); continue; }
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "Fix the grammar and spelling. Keep the same meaning and tone. Respond ONLY with the corrected text — nothing else." },
+                { role: "user", content: toFix }
+              ], max_tokens: 500, temperature: 0.2 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`✅ *Fixed:*\n\n${result}`);
+          } catch (e) { await send("grammar fix failed — try again"); }
+          continue;
+        }
+
+        // ── AI EXPLAIN (Groq) ─────────────────────────────────────────
+        if (cmd === "explain" || cmd === "eli5") {
+          const topic = args.join(" ");
+          if (!topic) { await send(".explain <anything>\nexamples:\n.explain how wifi works\n.explain blockchain in simple terms\n.explain why the sky is blue\n.explain what is inflation"); continue; }
+          await send("🧠 breaking it down...");
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "Explain simply like talking to a smart friend over text. Under 120 words. No jargon. Maybe slightly fun. No intro like 'great question'." },
+                { role: "user", content: `Explain: ${topic}` }
+              ], max_tokens: 250, temperature: 0.6 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`💡 *${topic}*\n\n${result}`);
+          } catch (e) { await send("explain failed — try again"); }
+          continue;
+        }
+
+        // ── AI ADVICE (Groq) ──────────────────────────────────────────
+        if (cmd === "advice" || cmd === "advise") {
+          const problem = args.join(" ");
+          if (!problem) { await send(".advice <your situation>\nexamples:\n.advice my boss is stressing me out\n.advice should i invest in crypto now\n.advice how to save money as a student"); continue; }
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "Give honest, practical advice like a wise Nigerian big bro who keeps it real. Short, direct, actionable. No fluff, no lecture." },
+                { role: "user", content: problem }
+              ], max_tokens: 300, temperature: 0.7 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`🧠 *Real talk:*\n\n${result}`);
+          } catch (e) { await send("advice failed — try again"); }
+          continue;
+        }
+
+        // ── AI STORY (Groq) ───────────────────────────────────────────
+        if (cmd === "story") {
+          const topic = args.join(" ");
+          if (!topic) { await send(".story <topic or characters>\nexamples:\n.story a broke student who finds a briefcase\n.story two friends arguing over jollof rice\n.story a girl who discovers she has powers"); continue; }
+          await send("✍️ writing...");
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "Write a gripping micro-story in exactly 5 sentences. Nigerian flavor welcome. End with a twist or punchline. Make it unforgettable." },
+                { role: "user", content: `Story about: ${topic}` }
+              ], max_tokens: 300, temperature: 0.95 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`📖 *${topic}*\n\n${result}`);
+          } catch (e) { await send("story gen failed — try again"); }
+          continue;
+        }
+
+        // ── AI GIFT IDEAS (Groq) ──────────────────────────────────────
+        if (cmd === "gift" || cmd === "gifts") {
+          const who = args.join(" ");
+          if (!who) { await send(".gift <who/occasion>\nexamples:\n.gift girlfriend birthday\n.gift dad who likes football\n.gift colleague going abroad\n.gift bestie 21st birthday"); continue; }
+          try {
+            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
+                { role: "system", content: "Give 5 creative, thoughtful gift ideas relevant to Nigeria/Africa where possible. Mix free, affordable and premium options. Be practical and specific. Number them 1-5." },
+                { role: "user", content: `Gift ideas for: ${who}` }
+              ], max_tokens: 400, temperature: 0.8 })
+            });
+            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            if (!result) throw new Error("empty");
+            await send(`🎁 *Gift Ideas — ${who}*\n\n${result}`);
+          } catch (e) { await send("gift ideas failed — try again"); }
+          continue;
+        }
+
+        // ── REAL CRYPTO PRICES (CoinGecko free) ──────────────────────
+        if (cmd === "crypto" || cmd === "coin") {
+          const coinArg = (args[0] || "").toLowerCase();
+          const coinMap = { btc:"bitcoin",eth:"ethereum",sol:"solana",bnb:"binancecoin",ada:"cardano",xrp:"ripple",doge:"dogecoin",matic:"matic-network",dot:"polkadot",ltc:"litecoin",avax:"avalanche-2",link:"chainlink",shib:"shiba-inu",trx:"tron",near:"near" };
+          const ids = coinArg && coinMap[coinArg] ? coinMap[coinArg] : coinArg && coinArg.length > 2 ? coinArg : "bitcoin,ethereum,solana,binancecoin";
+          try {
+            const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`, { signal: AbortSignal.timeout(8000) });
+            const j = await r.json();
+            if (!Object.keys(j).length) { await send("coin not found. try: .crypto btc | .crypto eth | .crypto sol | .crypto bnb | .crypto doge"); continue; }
+            const lines = Object.entries(j).map(([id, d]) => {
+              const change = d.usd_24h_change;
+              const arrow = !change ? "⚪" : change > 0 ? "📈" : "📉";
+              const pct = change ? ` ${change > 0 ? "+" : ""}${change.toFixed(2)}%` : "";
+              return `${arrow} *${id.charAt(0).toUpperCase()+id.slice(1).replace(/-/g," ")}*: $${Number(d.usd).toLocaleString()}${pct}`;
+            }).join("\n");
+            await send(`💰 *Crypto Prices*\n\n${lines}\n\n_live via CoinGecko • ${new Date().toLocaleTimeString("en-NG",{hour:"2-digit",minute:"2-digit",timeZone:"Africa/Lagos"})} WAT_`);
+          } catch (e) { await send("crypto fetch failed — CoinGecko may be rate-limiting. try in 60s"); }
+          continue;
+        }
+
+        // ── TECH NEWS (Hacker News free API) ─────────────────────────
+        if (cmd === "news" || cmd === "headlines") {
+          try {
+            await send("📰 fetching top stories...");
+            const r = await fetch("https://hacker-news.firebaseio.com/v0/topstories.json", { signal: AbortSignal.timeout(8000) });
+            const ids = (await r.json()).slice(0, 5);
+            const stories = await Promise.all(ids.map(id =>
+              fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, { signal: AbortSignal.timeout(5000) }).then(r => r.json()).catch(() => null)
+            ));
+            const lines = stories.filter(Boolean).map((s,i) => `${i+1}. *${s.title}*\n   ${s.url ? "🔗 "+s.url.slice(0,70) : "💬 HN discussion"}`).join("\n\n");
+            await send(`📰 *Top Tech Stories*\n\n${lines}\n\n_source: Hacker News • .news for fresh_`);
+          } catch (e) { await send("news fetch failed — try again"); }
+          continue;
+        }
+
+        // ── CONTACT INTEL REPORT ──────────────────────────────────────
+        if (cmd === "intel") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          let target = args[0];
+          if (!target) { await send(".intel <number>\nexample: .intel 2348012345678"); continue; }
+          if (!target.includes("@")) target = target.replace(/[^0-9]/g,"") + "@s.whatsapp.net";
+          const facts = contactFacts[target]?.facts || [];
+          const ud = userData[target] || {};
+          const histLen = (convHistory[target] || []).length;
+          const ownerMsgCount = (ud.ownerMessages || []).length;
+          const isVip = vipContacts.has(target);
+          const aiOff = aiContactDisabled.has(target);
+          const birthday = birthdayMemory[target] || null;
+          const lastPro = lastProactiveTo.get(target);
+          const inTakeover = ownerTakeover.has(target);
+          let report = `🕵️ *Contact Intel*\n+${target.split("@")[0]}\n${"─".repeat(25)}\n\n`;
+          report += `👑 VIP status: ${isVip?"YES 🔥":"no"}\n`;
+          report += `🤖 AI: ${aiOff?"DISABLED 🔴":"enabled 🟢"}\n`;
+          report += `💬 Messages in memory: ${histLen}\n`;
+          report += `✍️ Your texts to them: ${ownerMsgCount}\n`;
+          report += `📢 Last proactive text: ${lastPro ? new Date(lastPro).toLocaleString() : "never"}\n`;
+          report += `🎂 Birthday: ${birthday || "not recorded"}\n`;
+          report += `⏸ Takeover active: ${inTakeover?"yes":"no"}\n`;
+          if (facts.length) { report += `\n🧠 *Known Facts (${facts.length}):*\n${facts.map((f,i) => `${i+1}. ${f}`).join("\n")}`; }
+          else { report += `\n🧠 No facts yet — will build as chat continues`; }
+          await send(report);
+          continue;
+        }
+
+        // ── TOP CHATS ──────────────────────────────────────────────────
+        if (cmd === "topchats" || cmd === "topcontacts") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const scored = Object.entries(convHistory)
+            .filter(([jid]) => jid.endsWith("@s.whatsapp.net"))
+            .map(([jid, msgs]) => ({ jid, count: msgs.length }))
+            .sort((a, b) => b.count - a.count).slice(0, 10);
+          if (!scored.length) { await send("no chat history yet."); continue; }
+          const list = scored.map((c,i) => `${i+1}. +${c.jid.split("@")[0]}: ${c.count} msgs${vipContacts.has(c.jid)?" 👑":""}`).join("\n");
+          await send(`📊 *Most Active Chats*\n\n${list}\n\n👑 = VIP contact`);
+          continue;
+        }
+
+        // ── DAILY DIGEST ───────────────────────────────────────────────
+        if (cmd === "digest") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const todayStr = new Date().toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",timeZone:"Africa/Lagos"});
+          const h = new Date().getHours();
+          const greet = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+          const pendingTodos = (savedTodos[from] || []).filter(t => !t.done);
+          const activeRems = reminders.filter(r => r.fireAt > Date.now());
+          let out = `📊 *Daily Digest — ${todayStr}*\n_${greet} teddy!_ 👋\n\n`;
+          out += `🤖 *Bot*: ${isConnected?"✅ online":"❌ offline"} | AI: ${settings.aiEnabled?"on":"off"} | ${allChats.length} chats | ${messageCount} msgs\n\n`;
+          if (activeRems.length) {
+            out += `⏰ *Reminders (${activeRems.length})*\n`;
+            activeRems.slice(0,3).forEach(r => { const m = Math.round((r.fireAt-Date.now())/60000); out += `• in ${m<60?m+"m":(m/60).toFixed(1)+"h"}: ${r.text}\n`; });
+            out += "\n";
+          }
+          if (pendingTodos.length) {
+            out += `✅ *Todos pending (${pendingTodos.length})*\n`;
+            pendingTodos.slice(0,5).forEach((t,i) => { out += `${i+1}. ${t.text}\n`; });
+            out += "\n";
+          }
+          const todayMMDD = `${new Date().getMonth()+1}/${new Date().getDate()}`;
+          const bdays = Object.entries(birthdayMemory).filter(([,d]) => d && d.includes(todayMMDD));
+          if (bdays.length) { out += `🎂 *Birthdays today!*\n`; bdays.forEach(([j]) => { out += `• +${j.split("@")[0]}\n`; }); out += "\n"; }
+          out += `🔥 VIPs: ${vipContacts.size} | 🤖 Rules: ${autoRules.length} | 📅 Scheduled: ${scheduledMsgs.length} | 🧠 Facts: ${Object.keys(contactFacts).length} contacts`;
+          await send(out);
+          continue;
+        }
+
+        // ── DM AUTO-REACT ──────────────────────────────────────────────
+        if (cmd === "dmreact") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const v = (args[0] || "").trim();
+          if (!v) { await send(`auto-react DMs: ${settings.dmReactEmoji ? "ON ("+settings.dmReactEmoji+")" : "OFF"}\n.dmreact <emoji> — enable\n.dmreact off — disable`); continue; }
+          if (v === "off") { settings.dmReactEmoji = null; writeJSON("settings.json", settings); await send("DM auto-react OFF"); }
+          else { settings.dmReactEmoji = v; writeJSON("settings.json", settings); await send(`✅ DM auto-react ON: ${v}\n(reacts to every incoming DM automatically)`); }
+          continue;
+        }
+
+        // ─────────────────────────────────────────────────────────────
+
         // ── .listall — personalized welcome with the user's WhatsApp display name ──
         if (cmd === "listall" || cmd === "welcome" || cmd === "intro") {
           const userName = msg.pushName || "there";
@@ -2400,11 +2869,11 @@ async function connectToWhatsApp() {
 
         // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
         if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `📋 *mfg_bot — FULL COMMAND LIST*\n_made by teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome with your name\n.online — i cover for you (shows online + AI replies)\n.offline — turn off cover mode\n.song <name> — search youtube + send mp3\n.download <yt-link> — direct yt download\n.dl / .mp3 — aliases\n.weather <city> — live weather\n.define <word> — dictionary lookup\n.shorten <url> — shrink long links\n.ip <addr> — geolocate any ip\n.welcome / .intro — greet me back\n\n🤖 *AI & LEARNING*\n.ai on / off / status / mode / reset / prompt / delay / typing\n.style — manage style mirroring\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice notes → text\n.vision on/off — read images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays\n.bigshot — show all big-shot toggles\n.voice / .voicetest — voice clone\n\n👥 *GROUPS — TAGGING*\n.tagall <msg> — tag everyone (notification)\n.hidetag <msg> — silent invisible mentions\n.tagadmins <msg> — tag only admins\n.everyone / .all <msg>\n\n👥 *GROUPS — MEMBER CONTROL* _(bot needs admin)_\n.kick @user (or reply with .kick)\n.add <number>\n.promote @user / .demote @user\n\n👥 *GROUPS — SETTINGS* _(bot needs admin)_\n.mute (admins-only chat) / .unmute\n.lock / .unlock (info edits)\n.setname <new name>\n.setdesc <new description>\n.revoke (new invite link)\n.leave (bot leaves group)\n\n👥 *GROUPS — INFO*\n.groupinfo / .members / .admins / .link\n\n👥 *GROUPS — OTHER*\n.poll Q | opt1 | opt2 | opt3\n.del — reply to msg with .del to delete\n.vv — reveal view-once photo/video`;
+          const part1 = `📋 *mfg_bot — COMMAND LIST v3.0*\n_teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome\n.online — i cover for you + AI replies\n.offline — stop covering\n.song <name> — youtube search → MP3\n.download / .dl <yt-link> — direct download\n.weather <city> — live weather (wttr.in)\n.define <word> — dictionary\n.shorten <url> — short link\n.ip <addr> — geolocate IP\n\n🚀 *FUTURISTIC (UPGRADED)*\n.remind 30m <msg> — smart reminder\n.remind 9pm <msg> / .remind tomorrow\n.reminders — see active\n.delreminder <id> — cancel\n\n.vip add/remove/list — VIP alerts (ping you instantly)\n.autorule add <trigger> | <response> — auto-reply rules\n.autorule list/toggle/del/clear\n\n.schedule HH:MM here <msg> — schedule daily msg\n.schedule HH:MM <number> <msg>\n.schedule list/del\n\n.silence 23 7 — quiet hours (no AI at night)\n.silence on/off\n\n.translate <lang> <text> — AI translate (any language)\n.summarize — reply to any msg to get TL;DR\n.fix — reply to fix grammar/spelling\n.explain <topic> — AI explains anything simply\n.advice <situation> — honest real-talk advice\n.story <topic> — AI micro-story (5 sentences, with twist)\n.gift <who/occasion> — AI gift ideas\n\n.crypto [coin] — live crypto prices (BTC/ETH/SOL/BNB...)\n.news — top tech headlines (Hacker News)\n.intel <number> — contact intelligence report\n.topchats — most active contacts\n.digest — daily briefing (todos + reminders + status)\n.dmreact <emoji> — auto-react to all incoming DMs\n\n🤖 *AI & LEARNING*\n.ai on/off/status/mode/reset/prompt\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice → text\n.vision on/off — see images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays / .bigshot — feature overview\n.voice on/off/test — voice clone`;
 
-          const partUpgraded = `🆕 *NEW — UPGRADED (Baileys 6.7.21)*\n_unlocked by latest WhatsApp lib upgrade_\n\n✏️ *EDIT MESSAGES*\n.say <text> — bot sends a tracked message\n.editlast <new text> — edit the bot's last reply (or .edit)\n\n📌 *CHAT PIN*\n.pin — pin current chat to top\n.unpin — unpin current chat\n\n📰 *CHANNELS / NEWSLETTERS*\n.channel create <name>\n.channel info <invite-link>\n.channel follow <invite-link>\n.channel post <channel-id> | <text>\n_(alias: .newsletter)_\n\n👁 *VIEW-ONCE OUTGOING*\n.vvideo — reply to a video/image to RE-SEND it as view-once\n_(alias: .vonce)_\n\n💚 *STATUS AUTO-REACT*\n.statusreact <emoji> — auto-react to every status you receive\n.statusreact off — turn off\n_(alias: .sreact)_\n\n📊 *POLL RESULTS*\n.pollvotes — reply to a poll to see results (now decryptable!)\n_(alias: .votes)_\n\n_these are NEW since the upgrade — older versions could not do these_\n\n`;
+          const partUpgraded = `🆕 *BAILEYS 6.7.21 UNLOCKS*\n\n✏️ .say / .editlast — send & edit messages\n📌 .pin / .unpin — pin chats\n📰 .channel create/info/follow/post\n👁 .vvideo — re-send as view-once\n💚 .statusreact <emoji> — auto-react statuses\n📊 .pollvotes — see poll results\n\n`;
 
-          const part2 = partUpgraded + `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .charcount\n.vowels .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split\n.bmi .roman .random .temp .sqrt\n.pow .mod .round .fibonacci .factorial\n.isprime .password .uuid .age\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare\n.wyr .pickup .roast .compliment .fortune\n.8ball .rps .ship .rate .rank\n.choose .spin .slot .flip .roll .dice\n\n😤 *VIBE CHECKS*\n.rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .oof\n.hype .cringe .salty .goat .hotdog .lucky\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .greet\n.hug .slap .poke .kiss .punch\n.highfive .love .wave .salute .bow\n.cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n.site — portfolio link\n.call on/off — block calls\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.feedback .report .donate\n.bot prefix <symbol>\n\n_total: 200+ commands • type any command to use it_`;
+          const part2 = partUpgraded + `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split .bmi\n.roman .random .temp .sqrt .pow .mod\n.fibonacci .factorial .isprime .password .uuid\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare .wyr\n.pickup .roast .compliment .fortune .8ball\n.rps .ship .rate .rank .choose .spin .slot\n.flip .roll .rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .hype .goat\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .hug .slap .poke\n.kiss .love .wave .cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n\n👥 *GROUPS*\n.tagall .hidetag .tagadmins .everyone\n.kick .add .promote .demote\n.mute .unmute .lock .unlock\n.setname .setdesc .revoke .leave\n.groupinfo .members .admins .link\n.poll Q | opt1 | opt2 | opt3\n.del — delete a message\n.vv — reveal view-once\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.fakecall / .fc — WebRTC voice disguise call\n.call on/off — block incoming calls\n.feedback .report .donate\n\n_total: 250+ commands • type any command to use_`;
 
           await send(part1);
           await new Promise(r => setTimeout(r, 600));
@@ -2428,8 +2897,29 @@ async function connectToWhatsApp() {
         writeJSON("style_samples.json", styleSamples);
       }
 
+      // ── AUTO-RULE ENGINE: keyword trigger → instant reply, skips AI ──
+      if (!isFromMe && !isStale && text && autoRules.length) {
+        const lowerText = text.toLowerCase();
+        const matchedRule = autoRules.find(r => r.enabled !== false && lowerText.includes(r.trigger.toLowerCase()));
+        if (matchedRule) {
+          matchedRule.hits = (matchedRule.hits || 0) + 1;
+          setImmediate(() => writeJSON("autorules.json", autoRules));
+          await send(matchedRule.response);
+          logTag("autorule:" + matchedRule.trigger.slice(0, 15));
+          continue;
+        }
+      }
+
       // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
       if (!settings.aiEnabled) { logTag("skip:ai_disabled"); continue; }
+
+      // ── SILENCE HOURS: bot goes quiet between configured hours ──
+      if (silenceConfig.enabled && !isFromMe) {
+        const h = new Date().getHours();
+        const s = silenceConfig.startH, e = silenceConfig.endH;
+        const inSilence = s < e ? (h >= s && h < e) : (h >= s || h < e);
+        if (inSilence) { logTag(`skip:silence_hours(${s}-${e})`); continue; }
+      }
       if (isFromMe) { logTag("skip:fromMe"); continue; }
       // Stale guard: don't AI-reply to messages from a re-delivered backlog
       if (isStale) { logTag(`skip:stale_${Math.round(ageMs/1000)}s`); continue; }
@@ -2583,6 +3073,46 @@ setInterval(async () => {
   if (!isConnected || !sock || !settings.onlineMode) return;
   try { await sock.sendPresenceUpdate("available"); } catch {}
 }, 25 * 1000);
+
+// ─── Reminder Checker — fires due reminders every 15s ────────────────────────
+setInterval(async () => {
+  if (!isConnected || !sock || !reminders.length) return;
+  const now = Date.now();
+  const due = reminders.filter(r => r.fireAt <= now);
+  if (!due.length) return;
+  for (const rem of due) {
+    try {
+      const target = rem.chat || OWNER_JID;
+      await sock.sendMessage(target, { text: `⏰ *REMINDER*\n\n${rem.text}\n\n_set at ${new Date(rem.createdAt).toLocaleTimeString("en-NG",{hour:"2-digit",minute:"2-digit",timeZone:"Africa/Lagos"})} WAT_` });
+      console.log(`[MFG_bot] ⏰ Reminder fired: "${rem.text.slice(0,40)}" → ${target.slice(-15)}`);
+    } catch (e) { console.log("[MFG_bot] Reminder send err:", e.message); }
+  }
+  const fired = new Set(due.map(r => r.id));
+  reminders = reminders.filter(r => !fired.has(r.id));
+  writeJSON("reminders.json", reminders);
+}, 15 * 1000);
+
+// ─── Scheduled Message Sender — runs every 30s, matches HH:MM ────────────────
+const sentScheduledKeys = new Set(); // prevents double-send within same minute
+setInterval(async () => {
+  if (!isConnected || !sock || !scheduledMsgs.length) return;
+  const now = new Date();
+  const hh = now.getHours().toString().padStart(2, "0");
+  const mm = now.getMinutes().toString().padStart(2, "0");
+  const currentTime = `${hh}:${mm}`;
+  for (const sched of scheduledMsgs) {
+    if (sched.time !== currentTime) continue;
+    const key = `${sched.id}::${currentTime}`;
+    if (sentScheduledKeys.has(key)) continue;
+    sentScheduledKeys.add(key);
+    // Expire the key after 90s so it works again next occurrence
+    setTimeout(() => sentScheduledKeys.delete(key), 90000);
+    try {
+      await sock.sendMessage(sched.targetJid, { text: sched.text });
+      console.log(`[MFG_bot] 📅 Scheduled msg sent: "${sched.text.slice(0,40)}" → ${sched.targetJid.slice(-15)}`);
+    } catch (e) { console.log("[MFG_bot] Scheduled send err:", e.message); }
+  }
+}, 30 * 1000);
 
 // ─── API Endpoints ────────────────────────────────────────────────────────────
 app.get("/api/status", (req, res) => res.json({
