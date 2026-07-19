@@ -2,20 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
 import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Play, Square } from 'lucide-react'
 
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'stun:stun.relay.metered.ca:80' },
-  { urls: 'turn:freestun.net:3478',  username: 'free', credential: 'free' },
-  { urls: 'turn:freestun.net:3479',  username: 'free', credential: 'free' },
-  { urls: 'turns:freestun.net:5349', username: 'free', credential: 'free' },
-  { urls: 'turn:a.relay.metered.ca:80',            username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
-  { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
-  { urls: 'turn:a.relay.metered.ca:443',           username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
-  { urls: 'turns:a.relay.metered.ca:443?transport=tcp', username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
-]
-
 const DEFAULT_VOICES = [
   { voiceId: 'natural',              name: 'Natural',    emoji: '🎙️', description: 'Your real voice' },
   { voiceId: 'pNInz6obpgDQGcFmaJgB', name: 'Deep Male', emoji: '🎭', description: 'Low, authoritative' },
@@ -25,42 +11,32 @@ const DEFAULT_VOICES = [
 ]
 
 export default function CallRoomPage({ code, onLeave }) {
-  const [iceState, setIceState]       = useState('new')
-  const [isMuted, setIsMuted]         = useState(false)
-  const [peersCount, setPeersCount]   = useState(0)
-  const [voiceId, setVoiceId]         = useState('natural')
-  const [baseVoices, setBaseVoices]   = useState(DEFAULT_VOICES)
+  const [audioState, setAudioState] = useState('new')  // new|connecting|live|failed
+  const [isMuted, setIsMuted]       = useState(false)
+  const [peersCount, setPeersCount] = useState(0)
+  const [voiceId, setVoiceId]       = useState('natural')
+  const [baseVoices, setBaseVoices] = useState(DEFAULT_VOICES)
   const [celebVoices, setCelebVoices] = useState([])
-  const [activeTab, setActiveTab]     = useState('base')
-  const [copied, setCopied]           = useState(false)
-  const [timer, setTimer]             = useState(0)
-  const [volume, setVolume]           = useState(0)
-  const [previewing, setPreviewing]   = useState(null)
+  const [activeTab, setActiveTab]   = useState('base')
+  const [copied, setCopied]         = useState(false)
+  const [timer, setTimer]           = useState(0)
+  const [volume, setVolume]         = useState(0)
+  const [previewing, setPreviewing] = useState(null)
 
   const socketRef    = useRef(null)
-  const peersRef     = useRef(new Map())
   const streamRef    = useRef(null)
-  const processedRef = useRef(null)
   const audioCtxRef  = useRef(null)
   const analyserRef  = useRef(null)
-  const audioRefs    = useRef(new Map())
   const processorRef = useRef(null)
-  const sampleBufRef = useRef([])
-  const transformRef = useRef(false)
-  const iceQueueRef  = useRef(new Map())
+  const nextPlayRef  = useRef(0)
   const timerRef     = useRef(null)
   const rafRef       = useRef(0)
+  const mutedRef     = useRef(false)
   const previewRef   = useRef(null)
 
   const guestUrl = `${window.location.origin}/guest/${code}`
-  const isLive   = iceState === 'connected' || iceState === 'completed'
-  const isFailed = iceState === 'failed' || iceState === 'disconnected'
-
-  const copyLink = () => {
-    navigator.clipboard.writeText(guestUrl).then(() => {
-      setCopied(true); setTimeout(() => setCopied(false), 2000)
-    })
-  }
+  const isLive   = audioState === 'live'
+  const isFailed = audioState === 'failed'
 
   const formatTime = (s) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
@@ -81,36 +57,45 @@ export default function CallRoomPage({ code, onLeave }) {
     return () => clearInterval(timerRef.current)
   }, [isLive])
 
-  const encodeWAV = (samples, sr) => {
-    const buf = new ArrayBuffer(44 + samples.length * 2)
-    const v = new DataView(buf)
-    const ws = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)) }
-    ws(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ')
-    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
-    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true)
-    v.setUint16(32, 2, true); v.setUint16(34, 16, true)
-    ws(36, 'data'); v.setUint32(40, samples.length * 2, true)
-    let off = 44
-    for (let i = 0; i < samples.length; i++) {
-      const s = Math.max(-1, Math.min(1, samples[i]))
-      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true); off += 2
-    }
-    return buf
-  }
-
-  const initAudio = useCallback(async () => {
+  const playChunk = useCallback((floats, sampleRate) => {
+    const ctx = audioCtxRef.current
+    if (!ctx) return
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true }, video: false
-      })
+      const buf = ctx.createBuffer(1, floats.length, sampleRate)
+      buf.copyToChannel(floats, 0)
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.connect(ctx.destination)
+      const now = ctx.currentTime
+      const startAt = Math.max(now + 0.05, nextPlayRef.current)
+      src.start(startAt)
+      nextPlayRef.current = startAt + buf.duration
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    if (!code) return
+    let active = true
+
+    const setup = async () => {
+      let stream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
+          video: false
+        })
+      } catch { setAudioState('failed'); return }
+      if (!active) { stream.getTracks().forEach(t => t.stop()); return }
       streamRef.current = stream
-      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
       audioCtxRef.current = ctx
       if (ctx.state === 'suspended') await ctx.resume()
+
+      // Volume analyser for glow effect
       const src = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser(); analyser.fftSize = 256; analyserRef.current = analyser
-      const dest = ctx.createMediaStreamDestination(); processedRef.current = dest.stream
-      src.connect(analyser).connect(dest)
+      src.connect(analyser)
       const tick = () => {
         rafRef.current = requestAnimationFrame(tick)
         const data = new Uint8Array(analyser.frequencyBinCount)
@@ -118,78 +103,73 @@ export default function CallRoomPage({ code, onLeave }) {
         setVolume(data.reduce((a, b) => a + b, 0) / data.length / 255)
       }
       tick()
-      return true
-    } catch { return false }
-  }, [])
 
-  const stopCelebTransform = useCallback(() => {
-    if (processorRef.current) {
-      processorRef.current.disconnect()
-      processorRef.current.onaudioprocess = null
-      processorRef.current = null
-    }
-    sampleBufRef.current = []; transformRef.current = false
-  }, [])
+      const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'] })
+      socketRef.current = socket
 
-  const startCelebTransform = useCallback((vid) => {
-    if (!audioCtxRef.current || !streamRef.current) return
-    const ctx = audioCtxRef.current; const sr = ctx.sampleRate
-    const chunkSamples = Math.floor(sr * 2.0)
-    const src = ctx.createMediaStreamSource(streamRef.current)
-    const proc = ctx.createScriptProcessor(4096, 1, 1)
-    const dest = ctx.createMediaStreamDestination()
-    src.connect(analyserRef.current); src.connect(proc); proc.connect(ctx.destination)
-    sampleBufRef.current = []; let total = 0
-    proc.onaudioprocess = (e) => {
-      const ch = e.inputBuffer.getChannelData(0)
-      sampleBufRef.current.push(new Float32Array(ch)); total += ch.length
-      if (total >= chunkSamples && !transformRef.current) {
-        transformRef.current = true
-        const combined = new Float32Array(total); let off = 0
-        for (const c of sampleBufRef.current) { combined.set(c, off); off += c.length }
-        sampleBufRef.current = []; total = 0
-        fetch('/api/call/voice/transform', {
-          method: 'POST', headers: { 'Content-Type': 'audio/wav', 'x-voice-id': vid },
-          body: encodeWAV(combined, sr)
-        }).then(async r => {
-          if (!r.ok) throw new Error()
-          const decoded = await ctx.decodeAudioData(await r.arrayBuffer())
-          const bs = ctx.createBufferSource(); bs.buffer = decoded; bs.connect(dest); bs.start()
-        }).catch(() => {}).finally(() => { transformRef.current = false })
-      }
-    }
-    processorRef.current = proc
-    const track = dest.stream.getAudioTracks()[0]
-    if (track) {
-      processedRef.current = dest.stream
-      peersRef.current.forEach(pc => {
-        const s = pc.getSenders().find(s => s.track?.kind === 'audio')
-        if (s) s.replaceTrack(track)
+      socket.on('connect', () => {
+        setAudioState('connecting')
+        socket.emit('join-room', code)
+
+        // ScriptProcessor captures mic audio and sends over socket.io
+        const processor = ctx.createScriptProcessor(4096, 1, 1)
+        processorRef.current = processor
+
+        processor.onaudioprocess = (e) => {
+          if (!active || !socket.connected) return
+          if (mutedRef.current) return
+          const raw = e.inputBuffer.getChannelData(0)
+          const copy = new Float32Array(raw)
+          socket.emit('audio-chunk', { roomCode: code, chunk: copy.buffer, sampleRate: ctx.sampleRate })
+        }
+
+        src.connect(processor)
+        processor.connect(ctx.destination)
+      })
+
+      socket.on('disconnect', () => {
+        if (active) setAudioState('failed')
+      })
+
+      socket.on('room-peers', (ids) => {
+        setPeersCount(ids.length)
+      })
+
+      socket.on('peer-joined', () => {
+        setPeersCount(n => n + 1)
+        setAudioState('live')
+      })
+
+      socket.on('peer-left', () => {
+        setPeersCount(n => Math.max(0, n - 1))
+      })
+
+      socket.on('audio-chunk', ({ chunk, sampleRate }) => {
+        try {
+          const floats = new Float32Array(chunk)
+          playChunk(floats, sampleRate || ctx.sampleRate)
+        } catch {}
       })
     }
-  }, [])
 
-  const handleVoiceChange = useCallback(async (vid) => {
-    setVoiceId(vid); stopCelebTransform()
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
-    const ok = await initAudio(); if (!ok) return
-    if (vid !== 'natural') {
-      startCelebTransform(vid)
-    } else {
-      if (audioCtxRef.current && streamRef.current) {
-        const ctx = audioCtxRef.current
-        const src = ctx.createMediaStreamSource(streamRef.current)
-        const dest = ctx.createMediaStreamDestination(); processedRef.current = dest.stream
-        src.connect(analyserRef.current).connect(dest)
-        const track = dest.stream.getAudioTracks()[0]
-        if (track) peersRef.current.forEach(pc => {
-          const s = pc.getSenders().find(s => s.track?.kind === 'audio')
-          if (s) s.replaceTrack(track)
-        })
-      }
+    setup()
+    return () => {
+      active = false
+      cancelAnimationFrame(rafRef.current)
+      clearInterval(timerRef.current)
+      processorRef.current?.disconnect()
+      socketRef.current?.emit('leave-room', code)
+      socketRef.current?.disconnect()
+      streamRef.current?.getTracks().forEach(t => t.stop())
+      audioCtxRef.current?.close()
     }
-    socketRef.current?.emit('voice-mode-change', { roomCode: code, mode: vid })
-  }, [code, initAudio, startCelebTransform, stopCelebTransform])
+  }, [code])
+
+  const toggleMute = () => {
+    const next = !isMuted; setIsMuted(next)
+    mutedRef.current = next
+    streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !next })
+  }
 
   const handlePreview = useCallback(async (vid, e) => {
     e.stopPropagation()
@@ -207,91 +187,13 @@ export default function CallRoomPage({ code, onLeave }) {
     } catch { setPreviewing(null) }
   }, [previewing])
 
-  useEffect(() => {
-    if (!code) return
-    let active = true
-    const setup = async () => {
-      const ok = await initAudio(); if (!ok || !active) return
-      const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'], upgrade: true }); socketRef.current = socket
-      socket.on('connect',    () => socket.emit('join-room', code))
-      socket.on('disconnect', () => setIceState('disconnected'))
-
-      const createPeer = (targetId) => {
-        const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceTransportPolicy: 'all' })
-        processedRef.current?.getTracks().forEach(t => pc.addTrack(t, processedRef.current))
-        pc.onicecandidate = (e) => { if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate, targetId }) }
-        pc.oniceconnectionstatechange = () => setIceState(pc.iceConnectionState)
-        pc.ontrack = (e) => {
-          let el = audioRefs.current.get(targetId)
-          if (!el) {
-            el = document.createElement('audio')
-            el.autoplay = true; el.setAttribute('playsinline', '')
-            document.body.appendChild(el)
-            audioRefs.current.set(targetId, el)
-          }
-          el.srcObject = e.streams[0]; el.play().catch(() => {})
-        }
-        peersRef.current.set(targetId, pc); return pc
-      }
-
-      const drain = async (pc, targetId) => {
-        const q = iceQueueRef.current.get(targetId) ?? []; iceQueueRef.current.delete(targetId)
-        for (const c of q) { try { await pc.addIceCandidate(new RTCIceCandidate(c)) } catch {} }
-      }
-
-      socket.on('room-peers',  (ids) => { setPeersCount(ids.length); ids.forEach(id => createPeer(id)) })
-      socket.on('peer-joined', async (targetId) => {
-        setPeersCount(n => n + 1); const pc = createPeer(targetId)
-        const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
-        socket.emit('webrtc-offer', { offer, targetId })
-      })
-      socket.on('webrtc-offer', async ({ offer, targetId }) => {
-        let pc = peersRef.current.get(targetId); if (!pc) pc = createPeer(targetId)
-        if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-remote-offer') return
-        await pc.setRemoteDescription(new RTCSessionDescription(offer)); await drain(pc, targetId)
-        const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
-        socket.emit('webrtc-answer', { answer, targetId })
-      })
-      socket.on('webrtc-answer', async ({ answer, targetId }) => {
-        const pc = peersRef.current.get(targetId)
-        if (pc && pc.signalingState === 'have-local-offer') {
-          await pc.setRemoteDescription(new RTCSessionDescription(answer)); await drain(pc, targetId)
-        }
-      })
-      socket.on('ice-candidate', async ({ candidate, targetId }) => {
-        const pc = peersRef.current.get(targetId)
-        if (!pc?.remoteDescription) {
-          const q = iceQueueRef.current.get(targetId) ?? []
-          q.push(candidate); iceQueueRef.current.set(targetId, q); return
-        }
-        try { await pc.addIceCandidate(new RTCIceCandidate(candidate)) } catch {}
-      })
-      socket.on('peer-left', (targetId) => {
-        setPeersCount(n => Math.max(0, n - 1))
-        peersRef.current.get(targetId)?.close(); peersRef.current.delete(targetId)
-        const el = audioRefs.current.get(targetId)
-        if (el) { el.srcObject = null; el.remove(); audioRefs.current.delete(targetId) }
-      })
-    }
-    setup()
-    return () => {
-      active = false; stopCelebTransform()
-      cancelAnimationFrame(rafRef.current)
-      clearInterval(timerRef.current)
-      socketRef.current?.emit('leave-room', code); socketRef.current?.disconnect()
-      peersRef.current.forEach(pc => pc.close()); peersRef.current.clear()
-      audioRefs.current.forEach(el => { el.srcObject = null; el.remove() }); audioRefs.current.clear()
-      streamRef.current?.getTracks().forEach(t => t.stop())
-      audioCtxRef.current?.close()
-    }
-  }, [code])
-
-  const toggleMute = () => {
-    const next = !isMuted; setIsMuted(next)
-    processedRef.current?.getAudioTracks().forEach(t => { t.enabled = !next })
+  const copyLink = () => {
+    navigator.clipboard.writeText(guestUrl).then(() => {
+      setCopied(true); setTimeout(() => setCopied(false), 2000)
+    })
   }
 
-  const currentVoice = [...baseVoices, ...celebVoices].find(v => v.voiceId === voiceId)
+  const currentVoice = [...baseVoices, ...celebVoices].find(v => v.voiceId === voiceId) ?? DEFAULT_VOICES[0]
   const glowIntensity = isLive && !isMuted ? volume : 0
 
   return (
@@ -328,7 +230,6 @@ export default function CallRoomPage({ code, onLeave }) {
       {/* Avatar + status */}
       <div className="flex-1 flex flex-col items-center justify-center gap-5 px-6">
 
-        {/* Avatar with glow rings */}
         <div className="relative flex items-center justify-center" style={{ width: 200, height: 200 }}>
           <div className="absolute inset-0 rounded-full pointer-events-none" style={{
             boxShadow: `0 0 ${50 + glowIntensity * 80}px ${15 + glowIntensity * 40}px rgba(139,92,246,${0.08 + glowIntensity * 0.28})`,
@@ -356,12 +257,7 @@ export default function CallRoomPage({ code, onLeave }) {
         {/* Voice label */}
         <div className="text-center">
           <p className="text-white font-semibold text-xl tracking-tight">{currentVoice?.name ?? 'Natural'}</p>
-          {voiceId !== 'natural' && (
-            <p className="text-[11px] text-purple-400 font-mono mt-1 flex items-center gap-1.5 justify-center">
-              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
-              AI Voice Active · ~2s delay
-            </p>
-          )}
+          <p className="text-[11px] text-purple-400/60 font-mono mt-0.5">Voice preview only · relay mode</p>
         </div>
 
         {/* Status pill */}
@@ -379,22 +275,31 @@ export default function CallRoomPage({ code, onLeave }) {
             )}
           </div>
         ) : isFailed ? (
-          <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5"
-            style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)' }}>
-            <div className="w-1.5 h-1.5 rounded-full bg-red-400" />
-            <span className="text-red-400 text-xs font-mono font-semibold">CONNECTION FAILED — Refresh</span>
+          <div className="flex flex-col items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5"
+              style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)' }}>
+              <div className="w-1.5 h-1.5 rounded-full bg-red-400" />
+              <span className="text-red-400 text-xs font-mono font-semibold">DISCONNECTED</span>
+            </div>
+            <button onClick={onLeave}
+              className="px-4 py-1.5 rounded-full text-xs font-semibold text-white"
+              style={{ background: 'rgba(139,92,246,0.8)' }}>
+              🔄 Restart Call
+            </button>
           </div>
-        ) : peersCount > 0 ? (
+        ) : audioState === 'connecting' ? (
           <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5 animate-pulse"
             style={{ background: 'rgba(234,179,8,0.08)', border: '1px solid rgba(234,179,8,0.2)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-yellow-400" />
-            <span className="text-yellow-400 text-xs font-mono font-semibold">CONNECTING AUDIO…</span>
+            <span className="text-yellow-400 text-xs font-mono font-semibold">
+              {peersCount > 0 ? `CONNECTED · ${peersCount} IN ROOM` : 'WAITING FOR GUEST…'}
+            </span>
           </div>
         ) : (
           <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5 animate-pulse"
             style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
             <div className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
-            <span className="text-indigo-400 text-xs font-mono font-semibold">WAITING FOR GUEST…</span>
+            <span className="text-indigo-400 text-xs font-mono font-semibold">STARTING MIC…</span>
           </div>
         )}
 
@@ -409,7 +314,7 @@ export default function CallRoomPage({ code, onLeave }) {
         </button>
       </div>
 
-      {/* Voice selector */}
+      {/* Voice selector (preview only) */}
       <div className="px-4 pb-2">
         <div className="flex gap-1.5 mb-2.5">
           {['base', 'celebrity'].map(t => (
@@ -426,7 +331,7 @@ export default function CallRoomPage({ code, onLeave }) {
           {(activeTab === 'base' ? baseVoices : celebVoices.filter(v => !v.pending)).map(v => {
             const sel = voiceId === v.voiceId
             return (
-              <button key={v.voiceId} onClick={() => handleVoiceChange(v.voiceId)}
+              <button key={v.voiceId} onClick={() => setVoiceId(v.voiceId)}
                 className="flex-shrink-0 flex flex-col items-center gap-1 rounded-2xl px-3 py-2.5 transition-all min-w-[68px]"
                 style={sel
                   ? { background: 'rgba(139,92,246,0.2)', border: '1.5px solid rgba(139,92,246,0.7)' }
