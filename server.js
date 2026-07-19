@@ -743,16 +743,20 @@ async function connectToWhatsApp() {
         if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
       }
     };
-    // Listen for the first non-null connection state — that's the cue
-    const pairListener = ({ connection }) => {
-      if (connection && !pairRequested) {
+    // Request pairing code when socket is alive and ready:
+    //   "connecting"  = noise handshake done, creds not yet exchanged (ideal moment)
+    //   qr present    = WA is about to show a QR, meaning socket is live and ready
+    // NEVER fire on "close" (it's truthy but socket is dead → "Connection Closed" error)
+    const pairListener = ({ connection, qr }) => {
+      if (pairRequested) return;
+      if (connection === "connecting" || qr) {
         sock.ev.off("connection.update", pairListener);
-        tryRequest(connection);
+        tryRequest(qr ? "qr-ready" : "connecting");
       }
     };
     sock.ev.on("connection.update", pairListener);
-    // Safety fallback: if no event fires within 25s, try anyway (Railway is slow)
-    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 25000);
+    // Safety fallback: if "connecting" or QR never fire within 30s, try anyway
+    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 30000);
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
