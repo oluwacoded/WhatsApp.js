@@ -157,7 +157,7 @@ export default function GuestCallPage() {
       <div className="text-center z-10">
         <div className="text-6xl mb-3 animate-pulse"><Heart className="w-16 h-16 text-pink-500 mx-auto" /></div>
         <h1 className="text-2xl font-bold text-white mb-1">Private Call</h1>
-        <p className="text-gray-400 text-sm font-mono tracking-widest">{code}</p>
+        <p className="text-gray-500 text-xs">Secure · End-to-end encrypted</p>
       </div>
 
       <div className="z-10 text-center">
