@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
-import { Mic, MicOff, PhoneOff, Lock } from 'lucide-react'
+import { Mic, MicOff, PhoneOff, Lock, Volume2 } from 'lucide-react'
 
 export default function GuestCallPage() {
   const code = window.location.pathname.split('/').pop()
@@ -11,8 +11,9 @@ export default function GuestCallPage() {
   const [isMuted, setIsMuted]       = useState(false)
   const [peersCount, setPeersCount] = useState(0)
   const [hasLeft, setHasLeft]       = useState(false)
-  const [audioState, setAudioState] = useState('new') // new | connecting | live | failed
+  const [audioState, setAudioState] = useState('new') // new | unlocking | connecting | live | failed
   const [timer, setTimer]           = useState(0)
+  const [audioLocked, setAudioLocked] = useState(false) // true = context suspended, needs gesture
 
   const socketRef    = useRef(null)
   const streamRef    = useRef(null)
@@ -44,7 +45,7 @@ export default function GuestCallPage() {
     return () => clearInterval(timerRef.current)
   }, [isLive])
 
-  // Base64 helpers — avoids binary socket.io frames breaking through Replit's proxy
+  // ── Base64 helpers — avoids binary socket.io frames breaking through Replit's proxy ──
   const f32ToB64 = (arr) => {
     const bytes = new Uint8Array(arr.buffer)
     let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
@@ -56,9 +57,26 @@ export default function GuestCallPage() {
     return new Float32Array(bytes.buffer)
   }
 
+  // ── Unlock AudioContext — must be called from a user gesture ──
+  const unlockAudio = useCallback(async () => {
+    const ctx = audioCtxRef.current
+    if (!ctx) return
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume() } catch {}
+    }
+    setAudioLocked(ctx.state === 'suspended')
+  }, [])
+
   const playChunk = useCallback((floats, sampleRate) => {
     const ctx = audioCtxRef.current
     if (!ctx) return
+    // Always try to resume — iOS requires this to be retried after user gesture
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {})
+      setAudioLocked(true)
+      return // drop this chunk, try next ones after resume
+    }
+    setAudioLocked(false)
     try {
       const buf = ctx.createBuffer(1, floats.length, sampleRate)
       buf.copyToChannel(floats, 0)
@@ -66,7 +84,9 @@ export default function GuestCallPage() {
       src.buffer = buf
       src.connect(ctx.destination)
       const now = ctx.currentTime
-      const startAt = Math.max(now + 0.05, nextPlayRef.current)
+      // Cap scheduling to max 300ms ahead — prevents jam when chunks burst in
+      const capped = Math.min(nextPlayRef.current, now + 0.3)
+      const startAt = Math.max(now + 0.04, capped)
       src.start(startAt)
       nextPlayRef.current = startAt + buf.duration
     } catch {}
@@ -87,9 +107,23 @@ export default function GuestCallPage() {
       if (!active) { stream.getTracks().forEach(t => t.stop()); return }
       streamRef.current = stream
 
+      // Create AudioContext — will be suspended on iOS until user gesture
       const ctx = new (window.AudioContext || window.webkitAudioContext)()
       audioCtxRef.current = ctx
-      if (ctx.state === 'suspended') await ctx.resume()
+
+      // Try to resume immediately (works on desktop, silently fails on iOS)
+      try { await ctx.resume() } catch {}
+      setAudioLocked(ctx.state === 'suspended')
+
+      // iOS unlock: any touch/click on the page will resume the context
+      const iosUnlock = async () => {
+        if (ctx.state === 'suspended') {
+          try { await ctx.resume() } catch {}
+        }
+        setAudioLocked(ctx.state === 'suspended')
+      }
+      document.addEventListener('touchstart', iosUnlock, { once: true })
+      document.addEventListener('click', iosUnlock, { once: true })
 
       const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'] })
       socketRef.current = socket
@@ -138,19 +172,21 @@ export default function GuestCallPage() {
       })
 
       socket.on('audio-chunk', ({ chunk, sampleRate }) => {
-        setAudioState('live')
+        setAudioState(s => s === 'new' || s === 'connecting' ? 'live' : s)
         try { playChunk(b64ToF32(chunk), sampleRate || ctx.sampleRate) } catch {}
       })
 
       socket.on('audio-transformed', ({ audio }) => {
-        setAudioState('live')
+        setAudioState(s => s === 'new' || s === 'connecting' ? 'live' : s)
+        if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); return }
         try {
           const s = atob(audio); const bytes = new Uint8Array(s.length)
           for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
           ctx.decodeAudioData(bytes.buffer.slice(0), (decoded) => {
             const src2 = ctx.createBufferSource(); src2.buffer = decoded; src2.connect(ctx.destination)
             const now = ctx.currentTime
-            const startAt = Math.max(now + 0.05, nextPlayRef.current)
+            const capped = Math.min(nextPlayRef.current, now + 0.3)
+            const startAt = Math.max(now + 0.04, capped)
             src2.start(startAt); nextPlayRef.current = startAt + decoded.duration
           })
         } catch {}
@@ -216,26 +252,32 @@ export default function GuestCallPage() {
       style={{ background: 'linear-gradient(165deg,#09090f 0%,#100a1f 55%,#09090f 100%)' }}>
 
       <style>{`
-        @keyframes ring-a {
-          0%,100% { transform:scale(1);    opacity:0.45; }
-          50%      { transform:scale(1.07); opacity:0.12; }
-        }
-        @keyframes ring-b {
-          0%,100% { transform:scale(1);    opacity:0.25; }
-          50%      { transform:scale(1.13); opacity:0.06; }
-        }
-        @keyframes ring-c {
-          0%,100% { transform:scale(1);    opacity:0.12; }
-          50%      { transform:scale(1.20); opacity:0.02; }
-        }
+        @keyframes ring-a { 0%,100%{transform:scale(1);opacity:0.45} 50%{transform:scale(1.07);opacity:0.12} }
+        @keyframes ring-b { 0%,100%{transform:scale(1);opacity:0.25} 50%{transform:scale(1.13);opacity:0.06} }
+        @keyframes ring-c { 0%,100%{transform:scale(1);opacity:0.12} 50%{transform:scale(1.20);opacity:0.02} }
       `}</style>
+
+      {/* iOS Audio unlock banner */}
+      {audioLocked && (
+        <button
+          onClick={unlockAudio}
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4"
+          style={{ background: 'rgba(0,0,0,0.85)' }}>
+          <div className="w-20 h-20 rounded-full flex items-center justify-center"
+            style={{ background: 'rgba(139,92,246,0.2)', border: '2px solid rgba(139,92,246,0.5)' }}>
+            <Volume2 className="w-9 h-9 text-purple-400" />
+          </div>
+          <div className="text-center">
+            <p className="text-white font-bold text-lg">Tap to Enable Audio</p>
+            <p className="text-gray-400 text-sm mt-1">Your browser requires a tap to start audio</p>
+          </div>
+        </button>
+      )}
 
       <div className="text-center">
         <div className="flex items-center gap-1.5 justify-center mb-2">
           <Lock className="w-3 h-3 text-gray-600" />
-          <span className="text-[10px] text-gray-600 font-mono uppercase tracking-widest">
-            End-to-end encrypted
-          </span>
+          <span className="text-[10px] text-gray-600 font-mono uppercase tracking-widest">End-to-end encrypted</span>
         </div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Private Call</h1>
       </div>
@@ -243,31 +285,15 @@ export default function GuestCallPage() {
       <div className="flex flex-col items-center gap-6">
         <div className="relative flex items-center justify-center" style={{ width: 220, height: 220 }}>
           <div className="absolute inset-0 rounded-full pointer-events-none" style={{
-            boxShadow: isLive
-              ? '0 0 70px 25px rgba(139,92,246,0.18)'
-              : isFailed
-              ? '0 0 50px 15px rgba(239,68,68,0.12)'
-              : '0 0 50px 10px rgba(80,70,120,0.1)',
+            boxShadow: isLive ? '0 0 70px 25px rgba(139,92,246,0.18)' : isFailed ? '0 0 50px 15px rgba(239,68,68,0.12)' : '0 0 50px 10px rgba(80,70,120,0.1)',
             transition: 'box-shadow 0.5s ease'
           }} />
-          <div className="absolute rounded-full pointer-events-none" style={{
-            width: 170, height: 170,
-            border: `1.5px solid rgba(139,92,246,${isLive ? 0.35 : isFailed ? 0 : 0.08})`,
-            animation: 'ring-a 2.2s ease-in-out infinite'
-          }} />
-          <div className="absolute rounded-full pointer-events-none" style={{
-            width: 192, height: 192,
-            border: `1px solid rgba(139,92,246,${isLive ? 0.2 : isFailed ? 0 : 0.04})`,
-            animation: 'ring-b 2.2s ease-in-out 0.75s infinite'
-          }} />
-          <div className="absolute rounded-full pointer-events-none" style={{
-            width: 212, height: 212,
-            border: `1px solid rgba(139,92,246,${isLive ? 0.1 : 0})`,
-            animation: 'ring-c 2.2s ease-in-out 1.5s infinite'
-          }} />
+          <div className="absolute rounded-full pointer-events-none" style={{ width:170, height:170, border:`1.5px solid rgba(139,92,246,${isLive?0.35:isFailed?0:0.08})`, animation:'ring-a 2.2s ease-in-out infinite' }} />
+          <div className="absolute rounded-full pointer-events-none" style={{ width:192, height:192, border:`1px solid rgba(139,92,246,${isLive?0.2:isFailed?0:0.04})`, animation:'ring-b 2.2s ease-in-out 0.75s infinite' }} />
+          <div className="absolute rounded-full pointer-events-none" style={{ width:212, height:212, border:`1px solid rgba(139,92,246,${isLive?0.1:0})`, animation:'ring-c 2.2s ease-in-out 1.5s infinite' }} />
           <div className="relative w-40 h-40 rounded-full flex items-center justify-center" style={{
             background: 'linear-gradient(145deg,#1a1230,#271848)',
-            border: `1.5px solid rgba(${isLive ? '139,92,246' : isFailed ? '239,68,68' : '90,70,130'},0.4)`,
+            border: `1.5px solid rgba(${isLive?'139,92,246':isFailed?'239,68,68':'90,70,130'},0.4)`,
             boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.06)',
             transition: 'border-color 0.5s ease'
           }}>
@@ -287,8 +313,7 @@ export default function GuestCallPage() {
           ) : isFailed ? (
             <>
               <p className="text-red-400 font-semibold text-sm">Connection failed</p>
-              <button
-                onClick={() => window.location.reload()}
+              <button onClick={() => window.location.reload()}
                 className="mt-1 px-5 py-2 rounded-full text-xs font-semibold text-white transition-all active:scale-95"
                 style={{ background: 'rgba(139,92,246,0.85)', border: '1px solid rgba(139,92,246,0.5)' }}>
                 🔄 Tap to Retry
@@ -306,10 +331,10 @@ export default function GuestCallPage() {
 
         <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5" style={{
           background: isLive ? 'rgba(34,197,94,0.08)' : isFailed ? 'rgba(239,68,68,0.08)' : 'rgba(99,102,241,0.06)',
-          border: `1px solid rgba(${isLive ? '34,197,94' : isFailed ? '239,68,68' : '99,102,241'},0.2)`
+          border: `1px solid rgba(${isLive?'34,197,94':isFailed?'239,68,68':'99,102,241'},0.2)`
         }}>
-          <div className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-green-400 animate-pulse' : isFailed ? 'bg-red-400' : 'bg-indigo-400 animate-pulse'}`} />
-          <span className={`text-[11px] font-mono font-semibold ${isLive ? 'text-green-400' : isFailed ? 'text-red-400' : 'text-indigo-400'}`}>
+          <div className={`w-1.5 h-1.5 rounded-full ${isLive?'bg-green-400 animate-pulse':isFailed?'bg-red-400':'bg-indigo-400 animate-pulse'}`} />
+          <span className={`text-[11px] font-mono font-semibold ${isLive?'text-green-400':isFailed?'text-red-400':'text-indigo-400'}`}>
             {isLive ? 'CONNECTED' : isFailed ? 'FAILED' : isConnected ? 'CONNECTING' : 'JOINING'}
           </span>
           {peersCount > 0 && !isFailed && (
@@ -322,13 +347,13 @@ export default function GuestCallPage() {
         <button onClick={toggleMute}
           className="w-14 h-14 rounded-full flex items-center justify-center transition-all"
           style={isMuted
-            ? { background: 'rgba(239,68,68,0.15)', border: '1.5px solid rgba(239,68,68,0.4)' }
-            : { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            ? { background:'rgba(239,68,68,0.15)', border:'1.5px solid rgba(239,68,68,0.4)' }
+            : { background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.1)' }}>
           {isMuted ? <MicOff className="w-5 h-5 text-red-400" /> : <Mic className="w-5 h-5 text-gray-300" />}
         </button>
         <button onClick={leaveCall}
           className="w-16 h-16 rounded-full flex items-center justify-center text-white transition-all"
-          style={{ background: '#dc2626', boxShadow: '0 8px 32px rgba(220,38,38,0.4)' }}>
+          style={{ background:'#dc2626', boxShadow:'0 8px 32px rgba(220,38,38,0.4)' }}>
           <PhoneOff className="w-6 h-6" />
         </button>
       </div>
