@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import Dashboard from './components/Dashboard'
 import BotConsole from './components/BotConsole'
 import GuestCallPage from './pages/GuestCallPage'
+import VoiceChangerPage from './pages/VoiceChangerPage'
 import './index.css'
 
 const DEFAULT_BOTS = [
@@ -21,6 +22,21 @@ export default function App() {
   // Guest call page — render standalone, no auth needed
   if (window.location.pathname.startsWith('/guest/')) {
     return <GuestCallPage />
+  }
+
+  // Standalone voice changer page
+  if (window.location.pathname === '/voice-changer') {
+    return (
+      <div className="min-h-screen bg-slate-950 p-4 md:p-8">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center gap-3 mb-6">
+            <button onClick={() => window.history.back()} className="text-slate-400 hover:text-slate-100 p-1.5 rounded-lg hover:bg-slate-800 transition-colors">←</button>
+            <h1 className="text-base font-bold text-slate-100">MFG Voice Changer</h1>
+          </div>
+          <VoiceChangerPage standalone />
+        </div>
+      </div>
+    )
   }
 
   return <MainApp />
