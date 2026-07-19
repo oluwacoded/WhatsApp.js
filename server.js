@@ -733,20 +733,27 @@ async function connectToWhatsApp() {
     const tryRequest = async (trigger) => {
       if (pairRequested) return;
       pairRequested = true;
-      try {
-        console.log(`[MFG_bot] Requesting pairing code for ${phone} (trigger=${trigger})...`);
-        const code = await sock.requestPairingCode(phone);
-        console.log(`[MFG_bot] Pairing code generated: ${code}`);
-        if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
-      } catch (e) {
-        console.error(`[MFG_bot] Pairing code error (trigger=${trigger}):`, e.message);
-        if (pairCodeResolve) { pairCodeResolve({ success: false, error: e.message }); pairCodeResolve = null; }
+      // Retry up to 4 times with 3s gap — socket may not be ready on first event
+      let lastErr;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          console.log(`[MFG_bot] Pairing code attempt ${attempt}/4 (trigger=${trigger}) for ${phone}...`);
+          const code = await sock.requestPairingCode(phone);
+          console.log(`[MFG_bot] Pairing code generated: ${code}`);
+          if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
+          return;
+        } catch (e) {
+          lastErr = e;
+          console.error(`[MFG_bot] Pairing attempt ${attempt}/4 failed:`, e.message);
+          if (attempt < 4) await new Promise(r => setTimeout(r, 3000));
+        }
       }
+      if (pairCodeResolve) { pairCodeResolve({ success: false, error: lastErr?.message || "Failed to get pairing code" }); pairCodeResolve = null; }
     };
     // Request pairing code when socket is alive and ready:
     //   "connecting"  = noise handshake done, creds not yet exchanged (ideal moment)
     //   qr present    = WA is about to show a QR, meaning socket is live and ready
-    // NEVER fire on "close" (it's truthy but socket is dead → "Connection Closed" error)
+    // NEVER fire on "close" (it's truthy but the socket is dead → instant "Connection Closed")
     const pairListener = ({ connection, qr }) => {
       if (pairRequested) return;
       if (connection === "connecting" || qr) {
