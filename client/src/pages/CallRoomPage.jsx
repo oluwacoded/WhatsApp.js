@@ -6,9 +6,14 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'turn:freestun.net:3478',  username: 'free', credential: 'free' },
+  { urls: 'turn:freestun.net:3479',  username: 'free', credential: 'free' },
+  { urls: 'turns:freestun.net:5349', username: 'free', credential: 'free' },
+  { urls: 'turn:a.relay.metered.ca:80',            username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
+  { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
+  { urls: 'turn:a.relay.metered.ca:443',           username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
+  { urls: 'turns:a.relay.metered.ca:443?transport=tcp', username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
 ]
 
 const DEFAULT_VOICES = [
@@ -207,7 +212,7 @@ export default function CallRoomPage({ code, onLeave }) {
     let active = true
     const setup = async () => {
       const ok = await initAudio(); if (!ok || !active) return
-      const socket = io({ path: '/api/socket.io' }); socketRef.current = socket
+      const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'], upgrade: true }); socketRef.current = socket
       socket.on('connect',    () => socket.emit('join-room', code))
       socket.on('disconnect', () => setIceState('disconnected'))
 
