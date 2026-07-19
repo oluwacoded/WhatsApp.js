@@ -4,6 +4,14 @@ if (!globalThis.crypto) {
   globalThis.crypto = webcrypto;
 }
 
+// ─── Global crash shields — keep the process alive on unhandled errors ────────
+process.on("uncaughtException", (err) => {
+  console.error("[MFG_bot] ⚠️ uncaughtException (process kept alive):", err?.message || err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[MFG_bot] ⚠️ unhandledRejection (process kept alive):", reason?.message || reason);
+});
+
 const {
   default: makeWASocket,
   DisconnectReason,
