@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
-import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Play, Square } from 'lucide-react'
+import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Play, Square, Volume2 } from 'lucide-react'
 
 const DEFAULT_VOICES = [
   { voiceId: 'natural',              name: 'Natural',    emoji: '🎙️', description: 'Your real voice' },
@@ -22,6 +22,7 @@ export default function CallRoomPage({ code, onLeave }) {
   const [timer, setTimer]           = useState(0)
   const [volume, setVolume]         = useState(0)
   const [previewing, setPreviewing] = useState(null)
+  const [audioLocked, setAudioLocked] = useState(false)
 
   const socketRef    = useRef(null)
   const streamRef    = useRef(null)
@@ -74,18 +75,32 @@ export default function CallRoomPage({ code, onLeave }) {
     return new Float32Array(bytes.buffer)
   }
 
+  const unlockAudio = useCallback(async () => {
+    const ctx = audioCtxRef.current
+    if (!ctx) return
+    if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
+    setAudioLocked(ctx.state === 'suspended')
+  }, [])
+
   const playChunk = useCallback((floats, sampleRate) => {
     const ctx = audioCtxRef.current
     if (!ctx) return
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {})
+      setAudioLocked(true)
+      return
+    }
+    setAudioLocked(false)
     try {
-      if (ctx.state === 'suspended') ctx.resume()
       const buf = ctx.createBuffer(1, floats.length, sampleRate)
       buf.copyToChannel(floats, 0)
       const src = ctx.createBufferSource()
       src.buffer = buf
       src.connect(ctx.destination)
       const now = ctx.currentTime
-      const startAt = Math.max(now + 0.05, nextPlayRef.current)
+      // Cap scheduling to 300ms ahead — prevents jam when chunks burst in
+      const capped = Math.min(nextPlayRef.current, now + 0.3)
+      const startAt = Math.max(now + 0.04, capped)
       src.start(startAt)
       nextPlayRef.current = startAt + buf.duration
     } catch {}
@@ -108,7 +123,18 @@ export default function CallRoomPage({ code, onLeave }) {
 
       const ctx = new (window.AudioContext || window.webkitAudioContext)()
       audioCtxRef.current = ctx
-      if (ctx.state === 'suspended') await ctx.resume()
+
+      // Try immediate resume (works on desktop, silently fails on iOS without gesture)
+      try { await ctx.resume() } catch {}
+      setAudioLocked(ctx.state === 'suspended')
+
+      // iOS unlock: any touch/click on the page will resume the context
+      const iosUnlock = async () => {
+        if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
+        setAudioLocked(ctx.state === 'suspended')
+      }
+      document.addEventListener('touchstart', iosUnlock, { once: true })
+      document.addEventListener('click', iosUnlock, { once: true })
 
       // Volume analyser for glow effect
       const src = ctx.createMediaStreamSource(stream)
@@ -187,13 +213,15 @@ export default function CallRoomPage({ code, onLeave }) {
       })
 
       socket.on('audio-transformed', ({ audio }) => {
+        if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); return }
         try {
           const s = atob(audio); const bytes = new Uint8Array(s.length)
           for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
           ctx.decodeAudioData(bytes.buffer.slice(0), (decoded) => {
             const src2 = ctx.createBufferSource(); src2.buffer = decoded; src2.connect(ctx.destination)
             const now = ctx.currentTime
-            const startAt = Math.max(now + 0.05, nextPlayRef.current)
+            const capped = Math.min(nextPlayRef.current, now + 0.3)
+            const startAt = Math.max(now + 0.04, capped)
             src2.start(startAt); nextPlayRef.current = startAt + decoded.duration
           })
         } catch {}
@@ -247,6 +275,23 @@ export default function CallRoomPage({ code, onLeave }) {
   return (
     <div className="flex flex-col h-full text-white overflow-hidden"
       style={{ background: 'linear-gradient(165deg,#0c0c1a 0%,#130a26 55%,#0c0c1a 100%)' }}>
+
+      {/* iOS Audio unlock overlay */}
+      {audioLocked && (
+        <button
+          onClick={unlockAudio}
+          className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4"
+          style={{ background: 'rgba(0,0,0,0.85)' }}>
+          <div className="w-20 h-20 rounded-full flex items-center justify-center"
+            style={{ background: 'rgba(139,92,246,0.2)', border: '2px solid rgba(139,92,246,0.5)' }}>
+            <Volume2 className="w-9 h-9 text-purple-400" />
+          </div>
+          <div className="text-center px-8">
+            <p className="text-white font-bold text-lg">Tap to Enable Audio</p>
+            <p className="text-gray-400 text-sm mt-1">Your browser requires a tap to start audio</p>
+          </div>
+        </button>
+      )}
 
       <style>{`
         @keyframes ring-pulse {
