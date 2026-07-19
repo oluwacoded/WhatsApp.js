@@ -62,10 +62,23 @@ export default function CallRoomPage({ code, onLeave }) {
     return () => clearInterval(timerRef.current)
   }, [isLive])
 
+  // Base64 helpers — avoids binary socket.io frames that break through Replit's proxy
+  const f32ToB64 = (arr) => {
+    const bytes = new Uint8Array(arr.buffer)
+    let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+    return btoa(s)
+  }
+  const b64ToF32 = (b64) => {
+    const s = atob(b64); const bytes = new Uint8Array(s.length)
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
+    return new Float32Array(bytes.buffer)
+  }
+
   const playChunk = useCallback((floats, sampleRate) => {
     const ctx = audioCtxRef.current
     if (!ctx) return
     try {
+      if (ctx.state === 'suspended') ctx.resume()
       const buf = ctx.createBuffer(1, floats.length, sampleRate)
       buf.copyToChannel(floats, 0)
       const src = ctx.createBufferSource()
@@ -130,11 +143,9 @@ export default function CallRoomPage({ code, onLeave }) {
           const vid = voiceIdRef.current
 
           if (vid === 'natural') {
-            // Natural voice: relay raw chunks immediately, low latency
             const copy = new Float32Array(raw)
-            socket.emit('audio-chunk', { roomCode: code, chunk: copy.buffer, sampleRate: ctx.sampleRate })
+            socket.emit('audio-chunk', { roomCode: code, chunk: f32ToB64(copy), sampleRate: ctx.sampleRate })
           } else {
-            // Voice transform mode: accumulate until batch is large enough
             chunkBufRef.current.push(new Float32Array(raw))
             const totalSamples = chunkBufRef.current.reduce((n, f) => n + f.length, 0)
             if (totalSamples >= BATCH_SAMPLES) {
@@ -142,7 +153,7 @@ export default function CallRoomPage({ code, onLeave }) {
               let offset = 0
               for (const f of chunkBufRef.current) { merged.set(f, offset); offset += f.length }
               chunkBufRef.current = []
-              socket.emit('voice-chunk-batch', { roomCode: code, chunk: merged.buffer, sampleRate: ctx.sampleRate, voiceId: vid })
+              socket.emit('voice-chunk-batch', { roomCode: code, chunk: f32ToB64(merged), sampleRate: ctx.sampleRate, voiceId: vid })
             }
           }
         }
@@ -172,9 +183,19 @@ export default function CallRoomPage({ code, onLeave }) {
       })
 
       socket.on('audio-chunk', ({ chunk, sampleRate }) => {
+        try { playChunk(b64ToF32(chunk), sampleRate || ctx.sampleRate) } catch {}
+      })
+
+      socket.on('audio-transformed', ({ audio }) => {
         try {
-          const floats = new Float32Array(chunk)
-          playChunk(floats, sampleRate || ctx.sampleRate)
+          const s = atob(audio); const bytes = new Uint8Array(s.length)
+          for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
+          ctx.decodeAudioData(bytes.buffer.slice(0), (decoded) => {
+            const src2 = ctx.createBufferSource(); src2.buffer = decoded; src2.connect(ctx.destination)
+            const now = ctx.currentTime
+            const startAt = Math.max(now + 0.05, nextPlayRef.current)
+            src2.start(startAt); nextPlayRef.current = startAt + decoded.duration
+          })
         } catch {}
       })
     }
