@@ -6,9 +6,14 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'stun:stun.relay.metered.ca:80' },
+  { urls: 'turn:freestun.net:3478',  username: 'free', credential: 'free' },
+  { urls: 'turn:freestun.net:3479',  username: 'free', credential: 'free' },
+  { urls: 'turns:freestun.net:5349', username: 'free', credential: 'free' },
+  { urls: 'turn:a.relay.metered.ca:80',            username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
+  { urls: 'turn:a.relay.metered.ca:80?transport=tcp', username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
+  { urls: 'turn:a.relay.metered.ca:443',           username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
+  { urls: 'turns:a.relay.metered.ca:443?transport=tcp', username: 'e9de1de7e5f92fa58c6dc2e1', credential: 'UVEWpnrSHixo6YKE' },
 ]
 
 export default function GuestCallPage() {
@@ -70,7 +75,7 @@ export default function GuestCallPage() {
     let active = true
     const setup = async () => {
       const ok = await initAudio(); if (!ok || !active) return
-      const socket = io({ path: '/api/socket.io' }); socketRef.current = socket
+      const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'], upgrade: true }); socketRef.current = socket
       socket.on('connect',    () => { setIsConnected(true); socket.emit('join-room', code) })
       socket.on('disconnect', () => setIsConnected(false))
 
@@ -263,7 +268,12 @@ export default function GuestCallPage() {
           ) : isFailed ? (
             <>
               <p className="text-red-400 font-semibold text-sm">Connection failed</p>
-              <p className="text-gray-700 text-xs">Please refresh and try again</p>
+              <button
+                onClick={() => window.location.reload()}
+                className="mt-1 px-5 py-2 rounded-full text-xs font-semibold text-white transition-all active:scale-95"
+                style={{ background: 'rgba(139,92,246,0.85)', border: '1px solid rgba(139,92,246,0.5)' }}>
+                🔄 Tap to Retry
+              </button>
             </>
           ) : isConnected ? (
             <>
