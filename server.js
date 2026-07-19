@@ -3502,7 +3502,7 @@ io.on("connection", (socket) => {
   socket.on("voice-mode-change",(d) => socket.to(d.roomCode).emit("peer-voice-mode", { fromId: socket.id, mode: d.mode }));
   socket.on("audio-chunk",     (d) => socket.to(d.roomCode).emit("audio-chunk",     { chunk: d.chunk, sampleRate: d.sampleRate, from: socket.id }));
 
-  // Live voice transform: client sends batched PCM, server runs ElevenLabs STS, relays MP3 to room
+  // Live voice transform: client sends base64-encoded batched PCM, server runs ElevenLabs STS
   socket.on("voice-chunk-batch", async (d) => {
     const { roomCode, chunk, sampleRate, voiceId } = d;
     if (!voiceId || voiceId === "natural" || !process.env.ELEVENLABS_API_KEY) {
@@ -3510,7 +3510,8 @@ io.on("connection", (socket) => {
       return;
     }
     try {
-      const nodeBuf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      // chunk is base64-encoded Float32 PCM
+      const nodeBuf = Buffer.from(chunk, "base64");
       const float32Len = nodeBuf.length / 4;
       const samples = new Float32Array(float32Len);
       for (let i = 0; i < float32Len; i++) samples[i] = nodeBuf.readFloatLE(i * 4);
@@ -3525,8 +3526,9 @@ io.on("connection", (socket) => {
         body: formData,
       });
       if (!r.ok) { socket.to(roomCode).emit("audio-chunk", { chunk, sampleRate, from: socket.id }); return; }
-      const mp3Buf = await r.arrayBuffer();
-      socket.to(roomCode).emit("audio-transformed", { audio: mp3Buf, from: socket.id });
+      // Send as base64 string — avoids binary frame issues through proxies
+      const mp3B64 = Buffer.from(await r.arrayBuffer()).toString("base64");
+      socket.to(roomCode).emit("audio-transformed", { audio: mp3B64, from: socket.id });
     } catch {
       socket.to(roomCode).emit("audio-chunk", { chunk, sampleRate, from: socket.id });
     }
