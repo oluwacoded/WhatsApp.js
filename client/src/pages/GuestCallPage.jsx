@@ -99,8 +99,11 @@ export default function GuestCallPage() {
           socket.emit('audio-chunk', { roomCode: code, chunk: copy.buffer, sampleRate: ctx.sampleRate })
         }
 
+        // Silent gain keeps graph active without echoing mic back to speaker
+        const silentGain = ctx.createGain(); silentGain.gain.value = 0
         src.connect(processor)
-        processor.connect(ctx.destination)
+        processor.connect(silentGain)
+        silentGain.connect(ctx.destination)
       })
 
       socket.on('disconnect', () => {
