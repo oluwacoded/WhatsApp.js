@@ -3611,6 +3611,33 @@ app.post("/api/call/voice/transform", express.raw({ type: "*/*", limit: "5mb" })
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// REST: POST /api/call/voice/train — ElevenLabs Instant Voice Clone (IVC)
+// Browser sends audio as base64 JSON → server forwards to ElevenLabs → returns voiceId
+app.post("/api/call/voice/train", express.json({ limit: "60mb" }), async (req, res) => {
+  if (!process.env.ELEVENLABS_API_KEY)
+    return res.status(400).json({ error: "ELEVENLABS_API_KEY secret not set — add it in Replit Secrets." });
+  const { audio, name, mimeType } = req.body || {};
+  if (!audio || !name)
+    return res.status(400).json({ error: "audio (base64) and name are required" });
+  try {
+    const buf = Buffer.from(audio, "base64");
+    const fd  = new FormData();
+    fd.append("name", name);
+    fd.append("description", "Voice trained via mfg_bot dashboard");
+    fd.append("files", new Blob([buf], { type: mimeType || "audio/mpeg" }), "voice.mp3");
+    const r = await fetch("https://api.elevenlabs.io/v1/voices/add", {
+      method: "POST",
+      headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+      body: fd,
+      signal: AbortSignal.timeout(120000)   // large uploads can take 60-90s
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(502).json({ error: d.detail?.message || d.detail || "ElevenLabs IVC failed" });
+    console.log(`[MFG_bot] Voice trained: ${name} → ${d.voice_id}`);
+    res.json({ voiceId: d.voice_id, name });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // REST: POST /api/call/rooms — create a room
 app.post("/api/call/rooms", (req, res) => {
   const code = generateRoomCode();
