@@ -56,7 +56,8 @@ const SETTINGS_DEFAULTS = {
   autoCallReject: false,
   callBlock: true,
   callVideoEnabled: false,   // When on: reject call + instantly send a pre-recorded video to the caller
-  autoReadStatus: false,
+  autoReadStatus: true,
+  statusReactEmoji: "❤️",   // auto-react to all status posts with ❤️ by default
   aiEnabled: true,
   aiMode: "chill",
   aiDelay: 0,
@@ -135,6 +136,8 @@ let hasEverConnected = false;  // tracks if WA ever reached "open" — used to d
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
 let lastGreetTime = 0;         // debounce: prevent greeting flood on rapid reconnections
 let lastBotMsgByChat = new Map(); // jid -> last sent msg key (for .editlast)
+let afkMode = { enabled: false, message: "" }; // .afk <reason> / .back
+const pendingRiddles = new Map(); // jid → answer string (for .riddle / .answer game)
 
 // ── PROPER BAILEYS RETRY STORE ───────────────────────────────────────────────
 // Baileys calls getMessage(key) when a peer requests a retry (their session got
@@ -1015,6 +1018,11 @@ async function connectToWhatsApp() {
             text: `🔥 *VIP ALERT*\n\n👤 ${vipName} (+${from.split("@")[0]}) just texted you!\n\n${vipText}\n\n_reply in that chat — takeover will silence my AI there for ${settings.takeoverMinutes}m_`
           });
         } catch (e) {}
+      }
+
+      // ── AFK auto-reply: let people know owner is away ──
+      if (!isFromMe && !isStale && afkMode.enabled && !from.endsWith("@g.us") && !from.endsWith("@broadcast")) {
+        try { await send(`🌙 teddymfg is away rn — ${afkMode.message}\n\n_he'll get back to you when he returns_`); } catch {}
       }
 
       // ── DM AUTO-REACT: react to every incoming DM with a configured emoji ──
@@ -2894,17 +2902,149 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // ── .command / .list / .work / .teddy / .menu / .help — ALL commands, one big dump ──
-        if (cmd === "command" || cmd === "commands" || cmd === "list" || cmd === "work" || cmd === "teddy" || cmd === "menu" || cmd === "help" || cmd === "allcmd") {
-          const part1 = `📋 *mfg_bot — COMMAND LIST v3.0*\n_teddymfg • +2349132883869_\n\n⭐ *MOST USEFUL*\n.listall — personalized welcome\n.online — i cover for you + AI replies\n.offline — stop covering\n.song <name> — youtube search → MP3\n.download / .dl <yt-link> — direct download\n.weather <city> — live weather (wttr.in)\n.define <word> — dictionary\n.shorten <url> — short link\n.ip <addr> — geolocate IP\n\n🚀 *FUTURISTIC (UPGRADED)*\n.remind 30m <msg> — smart reminder\n.remind 9pm <msg> / .remind tomorrow\n.reminders — see active\n.delreminder <id> — cancel\n\n.vip add/remove/list — VIP alerts (ping you instantly)\n.autorule add <trigger> | <response> — auto-reply rules\n.autorule list/toggle/del/clear\n\n.schedule HH:MM here <msg> — schedule daily msg\n.schedule HH:MM <number> <msg>\n.schedule list/del\n\n.silence 23 7 — quiet hours (no AI at night)\n.silence on/off\n\n.translate <lang> <text> — AI translate (any language)\n.summarize — reply to any msg to get TL;DR\n.fix — reply to fix grammar/spelling\n.explain <topic> — AI explains anything simply\n.advice <situation> — honest real-talk advice\n.story <topic> — AI micro-story (5 sentences, with twist)\n.gift <who/occasion> — AI gift ideas\n\n.crypto [coin] — live crypto prices (BTC/ETH/SOL/BNB...)\n.news — top tech headlines (Hacker News)\n.intel <number> — contact intelligence report\n.topchats — most active contacts\n.digest — daily briefing (todos + reminders + status)\n.dmreact <emoji> — auto-react to all incoming DMs\n\n🤖 *AI & LEARNING*\n.ai on/off/status/mode/reset/prompt\n.learnme / .learnme view / .learnme clear\n.disclaimer on/off/text/reset\n.transcribe on/off — voice → text\n.vision on/off — see images\n.mood on/off — time-of-day tone\n.takeover on/off/min N/clear\n.scam on/off/log\n.facts <jid?> / .factsclear\n.aiat <jid> on/off/list\n.birthdays / .bigshot — feature overview\n.voice on/off/test — voice clone`;
+        // ── .react <emoji> — react to a quoted message ──
+        if (cmd === "react") {
+          const ctx = msg.message?.extendedTextMessage?.contextInfo;
+          if (!ctx?.stanzaId) { await send("reply to any message with .react <emoji>\nexample: .react ❤️"); continue; }
+          const emoji = args[0] || "❤️";
+          try { await sock.sendMessage(from, { react: { text: emoji, key: { remoteJid: from, id: ctx.stanzaId, fromMe: ctx.fromMe || false, participant: ctx.participant } } }); }
+          catch (e) { await send("couldn't react: " + e.message); }
+          continue;
+        }
 
-          const partUpgraded = `🆕 *BAILEYS 6.7.21 UNLOCKS*\n\n✏️ .say / .editlast — send & edit messages\n📌 .pin / .unpin — pin chats\n📰 .channel create/info/follow/post\n👁 .vvideo — re-send as view-once\n💚 .statusreact <emoji> — auto-react statuses\n📊 .pollvotes — see poll results\n\n`;
+        // ── .afk <reason> / .back — away mode ──
+        if (cmd === "afk") {
+          const reason = args.join(" ") || "busy rn";
+          afkMode = { enabled: true, message: reason };
+          await send(`🌙 *AFK mode ON*\nAnyone who texts you gets: "i'm away — ${reason}"\n\ntype *.back* when you return`);
+          continue;
+        }
+        if (cmd === "back") {
+          afkMode = { enabled: false, message: "" };
+          await send("✅ *Welcome back!* AFK mode is off — AI responding normally again.");
+          continue;
+        }
 
-          const part2 = partUpgraded + `📝 *TEXT TOOLS*\n.upper .lower .reverse .mock .clap\n.aesthetic .leet .count .repeat .binary\n.hex .base64 .caesar .pig .owoify\n.uwuify .palindrome .wordcount .emojify\n\n🔢 *MATH & CALC*\n.calc .percent .tax .tip .split .bmi\n.roman .random .temp .sqrt .pow .mod\n.fibonacci .factorial .isprime .password .uuid\n\n🎮 *FUN & GAMES*\n.joke .fact .quote .truth .dare .wyr\n.pickup .roast .compliment .fortune .8ball\n.rps .ship .rate .rank .choose .spin .slot\n.flip .roll .rizz .sus .vibe .chad .simp\n.npc .based .ratio .bruh .hype .goat\n\n🤝 *SOCIAL*\n.gm .gn .hbd .gl .gg .hug .slap .poke\n.kiss .love .wave .cheer .congrats .rip .ily\n\n🛠 *UTILITY*\n.time .date .uptime .age .countdown\n.note .notes .delnote .todo .todos .done\n.save .get .keys .ping .bot .stats\n\n👥 *GROUPS*\n.tagall .hidetag .tagadmins .everyone\n.kick .add .promote .demote\n.mute .unmute .lock .unlock\n.setname .setdesc .revoke .leave\n.groupinfo .members .admins .link\n.poll Q | opt1 | opt2 | opt3\n.del — delete a message\n.vv — reveal view-once\n\n👑 *OWNER ONLY*\n.broadcast all|group <msg>\n.send <number> <msg>\n.fakecall / .fc — WebRTC voice disguise call\n.call on/off — block incoming calls\n.feedback .report .donate\n\n_total: 250+ commands • type any command to use_`;
+        // ── .naira <usd> — USD to NGN ──
+        if (cmd === "naira") {
+          const usd = parseFloat(args[0]);
+          if (!usd || isNaN(usd)) { await send("usage: .naira 100\nexample: .naira 50 → shows ₦ equivalent"); continue; }
+          try {
+            const r = await fetch("https://open.er-api.com/v6/latest/USD");
+            const d = await r.json();
+            const rate = d.rates?.NGN;
+            if (!rate) throw new Error("no rate");
+            const ngn = (usd * rate).toLocaleString("en-NG", { maximumFractionDigits: 0 });
+            await send(`💰 $${usd} USD = ₦${ngn} NGN\nRate: ₦${Math.round(rate)} per $1\n_updated: ${new Date().toLocaleDateString()}_`);
+          } catch {
+            const r = await askGroq(`Convert $${usd} USD to Nigerian Naira at today's approximate rate. Give just the amount and current rate, 2 lines max.`);
+            await send(r || "couldn't fetch rate right now, try again");
+          }
+          continue;
+        }
 
-          await send(part1);
-          await new Promise(r => setTimeout(r, 600));
-          await send(part2);
+        // ── .banks — Nigerian bank USSD codes ──
+        if (cmd === "banks") {
+          await send(`🏦 *Nigerian Bank Codes*\n\nAccess Bank — *901#\nGT Bank — *737#\nFirst Bank — *894#\nZenith Bank — *966#\nUBA — *919#\nFidelity Bank — *770#\nPolaris Bank — *833#\nStanbic IBTC — *909#\nSterling Bank — *822#\nUnion Bank — *826#\nWema Bank / ALAT — *945#\nEcobank — *326#\nKeystone Bank — *082#\nHeritage Bank — *745#\n\n📱 *Mobile Apps*\nOpay — *955#\nKuda Bank — *933#\nPalmpay — *861#\nMoniepoint — *5573#\nMoMo (MTN) — *671#\n\n_dial any code → bank transfer no data needed_`);
+          continue;
+        }
+
+        // ── .quiz — AI trivia question ──
+        if (cmd === "quiz") {
+          const r = await askGroq(`Generate one fun trivia question with 4 options (A B C D). Can be Nigeria, pop culture, tech, or general knowledge. Format exactly:\n\n❓ [Question]\n\nA) ...\nB) ...\nC) ...\nD) ...\n\n✅ Answer: [letter]) [brief explanation in 1 sentence]`);
+          await send(r || "couldn't generate quiz rn, try again");
+          continue;
+        }
+
+        // ── .riddle / .answer ──
+        if (cmd === "riddle") {
+          const r = await askGroq(`Give a clever riddle. Format EXACTLY:\n\n🧩 [riddle question here]\n\n_type .answer to reveal_\n\n||ANSWER: [the answer]||`);
+          if (!r) { await send("couldn't generate riddle rn"); continue; }
+          const main = r.replace(/\|\|ANSWER:.*?\|\|/gi, "").trim();
+          const ans = r.match(/\|\|ANSWER:(.*?)\|\|/i)?.[1]?.trim() || "";
+          if (ans) pendingRiddles.set(from, ans);
+          await send(main);
+          continue;
+        }
+        if (cmd === "answer") {
+          const ans = pendingRiddles.get(from);
+          if (!ans) { await send("no riddle pending — type .riddle first 🧩"); continue; }
+          pendingRiddles.delete(from);
+          await send(`🎯 *Answer: ${ans}*`);
+          continue;
+        }
+
+        // ── .caption <topic> — fire WhatsApp status captions ──
+        if (cmd === "caption") {
+          const topic = args.join(" ") || "good vibes";
+          const r = await askGroq(`Write 3 short fire WhatsApp status captions about: "${topic}". Nigerian energy — mix English and Yoruba/pidgin naturally where it fits. Under 12 words each. Number them 1, 2, 3. No hashtags.`);
+          await send(r || "couldn't generate captions rn");
+          continue;
+        }
+
+        // ── .crush <name> — sweet message for your crush ──
+        if (cmd === "crush") {
+          const name = args.join(" ") || "my crush";
+          const r = await askGroq(`Write a short, sweet, genuine message to send to a crush named "${name}". Nigerian energy but not tryhard. Romantic but casual — under 3 sentences. Don't say "I love you" — just something that would genuinely make them smile and feel special.`);
+          await send(r || "couldn't generate message rn");
+          continue;
+        }
+
+        // ── .pray — morning/evening blessing ──
+        if (cmd === "pray") {
+          const hr = new Date().getHours();
+          const period = hr < 12 ? "morning" : hr < 18 ? "afternoon" : "evening";
+          const r = await askGroq(`Write a short, heartfelt Nigerian ${period} prayer/blessing. Mix English and pidgin naturally. Genuine, not cheesy. 3-4 sentences. Can be Christian or generically spiritual.`);
+          await send(r || "🙏 May God bless your day and make your path clear. Stay strong, stay focused — e go better. Amen 🙏");
+          continue;
+        }
+
+        // ── .vent <text> — talk to the bot ──
+        if (cmd === "vent") {
+          const what = args.join(" ");
+          if (!what) { await send("tell me what's on your mind:\n*.vent <what you're feeling>*"); continue; }
+          const r = await askGroq(`Someone vented: "${what}"\n\nRespond as a close Nigerian friend who genuinely cares — empathetic, real, not generic advice. Address what they actually said. Under 4 sentences. Casual language.`);
+          await send(r || "i hear you. that's heavy. but you're stronger than this situation — talk to me 🤝");
+          continue;
+        }
+
+        // ── .match <a> vs <b> — who would win ──
+        if (cmd === "match") {
+          const vs = args.join(" ");
+          if (!vs.toLowerCase().includes("vs")) { await send("usage: .match Wizkid vs Burna Boy"); continue; }
+          const r = await askGroq(`${vs} — who wins? Give a spicy, funny Nigerian take. Pick a clear winner and explain why in 2 sentences. Be entertaining and bold.`);
+          await send(r || "too close to call honestly 😂");
+          continue;
+        }
+
+        // ── .check <url> — is website down ──
+        if (cmd === "check") {
+          const url = args[0];
+          if (!url) { await send("usage: .check google.com"); continue; }
+          const fullUrl = url.startsWith("http") ? url : "https://" + url;
+          try {
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 8000);
+            const resp = await fetch(fullUrl, { method: "HEAD", signal: ctrl.signal });
+            clearTimeout(t);
+            await send(`✅ *${url}* is UP\nStatus: ${resp.status} ${resp.statusText}`);
+          } catch (e) {
+            await send(e.name === "AbortError"
+              ? `⏱ *${url}* timed out — likely DOWN or blocking checks`
+              : `❌ *${url}* appears DOWN\n${e.message}`);
+          }
+          continue;
+        }
+
+        // ── .menu / .help / .list / .commands ──
+        if (cmd === "menu" || cmd === "help" || cmd === "list" || cmd === "commands" || cmd === "command" || cmd === "work" || cmd === "teddy" || cmd === "allcmd") {
+          const p1 = `📱 *mfg_bot COMMANDS — Part 1*\n\n📊 *INFO & DAILY USE*\n.weather <city> — live forecast\n.crypto btc|eth|sol|bnb — live prices\n.news — top tech headlines\n.naira <amount> — USD → NGN today\n.banks — all Nigerian bank USSD codes\n.define <word> — dictionary\n.shorten <url> — short link\n.ip <address> — geolocate IP\n.check <url> — is site down?\n.time | .date | .age <DD/MM/YYYY>\n\n⏰ *REMINDERS*\n.remind 30m <text> | .remind 9pm <text>\n.remind tomorrow <text>\n.reminders — see all active\n.delreminder <id> — cancel one\n\n📅 *SCHEDULER*\n.schedule HH:MM here <msg> — daily at that time\n.schedule HH:MM <number> <msg>\n.schedule list | .schedule del <id>\n\n🤖 *AI TOOLS*\n.translate <lang> <text>\n.summarize — reply to any long message\n.fix — reply to fix grammar/spelling\n.explain <topic> — simple explanation\n.advice <situation> — real talk advice\n.story <topic> — 5-sentence story\n.gift <who/occasion> — gift ideas\n.caption <topic> — fire status caption\n.vent <feeling> — talk to me\n.crush <name> — sweet message for them\n.pray — morning/evening blessing`;
+
+          const p2 = `📱 *mfg_bot COMMANDS — Part 2*\n\n🎮 *GAMES & FUN*\n.quiz — trivia (A/B/C/D format)\n.riddle | .answer — riddle game\n.8ball <question> — magic 8-ball\n.truth | .dare | .wyr — classic games\n.rps rock|paper|scissors\n.roast <name> — roast someone\n.compliment <name> — hype someone\n.rate <name> | .ship <a> <b>\n.match <a> vs <b> — who wins?\n.joke | .fact | .quote | .fortune\n.slot | .flip | .roll\n.pickup — pickup line\n\n📝 *TEXT TOOLS*\n.upper | .lower | .reverse | .mock\n.aesthetic | .leet\n.caesar <N> <text> — shift cipher\n.binary | .hex | .base64\n.count <text> | .password <len>\n.uuid — random unique ID\n\n⚙️ *CONTROLS & SETTINGS*\n.online — AI covers + proactive texting\n.offline — stop covering\n.afk <reason> | .back — away mode\n.react <emoji> — react to quoted msg\n.silence 23 7 | .silence on/off\n.vip add|remove|list — instant alerts\n.autorule add <trigger>|<reply>\n.dmreact <emoji> — react all DMs\n.statusreact <emoji|off> — react all statuses\n.aiat <num> on|off|list — per-contact AI\n.takeover on|off|min N\n.ai on|off | .disclaimer on|off\n.transcribe on|off | .vision on|off\n.mood on|off | .scam on|off\n.facts <num?> | .factsclear\n\n👥 *GROUPS*\n.tagall | .hidetag <msg> | .tagadmins\n.kick | .add <num> | .promote | .demote\n.mute | .unmute | .lock | .unlock\n.setname | .setdesc | .groupinfo\n.poll Q|A|B|C | .pollvotes\n.del | .vv | .link | .members\n\n👑 *OWNER POWER*\n.broadcast all|group <msg>\n.send <number> <msg>\n.intel <num> — full contact report\n.topchats | .digest\n.fakecall | .fc — fake call room\n.bot | .stats | .ping | .uptime`;
+
+          await send(p1);
+          await new Promise(r => setTimeout(r, 700));
+          await send(p2);
           continue;
         }
 
