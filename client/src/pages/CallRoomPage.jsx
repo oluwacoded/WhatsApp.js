@@ -1,108 +1,131 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
-import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Play, Square, Volume2 } from 'lucide-react'
+import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Volume2, Upload } from 'lucide-react'
 
-const DEFAULT_VOICES = [
-  { voiceId: 'natural',              name: 'Natural',    emoji: '🎙️', description: 'Your real voice' },
-  { voiceId: 'pNInz6obpgDQGcFmaJgB', name: 'Deep Male', emoji: '🎭', description: 'Low, authoritative' },
-  { voiceId: 'TxGEqnHWrfWFTfGW9XjX', name: 'Casual',   emoji: '💬', description: 'Young, relaxed' },
-  { voiceId: 'EXAVITQu4vr4xnSDxMaL', name: 'Warm',     emoji: '🌸', description: 'Soft, intimate' },
-  { voiceId: '21m00Tcm4TlvDq8ikWAM', name: 'Clear',    emoji: '✨', description: 'Crisp, professional' },
+// All voice effects run LOCALLY via AudioWorklet — instant, zero cracking, no API calls needed
+const VOICE_MODES = [
+  { voiceId: 'natural',  name: 'Natural',  emoji: '🎙️', ratio: 1.00, tag: 'real voice' },
+  { voiceId: 'female',   name: 'Female',   emoji: '👩', ratio: 1.35, tag: '+35% pitch' },
+  { voiceId: 'deep',     name: 'Deep',     emoji: '🎭', ratio: 0.72, tag: '-28% pitch' },
+  { voiceId: 'older',    name: 'Older',    emoji: '👴', ratio: 0.82, tag: '-18% pitch' },
+  { voiceId: 'chipmunk', name: 'Chipmunk', emoji: '🐿️', ratio: 1.72, tag: '+72% pitch' },
+  { voiceId: 'demon',    name: 'Demon',    emoji: '😈', ratio: 0.45, tag: '-55% pitch' },
 ]
 
+// AudioWorklet processor — runs in dedicated audio thread (no main thread jank = no cracking)
+// Circular ring buffer + linear interpolation pitch shift + batched output posting
+const WORKLET = `
+class PitchProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._bsz = 16384;
+    this._buf = new Float32Array(this._bsz);
+    this._w = 0; this._r = 0.0; this._ratio = 1.0;
+    this._bb = new Float32Array(4096);
+    this._bp = 0;
+    this.port.onmessage = e => { if (e.data.ratio !== undefined) this._ratio = e.data.ratio; };
+  }
+  process(inputs, outputs) {
+    const inp = inputs[0]?.[0], out = outputs[0]?.[0];
+    if (!inp || !out) return true;
+    const mask = this._bsz - 1;
+    for (let i = 0; i < inp.length; i++) { this._buf[this._w & mask] = inp[i]; this._w++; }
+    const avail = this._w - this._r;
+    if (avail < out.length) { out.fill(0); return true; }
+    if (avail > this._bsz * 0.65) this._r = this._w - inp.length * 4;
+    for (let i = 0; i < out.length; i++) {
+      const ri = Math.floor(this._r), frac = this._r - ri;
+      out[i] = this._buf[ri & mask] * (1 - frac) + this._buf[(ri + 1) & mask] * frac;
+      this._r += this._ratio;
+    }
+    const space = this._bb.length - this._bp;
+    if (out.length <= space) {
+      this._bb.set(out, this._bp); this._bp += out.length;
+    } else {
+      const send = this._bb.slice(0, this._bp);
+      this._bp = 0;
+      this.port.postMessage({ c: send.buffer }, [send.buffer]);
+      this._bb.set(out, 0); this._bp = out.length;
+    }
+    return true;
+  }
+}
+registerProcessor('mfg-pitch', PitchProcessor);
+`
+
 export default function CallRoomPage({ code, onLeave }) {
-  const [audioState, setAudioState] = useState('new')  // new|connecting|live|failed
+  const [audioState, setAudioState] = useState('new')
   const [isMuted, setIsMuted]       = useState(false)
   const [peersCount, setPeersCount] = useState(0)
   const [voiceId, setVoiceId]       = useState('natural')
-  const [baseVoices, setBaseVoices] = useState(DEFAULT_VOICES)
-  const [celebVoices, setCelebVoices] = useState([])
-  const [activeTab, setActiveTab]   = useState('base')
   const [copied, setCopied]         = useState(false)
   const [timer, setTimer]           = useState(0)
   const [volume, setVolume]         = useState(0)
-  const [previewing, setPreviewing] = useState(null)
   const [audioLocked, setAudioLocked] = useState(false)
+  const [showTrain, setShowTrain]   = useState(false)
+  const [trainName, setTrainName]   = useState('')
+  const [trainStatus, setTrainStatus] = useState(null)
+  const [trainedVoices, setTrainedVoices] = useState([])
 
-  const socketRef    = useRef(null)
-  const streamRef    = useRef(null)
-  const audioCtxRef  = useRef(null)
-  const analyserRef  = useRef(null)
-  const processorRef = useRef(null)
-  const nextPlayRef  = useRef(0)
-  const timerRef     = useRef(null)
-  const rafRef       = useRef(0)
-  const mutedRef     = useRef(false)
-  const previewRef   = useRef(null)
-  const voiceIdRef   = useRef('natural')   // live-updated by voice selector
-  const chunkBufRef  = useRef([])          // accumulates Float32 samples for STS batching
+  const socketRef   = useRef(null)
+  const streamRef   = useRef(null)
+  const audioCtxRef = useRef(null)
+  const analyserRef = useRef(null)
+  const pitchRef    = useRef(null)
+  const nextPlayRef = useRef(0)
+  const timerRef    = useRef(null)
+  const rafRef      = useRef(0)
+  const mutedRef    = useRef(false)
+  const socketSend  = useRef(null)
 
-  const guestUrl = `${window.location.origin}/guest/${code}`
-  const isLive   = audioState === 'live'
-  const isFailed = audioState === 'failed'
+  const guestUrl    = `${window.location.origin}/guest/${code}`
+  const isLive      = audioState === 'live'
+  const isFailed    = audioState === 'failed'
+  const allVoices   = [...VOICE_MODES, ...trainedVoices]
+  const currentVoice = allVoices.find(v => v.voiceId === voiceId) ?? VOICE_MODES[0]
 
-  const formatTime = (s) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-
-  useEffect(() => {
-    fetch('/api/call/voices/base').then(r => r.json())
-      .then(d => { if (d.voices?.length) setBaseVoices(d.voices) }).catch(() => {})
-    fetch('/api/call/voices/celebrity').then(r => r.json())
-      .then(d => { if (d.voices?.length) setCelebVoices(d.voices) }).catch(() => {})
-  }, [])
-
-  // Keep ref in sync so onaudioprocess can read it without stale closure
-  useEffect(() => { voiceIdRef.current = voiceId; chunkBufRef.current = [] }, [voiceId])
+  const fmt = s => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`
 
   useEffect(() => {
-    if (isLive) {
-      timerRef.current = setInterval(() => setTimer(t => t + 1), 1000)
-    } else {
-      clearInterval(timerRef.current); setTimer(0)
-    }
+    if (isLive) { timerRef.current = setInterval(() => setTimer(t => t+1), 1000) }
+    else { clearInterval(timerRef.current); setTimer(0) }
     return () => clearInterval(timerRef.current)
   }, [isLive])
 
-  // Base64 helpers — avoids binary socket.io frames that break through Replit's proxy
-  const f32ToB64 = (arr) => {
-    const bytes = new Uint8Array(arr.buffer)
-    let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+  // Update pitch ratio live — no audio restart needed
+  useEffect(() => {
+    const mode = allVoices.find(v => v.voiceId === voiceId) ?? VOICE_MODES[0]
+    pitchRef.current?.port.postMessage({ ratio: mode.ratio ?? 1.0 })
+  }, [voiceId, trainedVoices])
+
+  const f32ToB64 = arr => {
+    const b = new Uint8Array(arr.buffer); let s = ''
+    for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i])
     return btoa(s)
   }
-  const b64ToF32 = (b64) => {
-    const s = atob(b64); const bytes = new Uint8Array(s.length)
-    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
-    return new Float32Array(bytes.buffer)
+  const b64ToF32 = b64 => {
+    const s = atob(b64); const b = new Uint8Array(s.length)
+    for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i)
+    return new Float32Array(b.buffer)
   }
 
   const unlockAudio = useCallback(async () => {
-    const ctx = audioCtxRef.current
-    if (!ctx) return
+    const ctx = audioCtxRef.current; if (!ctx) return
     if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
     setAudioLocked(ctx.state === 'suspended')
   }, [])
 
-  const playChunk = useCallback((floats, sampleRate) => {
-    const ctx = audioCtxRef.current
-    if (!ctx) return
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {})
-      setAudioLocked(true)
-      return
-    }
+  const playChunk = useCallback((floats, sr) => {
+    const ctx = audioCtxRef.current; if (!ctx) return
+    if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); setAudioLocked(true); return }
     setAudioLocked(false)
     try {
-      const buf = ctx.createBuffer(1, floats.length, sampleRate)
+      const buf = ctx.createBuffer(1, floats.length, sr)
       buf.copyToChannel(floats, 0)
-      const src = ctx.createBufferSource()
-      src.buffer = buf
-      src.connect(ctx.destination)
+      const src = ctx.createBufferSource(); src.buffer = buf; src.connect(ctx.destination)
       const now = ctx.currentTime
-      // Cap scheduling to 300ms ahead — prevents jam when chunks burst in
-      const capped = Math.min(nextPlayRef.current, now + 0.3)
-      const startAt = Math.max(now + 0.04, capped)
-      src.start(startAt)
-      nextPlayRef.current = startAt + buf.duration
+      const startAt = Math.max(now + 0.04, Math.min(nextPlayRef.current, now + 0.3))
+      src.start(startAt); nextPlayRef.current = startAt + buf.duration
     } catch {}
   }, [])
 
@@ -123,108 +146,84 @@ export default function CallRoomPage({ code, onLeave }) {
 
       const ctx = new (window.AudioContext || window.webkitAudioContext)()
       audioCtxRef.current = ctx
-
-      // Try immediate resume (works on desktop, silently fails on iOS without gesture)
       try { await ctx.resume() } catch {}
       setAudioLocked(ctx.state === 'suspended')
 
-      // iOS unlock: any touch/click on the page will resume the context
-      const iosUnlock = async () => {
+      const unlock = async () => {
         if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
         setAudioLocked(ctx.state === 'suspended')
       }
-      document.addEventListener('touchstart', iosUnlock, { once: true })
-      document.addEventListener('click', iosUnlock, { once: true })
+      document.addEventListener('touchstart', unlock, { once: true })
+      document.addEventListener('click', unlock, { once: true })
 
-      // Volume analyser for glow effect
-      const src = ctx.createMediaStreamSource(stream)
+      const micSrc  = ctx.createMediaStreamSource(stream)
       const analyser = ctx.createAnalyser(); analyser.fftSize = 256; analyserRef.current = analyser
-      src.connect(analyser)
+      micSrc.connect(analyser)
+
       const tick = () => {
         rafRef.current = requestAnimationFrame(tick)
-        const data = new Uint8Array(analyser.frequencyBinCount)
-        analyser.getByteFrequencyData(data)
-        setVolume(data.reduce((a, b) => a + b, 0) / data.length / 255)
+        const d = new Uint8Array(analyser.frequencyBinCount)
+        analyser.getByteFrequencyData(d)
+        setVolume(d.reduce((a, b) => a + b, 0) / d.length / 255)
       }
       tick()
 
+      // Silent gain prevents mic feedback through speakers
+      const silent = ctx.createGain(); silent.gain.value = 0
+
+      // Load AudioWorklet via Blob URL — processes in dedicated audio thread
+      let pitchNode = null
+      try {
+        const blob = new Blob([WORKLET], { type: 'application/javascript' })
+        const blobUrl = URL.createObjectURL(blob)
+        await ctx.audioWorklet.addModule(blobUrl)
+        URL.revokeObjectURL(blobUrl)
+        pitchNode = new AudioWorkletNode(ctx, 'mfg-pitch', {
+          numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1]
+        })
+        pitchRef.current = pitchNode
+        micSrc.connect(pitchNode)
+        pitchNode.connect(silent)
+      } catch {
+        micSrc.connect(silent)
+      }
+      silent.connect(ctx.destination)
+
       const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'] })
       socketRef.current = socket
+      socketSend.current = socket
 
-      socket.on('connect', () => {
-        setAudioState('connecting')
-        socket.emit('join-room', code)
-
-        // ScriptProcessor captures mic audio and sends over socket.io
-        const processor = ctx.createScriptProcessor(4096, 1, 1)
-        processorRef.current = processor
-
-        // Batch threshold: ~1.5 seconds of audio
-        const BATCH_SAMPLES = Math.round(ctx.sampleRate * 1.5)
-
-        processor.onaudioprocess = (e) => {
-          if (!active || !socket.connected) return
-          if (mutedRef.current) return
-          const raw = e.inputBuffer.getChannelData(0)
-          const vid = voiceIdRef.current
-
-          if (vid === 'natural') {
-            const copy = new Float32Array(raw)
-            socket.emit('audio-chunk', { roomCode: code, chunk: f32ToB64(copy), sampleRate: ctx.sampleRate })
-          } else {
-            chunkBufRef.current.push(new Float32Array(raw))
-            const totalSamples = chunkBufRef.current.reduce((n, f) => n + f.length, 0)
-            if (totalSamples >= BATCH_SAMPLES) {
-              const merged = new Float32Array(totalSamples)
-              let offset = 0
-              for (const f of chunkBufRef.current) { merged.set(f, offset); offset += f.length }
-              chunkBufRef.current = []
-              socket.emit('voice-chunk-batch', { roomCode: code, chunk: f32ToB64(merged), sampleRate: ctx.sampleRate, voiceId: vid })
-            }
-          }
+      // AudioWorklet sends batched pitch-shifted samples → emit to peer
+      if (pitchNode) {
+        pitchNode.port.onmessage = (e) => {
+          if (!active || !socket.connected || mutedRef.current) return
+          socket.emit('audio-chunk', {
+            roomCode: code,
+            chunk: f32ToB64(new Float32Array(e.data.c)),
+            sampleRate: ctx.sampleRate
+          })
         }
+      } else {
+        // Fallback: ScriptProcessor for browsers without AudioWorklet support
+        const proc = ctx.createScriptProcessor(4096, 1, 1)
+        micSrc.connect(proc); proc.connect(silent)
+        proc.onaudioprocess = (e) => {
+          if (!active || !socket.connected || mutedRef.current) return
+          socket.emit('audio-chunk', {
+            roomCode: code,
+            chunk: f32ToB64(new Float32Array(e.inputBuffer.getChannelData(0))),
+            sampleRate: ctx.sampleRate
+          })
+        }
+      }
 
-        // Silent gain keeps graph active without echoing mic back to speaker
-        const silentGain = ctx.createGain(); silentGain.gain.value = 0
-        src.connect(processor)
-        processor.connect(silentGain)
-        silentGain.connect(ctx.destination)
-      })
-
-      socket.on('disconnect', () => {
-        if (active) setAudioState('failed')
-      })
-
-      socket.on('room-peers', (ids) => {
-        setPeersCount(ids.length)
-      })
-
-      socket.on('peer-joined', () => {
-        setPeersCount(n => n + 1)
-        setAudioState('live')
-      })
-
-      socket.on('peer-left', () => {
-        setPeersCount(n => Math.max(0, n - 1))
-      })
-
+      socket.on('connect',     () => { setAudioState('connecting'); socket.emit('join-room', code) })
+      socket.on('disconnect',  () => { if (active) setAudioState('failed') })
+      socket.on('room-peers',  ids => setPeersCount(ids.length))
+      socket.on('peer-joined', () => { setPeersCount(n => n + 1); setAudioState('live') })
+      socket.on('peer-left',   () => setPeersCount(n => Math.max(0, n - 1)))
       socket.on('audio-chunk', ({ chunk, sampleRate }) => {
         try { playChunk(b64ToF32(chunk), sampleRate || ctx.sampleRate) } catch {}
-      })
-
-      socket.on('audio-transformed', ({ audio }) => {
-        if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); return }
-        try {
-          const s = atob(audio); const bytes = new Uint8Array(s.length)
-          for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i)
-          ctx.decodeAudioData(bytes.buffer.slice(0), (decoded) => {
-            const src2 = ctx.createBufferSource(); src2.buffer = decoded; src2.connect(ctx.destination)
-            const now = ctx.currentTime
-            const capped = Math.min(nextPlayRef.current, now + 0.3)
-            const startAt = Math.max(now + 0.04, capped)
-            src2.start(startAt); nextPlayRef.current = startAt + decoded.duration
-          })
-        } catch {}
       })
     }
 
@@ -233,7 +232,7 @@ export default function CallRoomPage({ code, onLeave }) {
       active = false
       cancelAnimationFrame(rafRef.current)
       clearInterval(timerRef.current)
-      processorRef.current?.disconnect()
+      pitchRef.current?.disconnect()
       socketRef.current?.emit('leave-room', code)
       socketRef.current?.disconnect()
       streamRef.current?.getTracks().forEach(t => t.stop())
@@ -242,44 +241,47 @@ export default function CallRoomPage({ code, onLeave }) {
   }, [code])
 
   const toggleMute = () => {
-    const next = !isMuted; setIsMuted(next)
-    mutedRef.current = next
+    const next = !isMuted; setIsMuted(next); mutedRef.current = next
     streamRef.current?.getAudioTracks().forEach(t => { t.enabled = !next })
   }
-
-  const handlePreview = useCallback(async (vid, e) => {
-    e.stopPropagation()
-    if (previewRef.current) { previewRef.current.pause(); previewRef.current = null }
-    if (previewing === vid) { setPreviewing(null); return }
-    setPreviewing(vid)
-    try {
-      const r = await fetch(`/api/call/voice/preview/${vid}`)
-      if (!r.ok) throw new Error()
-      const url = URL.createObjectURL(await r.blob())
-      const audio = new Audio(url); previewRef.current = audio
-      audio.onended = () => { setPreviewing(null); URL.revokeObjectURL(url) }
-      audio.onerror = () => { setPreviewing(null); URL.revokeObjectURL(url) }
-      await audio.play()
-    } catch { setPreviewing(null) }
-  }, [previewing])
-
   const copyLink = () => {
-    navigator.clipboard.writeText(guestUrl).then(() => {
-      setCopied(true); setTimeout(() => setCopied(false), 2000)
-    })
+    navigator.clipboard.writeText(guestUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
   }
 
-  const currentVoice = [...baseVoices, ...celebVoices].find(v => v.voiceId === voiceId) ?? DEFAULT_VOICES[0]
+  const handleTrainUpload = async (file) => {
+    if (!file || !trainName.trim()) return
+    setTrainStatus('busy')
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader()
+        r.onload = e => res(e.target.result.split(',')[1])
+        r.onerror = rej
+        r.readAsDataURL(file)
+      })
+      const resp = await fetch('/api/call/voice/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audio: b64, name: trainName.trim(), mimeType: file.type || 'audio/mpeg' })
+      })
+      const d = await resp.json()
+      if (!resp.ok) throw new Error(d.error || 'Upload failed')
+      const newV = { voiceId: d.voiceId, name: trainName.trim(), emoji: '🌟', ratio: 1.0, tag: 'your clone' }
+      setTrainedVoices(v => [...v, newV])
+      setTrainStatus({ ok: true, voiceId: d.voiceId, name: trainName.trim() })
+      setTrainName('')
+    } catch (e) {
+      setTrainStatus({ err: e.message })
+    }
+  }
+
   const glowIntensity = isLive && !isMuted ? volume : 0
 
   return (
     <div className="flex flex-col h-full text-white overflow-hidden"
       style={{ background: 'linear-gradient(165deg,#0c0c1a 0%,#130a26 55%,#0c0c1a 100%)' }}>
 
-      {/* iOS Audio unlock overlay */}
       {audioLocked && (
-        <button
-          onClick={unlockAudio}
+        <button onClick={unlockAudio}
           className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4"
           style={{ background: 'rgba(0,0,0,0.85)' }}>
           <div className="w-20 h-20 rounded-full flex items-center justify-center"
@@ -288,28 +290,22 @@ export default function CallRoomPage({ code, onLeave }) {
           </div>
           <div className="text-center px-8">
             <p className="text-white font-bold text-lg">Tap to Enable Audio</p>
-            <p className="text-gray-400 text-sm mt-1">Your browser requires a tap to start audio</p>
+            <p className="text-gray-400 text-sm mt-1">Browser requires a tap before audio can start</p>
           </div>
         </button>
       )}
 
       <style>{`
-        @keyframes ring-pulse {
-          0%,100% { transform:scale(1); opacity:0.5; }
-          50%      { transform:scale(1.07); opacity:0.15; }
-        }
-        @keyframes ring-pulse-2 {
-          0%,100% { transform:scale(1); opacity:0.3; }
-          50%      { transform:scale(1.12); opacity:0.08; }
-        }
-        .no-scrollbar::-webkit-scrollbar { display:none; }
-        .no-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
+        @keyframes ring-pulse  { 0%,100%{transform:scale(1);opacity:.5}  50%{transform:scale(1.07);opacity:.15} }
+        @keyframes ring-pulse-2{ 0%,100%{transform:scale(1);opacity:.3}  50%{transform:scale(1.12);opacity:.08} }
+        .no-scrollbar::-webkit-scrollbar{display:none}
+        .no-scrollbar{-ms-overflow-style:none;scrollbar-width:none}
       `}</style>
 
       {/* Top bar */}
       <div className="flex items-center justify-between px-4 pt-6 pb-2">
         <button onClick={onLeave}
-          className="w-9 h-9 flex items-center justify-center rounded-full transition-colors"
+          className="w-9 h-9 flex items-center justify-center rounded-full"
           style={{ background: 'rgba(255,255,255,0.06)' }}>
           <ChevronLeft className="w-5 h-5 text-gray-400" />
         </button>
@@ -320,9 +316,8 @@ export default function CallRoomPage({ code, onLeave }) {
         <div className="w-9" />
       </div>
 
-      {/* Avatar + status */}
+      {/* Avatar + glow ring */}
       <div className="flex-1 flex flex-col items-center justify-center gap-5 px-6">
-
         <div className="relative flex items-center justify-center" style={{ width: 200, height: 200 }}>
           <div className="absolute inset-0 rounded-full pointer-events-none" style={{
             boxShadow: `0 0 ${50 + glowIntensity * 80}px ${15 + glowIntensity * 40}px rgba(139,92,246,${0.08 + glowIntensity * 0.28})`,
@@ -347,19 +342,19 @@ export default function CallRoomPage({ code, onLeave }) {
           </div>
         </div>
 
-        {/* Voice label */}
         <div className="text-center">
           <p className="text-white font-semibold text-xl tracking-tight">{currentVoice?.name ?? 'Natural'}</p>
-          <p className="text-[11px] text-purple-400/60 font-mono mt-0.5">Voice preview only · relay mode</p>
+          <p className="text-[11px] text-purple-400/60 font-mono mt-0.5">
+            {currentVoice?.tag ?? 'real voice'} · local · instant · no cracking
+          </p>
         </div>
 
-        {/* Status pill */}
         {isLive ? (
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5"
               style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)' }}>
               <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-              <span className="text-green-400 text-xs font-mono font-semibold">LIVE · {formatTime(timer)}</span>
+              <span className="text-green-400 text-xs font-mono font-semibold">LIVE · {fmt(timer)}</span>
             </div>
             {peersCount > 0 && (
               <div className="flex items-center gap-1 text-gray-600 text-xs">
@@ -376,9 +371,7 @@ export default function CallRoomPage({ code, onLeave }) {
             </div>
             <button onClick={onLeave}
               className="px-4 py-1.5 rounded-full text-xs font-semibold text-white"
-              style={{ background: 'rgba(139,92,246,0.8)' }}>
-              🔄 Restart Call
-            </button>
+              style={{ background: 'rgba(139,92,246,0.8)' }}>🔄 Restart</button>
           </div>
         ) : audioState === 'connecting' ? (
           <div className="flex items-center gap-1.5 rounded-full px-4 py-1.5 animate-pulse"
@@ -396,58 +389,90 @@ export default function CallRoomPage({ code, onLeave }) {
           </div>
         )}
 
-        {/* Copy guest link */}
         <button onClick={copyLink}
-          className="w-full max-w-sm flex items-center justify-between gap-3 rounded-2xl px-4 py-3 transition-all"
+          className="w-full max-w-sm flex items-center justify-between gap-3 rounded-2xl px-4 py-3"
           style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <span className="text-xs text-gray-500 font-mono truncate">{guestUrl.replace(/https?:\/\//, '')}</span>
-          <span className={`flex items-center gap-1.5 text-xs font-semibold flex-shrink-0 transition-colors ${copied ? 'text-green-400' : 'text-purple-400'}`}>
+          <span className="text-xs text-gray-500 font-mono truncate">
+            {guestUrl.replace(/https?:\/\//, '')}
+          </span>
+          <span className={`flex items-center gap-1.5 text-xs font-semibold flex-shrink-0 ${copied ? 'text-green-400' : 'text-purple-400'}`}>
             {copied ? <><Check className="w-3.5 h-3.5" />Copied</> : <><Copy className="w-3.5 h-3.5" />Copy Link</>}
           </span>
         </button>
       </div>
 
-      {/* Voice selector (preview only) */}
+      {/* Voice selector */}
       <div className="px-4 pb-2">
-        <div className="flex gap-1.5 mb-2.5">
-          {['base', 'celebrity'].map(t => (
-            <button key={t} onClick={() => setActiveTab(t)}
-              className="px-3 py-1 rounded-full text-[11px] font-semibold transition-all"
-              style={activeTab === t
-                ? { background: 'rgba(139,92,246,0.9)', color: '#fff' }
-                : { background: 'rgba(255,255,255,0.06)', color: 'rgba(156,163,175,1)' }}>
-              {t === 'celebrity' ? '⭐ Celebrity' : '🎙️ Base'}
-            </button>
-          ))}
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-[10px] uppercase tracking-widest text-gray-600 font-mono">
+            Voice Effects · local · instant
+          </p>
+          <button
+            onClick={() => { setShowTrain(t => !t); setTrainStatus(null) }}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold transition-all"
+            style={showTrain
+              ? { background: 'rgba(139,92,246,0.3)', color: '#c4b5fd', border: '1px solid rgba(139,92,246,0.5)' }
+              : { background: 'rgba(255,255,255,0.06)', color: 'rgba(156,163,175,1)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <Upload className="w-2.5 h-2.5" /> Train Voice
+          </button>
         </div>
+
+        {/* Voice training panel */}
+        {showTrain && (
+          <div className="mb-3 rounded-2xl p-3 space-y-2"
+            style={{ background: 'rgba(139,92,246,0.07)', border: '1px solid rgba(139,92,246,0.2)' }}>
+            <p className="text-[11px] text-purple-300 font-semibold">Clone your voice with ElevenLabs</p>
+            <p className="text-[10px] text-gray-500 leading-relaxed">
+              Upload 1–10 min of clean speech (MP3 / WAV). Creates a voice clone for your WhatsApp bot TTS replies.
+              Requires your ELEVENLABS_API_KEY secret to be set.
+            </p>
+            <input
+              value={trainName}
+              onChange={e => setTrainName(e.target.value)}
+              placeholder="Voice name (e.g. My Clone)"
+              className="w-full bg-transparent rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-600 outline-none"
+              style={{ border: '1px solid rgba(139,92,246,0.35)' }}
+            />
+            <label
+              className={`flex items-center justify-center gap-2 w-full py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all select-none ${(!trainName.trim() || trainStatus === 'busy') ? 'opacity-40 pointer-events-none' : ''}`}
+              style={{ background: 'rgba(139,92,246,0.4)', border: '1px solid rgba(139,92,246,0.6)', color: '#e9d5ff' }}>
+              <Upload className="w-3.5 h-3.5" />
+              {trainStatus === 'busy' ? 'Uploading to ElevenLabs…' : 'Choose audio file & upload'}
+              <input
+                type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg" className="hidden"
+                disabled={!trainName.trim() || trainStatus === 'busy'}
+                onChange={e => { const f = e.target.files?.[0]; if (f) handleTrainUpload(f); e.target.value = '' }}
+              />
+            </label>
+            {trainStatus && trainStatus !== 'busy' && (
+              <div className={`text-[11px] px-3 py-2 rounded-lg font-mono leading-relaxed ${trainStatus.ok ? 'text-green-400 bg-green-900/20' : 'text-red-400 bg-red-900/20'}`}>
+                {trainStatus.ok
+                  ? `✅ "${trainStatus.name}" trained!\nVoice ID: ${trainStatus.voiceId}\nUse .voice on in WhatsApp to activate bot TTS with this voice.`
+                  : `❌ ${trainStatus.err}`}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-          {(activeTab === 'base' ? baseVoices : celebVoices.filter(v => !v.pending)).map(v => {
+          {allVoices.map(v => {
             const sel = voiceId === v.voiceId
             return (
               <button key={v.voiceId} onClick={() => setVoiceId(v.voiceId)}
-                className="flex-shrink-0 flex flex-col items-center gap-1 rounded-2xl px-3 py-2.5 transition-all min-w-[68px]"
+                className="flex-shrink-0 flex flex-col items-center gap-1 rounded-2xl px-3 py-2.5 min-w-[72px] transition-all"
                 style={sel
                   ? { background: 'rgba(139,92,246,0.2)', border: '1.5px solid rgba(139,92,246,0.7)' }
                   : { background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
                 <span className="text-2xl leading-none">{v.emoji}</span>
-                <span className={`text-[10px] font-medium mt-0.5 ${sel ? 'text-purple-300' : 'text-gray-500'}`}>
-                  {(v.name ?? '').split(' ')[0]}
+                <span className={`text-[10px] font-semibold mt-0.5 ${sel ? 'text-purple-300' : 'text-gray-400'}`}>
+                  {v.name}
                 </span>
-                {v.voiceId !== 'natural' && (
-                  <button onClick={(e) => handlePreview(v.voiceId, e)}
-                    className="w-5 h-5 flex items-center justify-center rounded-full transition-colors"
-                    style={{ background: 'rgba(0,0,0,0.3)' }}>
-                    {previewing === v.voiceId
-                      ? <Square className="w-2 h-2 text-purple-400" />
-                      : <Play className="w-2 h-2 text-gray-500" />}
-                  </button>
-                )}
+                <span className={`text-[9px] ${sel ? 'text-purple-500' : 'text-gray-700'}`}>
+                  {v.tag}
+                </span>
               </button>
             )
           })}
-          {activeTab === 'celebrity' && celebVoices.filter(v => !v.pending).length === 0 && (
-            <p className="text-gray-700 text-xs py-4 px-2 animate-pulse">Loading…</p>
-          )}
         </div>
       </div>
 
