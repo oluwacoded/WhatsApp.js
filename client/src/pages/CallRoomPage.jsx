@@ -3,49 +3,107 @@ import { io } from 'socket.io-client'
 import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Volume2, Upload } from 'lucide-react'
 
 // All voice effects run LOCALLY via AudioWorklet — instant, zero cracking, no API calls needed
+// Ratios are semitone-based: 2^(semitones/12). OLA preserves speech timing — no chipmunk effect.
 const VOICE_MODES = [
-  { voiceId: 'natural',  name: 'Natural',  emoji: '🎙️', ratio: 1.00, tag: 'real voice' },
-  { voiceId: 'female',   name: 'Female',   emoji: '👩', ratio: 1.35, tag: '+35% pitch' },
-  { voiceId: 'deep',     name: 'Deep',     emoji: '🎭', ratio: 0.72, tag: '-28% pitch' },
-  { voiceId: 'older',    name: 'Older',    emoji: '👴', ratio: 0.82, tag: '-18% pitch' },
-  { voiceId: 'chipmunk', name: 'Chipmunk', emoji: '🐿️', ratio: 1.72, tag: '+72% pitch' },
-  { voiceId: 'demon',    name: 'Demon',    emoji: '😈', ratio: 0.45, tag: '-55% pitch' },
+  { voiceId: 'natural',  name: 'Natural',  emoji: '🎙️', ratio: 1.000, tag: 'real voice' },
+  { voiceId: 'female',   name: 'Female',   emoji: '👩', ratio: 1.189, tag: '+3 semitones' },
+  { voiceId: 'deep',     name: 'Deep',     emoji: '🎭', ratio: 0.794, tag: '-4 semitones' },
+  { voiceId: 'older',    name: 'Older',    emoji: '👴', ratio: 0.891, tag: '-2 semitones' },
+  { voiceId: 'chipmunk', name: 'Chipmunk', emoji: '🐿️', ratio: 1.587, tag: '+8 semitones' },
+  { voiceId: 'demon',    name: 'Demon',    emoji: '😈', ratio: 0.500, tag: '-1 octave' },
 ]
 
-// AudioWorklet processor — runs in dedicated audio thread (no main thread jank = no cracking)
-// Circular ring buffer + linear interpolation pitch shift + batched output posting
+// AudioWorklet — OLA (Overlap-Add) pitch shifter running in dedicated audio thread.
+// OLA decouples pitch from speed: female sounds naturally feminine, NOT chipmunk-like.
+// Previous naive resampler changed speed+pitch together → that's fixed here.
 const WORKLET = `
 class PitchProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this._bsz = 16384;
-    this._buf = new Float32Array(this._bsz);
-    this._w = 0; this._r = 0.0; this._ratio = 1.0;
+    this._ratio = 1.0;
+    this._GS = 1024;   // grain size (samples) — larger = smoother, more latency
+    this._HS = 256;    // synthesis hop — controls time resolution
+    // Hanning window for smooth grain edges (prevents clicks at grain boundaries)
+    this._win = new Float32Array(this._GS);
+    for (let i = 0; i < this._GS; i++)
+      this._win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / this._GS);
+    // Ring buffers — must be power-of-2 for fast masking
+    this._inBuf  = new Float32Array(32768);
+    this._outBuf = new Float32Array(32768);
+    this._IM = 32767; this._OM = 32767;
+    this._inW  = 0;     // input write pointer (integer)
+    this._inR  = 0.0;   // input read pointer (fractional) — grain start position
+    this._outW = 0;     // output overlap-add write pointer
+    this._outR = 0;     // output consumer read pointer
+    this._ctr  = 0;     // samples accumulated since last grain synthesis
+    // Batch buffer — collect samples then send to main thread for socket emit
     this._bb = new Float32Array(4096);
     this._bp = 0;
-    this.port.onmessage = e => { if (e.data.ratio !== undefined) this._ratio = e.data.ratio; };
+    this.port.onmessage = e => {
+      if (e.data.ratio !== undefined) this._ratio = Math.max(0.25, Math.min(4.0, e.data.ratio));
+    };
   }
   process(inputs, outputs) {
     const inp = inputs[0]?.[0], out = outputs[0]?.[0];
     if (!inp || !out) return true;
-    const mask = this._bsz - 1;
-    for (let i = 0; i < inp.length; i++) { this._buf[this._w & mask] = inp[i]; this._w++; }
-    const avail = this._w - this._r;
-    if (avail < out.length) { out.fill(0); return true; }
-    if (avail > this._bsz * 0.65) this._r = this._w - inp.length * 4;
-    for (let i = 0; i < out.length; i++) {
-      const ri = Math.floor(this._r), frac = this._r - ri;
-      out[i] = this._buf[ri & mask] * (1 - frac) + this._buf[(ri + 1) & mask] * frac;
-      this._r += this._ratio;
+    const N = inp.length;
+    const GS = this._GS, HS = this._HS;
+    const IM = this._IM, OM = this._OM;
+
+    // 1. Write mic input into ring buffer
+    for (let i = 0; i < N; i++) {
+      this._inBuf[this._inW & IM] = inp[i];
+      this._inW++;
+      this._ctr++;
     }
-    const space = this._bb.length - this._bp;
-    if (out.length <= space) {
-      this._bb.set(out, this._bp); this._bp += out.length;
+
+    // 2. Every HS samples, synthesize one grain via OLA
+    //    Analysis hop = HS * ratio (reads more/less input per grain = pitch change)
+    //    Synthesis hop = HS (output always advances same amount = speed preserved)
+    while (this._ctr >= HS) {
+      this._ctr -= HS;
+      const avail = this._inW - Math.floor(this._inR);
+      if (avail < GS) {
+        // Not enough input buffered yet — advance anyway to avoid output stall
+        this._outW += HS;
+        this._inR  += HS * this._ratio;
+        continue;
+      }
+      // Clamp: don't let read pointer lag more than half the buffer behind write
+      if (this._inW - this._inR > 14000) this._inR = this._inW - 14000;
+
+      // Overlap-add windowed grain from fractional analysis position
+      for (let j = 0; j < GS; j++) {
+        const pos = this._inR + j;
+        const pi  = Math.floor(pos);
+        const pf  = pos - pi;
+        const s   = this._inBuf[pi & IM] * (1 - pf) + this._inBuf[(pi + 1) & IM] * pf;
+        this._outBuf[(this._outW + j) & OM] += s * this._win[j];
+      }
+      this._outW += HS;
+      this._inR  += HS * this._ratio;
+    }
+
+    // 3. Read processed samples out to speaker / network
+    for (let i = 0; i < N; i++) {
+      if (this._outW > this._outR) {
+        out[i] = this._outBuf[this._outR & OM];
+        this._outBuf[this._outR & OM] = 0; // clear after read
+        this._outR++;
+      } else {
+        out[i] = 0;
+      }
+    }
+
+    // 4. Batch samples and post to main thread for socket.io emit
+    const sp = this._bb.length - this._bp;
+    if (N <= sp) {
+      this._bb.set(out, this._bp); this._bp += N;
     } else {
       const send = this._bb.slice(0, this._bp);
       this._bp = 0;
       this.port.postMessage({ c: send.buffer }, [send.buffer]);
-      this._bb.set(out, 0); this._bp = out.length;
+      this._bb.set(out, 0); this._bp = N;
     }
     return true;
   }
