@@ -128,6 +128,9 @@ let reminders      = readJSON("reminders.json", []);
 let scheduledMsgs  = readJSON("scheduled.json", []);
 let vipContacts    = new Set(readJSON("vip.json", []));
 let silenceConfig  = readJSON("silence.json", { enabled: false, startH: 23, endH: 7 });
+// Per-contact personas: map of JID → { name, relationship, context, sweetNames[], tone }
+// The AI injects these as a top-priority block in its system prompt for that contact only.
+let contactPersonas = readJSON("personas.json", {});
 
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
@@ -554,7 +557,23 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
       factsBlock = `\n\n[LONG-TERM MEMORY — THINGS YOU KNOW ABOUT THIS PERSON]:\n${facts.slice(-15).map(f => `- ${f}`).join("\n")}`;
     }
 
-    const systemMsg = settings.systemPrompt + styleBlock + factsBlock + moodPrompt();
+    // Per-contact persona — highest priority context block
+    // Overrides generic tone; tells AI exactly who this person is and how to talk to them
+    let personaBlock = "";
+    const persona = contactPersonas[jid];
+    if (persona) {
+      const sweetNamesStr = (persona.sweetNames || []).join(", ");
+      personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY — READ BEFORE ANYTHING ELSE]:
+You are texting ${persona.name}. Here is everything you need to know:
+- Relationship: ${persona.relationship}
+- Tone / vibe: ${persona.tone || "warm, loving, genuine Nigerian"}
+${sweetNamesStr ? `- Pet names to use naturally: ${sweetNamesStr}` : ""}
+- Context & what matters right now: ${persona.context}
+- NEVER mention any other person in your life. NEVER say you are an AI. Keep it 100% personal and real.
+- Stay fully in character as the owner texting this specific person.`;
+    }
+
+    const systemMsg = settings.systemPrompt + personaBlock + styleBlock + factsBlock + moodPrompt();
 
     const messages = [
       { role: "system", content: systemMsg },
@@ -2324,6 +2343,54 @@ async function connectToWhatsApp() {
         }
 
         // ── VIP CONTACTS ──────────────────────────────────────────────
+        // ── PER-CONTACT PERSONA ───────────────────────────────────────
+        if (cmd === "persona") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "list") {
+            const entries = Object.entries(contactPersonas);
+            if (!entries.length) { await send("no personas set yet.\n.persona set <number> <name> | <context>"); continue; }
+            const lines = entries.map(([j, p]) => `👤 *${p.name}* (+${j.split("@")[0]})\n_${p.relationship}_\n${p.context.slice(0,80)}…`).join("\n\n");
+            await send(`🎭 *Personas (${entries.length})*\n\n${lines}\n\n.persona clear <number> — remove one`);
+          } else if (sub === "view") {
+            let num = args[1]?.replace(/[^0-9]/g,"");
+            if (!num) { await send("usage: .persona view <number>"); continue; }
+            const jid = num + "@s.whatsapp.net";
+            const p = contactPersonas[jid];
+            if (!p) { await send(`no persona for +${num}`); continue; }
+            await send(`👤 *${p.name}* persona\n\n*relationship:* ${p.relationship}\n*tone:* ${p.tone}\n*sweet names:* ${(p.sweetNames||[]).join(", ")}\n\n*context:*\n${p.context}`);
+          } else if (sub === "clear") {
+            let num = args[1]?.replace(/[^0-9]/g,"");
+            if (!num) { await send("usage: .persona clear <number>"); continue; }
+            const jid = num + "@s.whatsapp.net";
+            const had = !!contactPersonas[jid];
+            delete contactPersonas[jid]; writeJSON("personas.json", contactPersonas);
+            await send(had ? `✅ persona removed for +${num}` : `no persona found for +${num}`);
+          } else if (sub === "set") {
+            // .persona set <number> <name> | <context>
+            const rest = args.slice(1).join(" ");
+            const numMatch = rest.match(/^(\d[\d\s]+)/);
+            if (!numMatch) { await send("usage: .persona set <number> <name> | <relationship> | <context>"); continue; }
+            const num = numMatch[1].replace(/\s/g,"");
+            const jid = num + "@s.whatsapp.net";
+            const after = rest.slice(numMatch[1].length).trim();
+            const parts = after.split("|").map(s => s.trim());
+            if (parts.length < 2) { await send("format: .persona set <number> <name> | <relationship> | <context>\nexample: .persona set 2348012345678 Amaka | girlfriend | she's funny, we've known each other 2 years, she loves attention"); continue; }
+            const [nameStr, relStr, ...ctxParts] = parts;
+            contactPersonas[jid] = {
+              name: nameStr, relationship: relStr || "contact",
+              context: ctxParts.join(" | ") || "talk naturally",
+              sweetNames: [], tone: "warm, loving, genuine Nigerian"
+            };
+            writeJSON("personas.json", contactPersonas);
+            await send(`✅ *Persona set for +${num}*\n\nname: ${nameStr}\nrelationship: ${relStr}\n\nthe bot will now talk to them with this full context. use .persona view ${num} to see it.`);
+          } else {
+            const count = Object.keys(contactPersonas).length;
+            await send(`🎭 *Persona System*\nactive: ${count}\n\n.persona list — see all\n.persona view <number> — see full persona\n.persona set <number> <name> | <relationship> | <context> — add/update\n.persona clear <number> — remove\n\nPersonas tell the bot *exactly* who someone is, your relationship, how to talk to them, and what sweet names to use. The bot will never mix up contexts between contacts.`);
+          }
+          continue;
+        }
+
         if (cmd === "vip") {
           if (!senderIsOwner) { await send("owner only."); continue; }
           const sub = args[0]?.toLowerCase();
