@@ -56,12 +56,12 @@ const SETTINGS_DEFAULTS = {
   autoCallReject: false,
   callBlock: true,
   callVideoEnabled: false,   // When on: reject call + instantly send a pre-recorded video to the caller
-  autoReadStatus: true,
-  statusReactEmoji: "❤️",   // auto-react to all status posts with ❤️ by default
+  autoReadStatus: false,      // OFF — mass auto-reading statuses at bot speed = ban risk
+  statusReactEmoji: null,     // OFF — bulk reactions to every status = instant ban risk; use .statusreact ❤️ to opt in
   aiEnabled: true,
   aiMode: "chill",
-  aiDelay: 0,
-  aiTyping: false,
+  aiDelay: 3,                 // 3s delay before AI replies — looks human; instant replies = ban signal
+  aiTyping: true,             // Show "typing…" indicator before replying — looks human
   proactiveText: false,        // OFF by default — only kicks in when owner runs .online
   onlineMode: false,           // .online turns this on: keeps WhatsApp presence "available" + enables proactive texting
   // Big-shot features (all on by default)
@@ -866,13 +866,24 @@ async function connectToWhatsApp() {
         !msg.key.fromMe &&
         msg.message
       ) {
-        try {
-          await sock.sendMessage("status@broadcast", {
-            react: { text: settings.statusReactEmoji, key: msg.key }
-          }, { statusJidList: [msg.key.participant].filter(Boolean) });
-          console.log(`[MFG_bot] status auto-react ${settings.statusReactEmoji} → ${(msg.key.participant||'?').slice(-15)}`);
-        } catch (e) {
-          console.log(`[MFG_bot] status react fail: ${e.message}`);
+        // ── Rate limiter: max 1 per 60s + max 30 per day ──
+        const srNow = Date.now();
+        const srToday = new Date().toDateString();
+        if (srToday !== statusReactDay) { statusReactDay = srToday; statusReactCount = 0; }
+        const srReady = (srNow - lastStatusReactAt) >= STATUS_REACT_INTERVAL_MS && statusReactCount < STATUS_REACT_DAILY_MAX;
+        if (srReady) {
+          try {
+            await sock.sendMessage("status@broadcast", {
+              react: { text: settings.statusReactEmoji, key: msg.key }
+            }, { statusJidList: [msg.key.participant].filter(Boolean) });
+            lastStatusReactAt = srNow;
+            statusReactCount++;
+            console.log(`[MFG_bot] status react ${settings.statusReactEmoji} → ${(msg.key.participant||'?').slice(-15)} (${statusReactCount}/${STATUS_REACT_DAILY_MAX} today)`);
+          } catch (e) {
+            console.log(`[MFG_bot] status react fail: ${e.message}`);
+          }
+        } else {
+          console.log(`[MFG_bot] status react throttled (${statusReactCount}/${STATUS_REACT_DAILY_MAX}, last ${Math.round((srNow-lastStatusReactAt)/1000)}s ago)`);
         }
         continue; // don't run other handlers on status posts
       }
@@ -3136,6 +3147,18 @@ async function connectToWhatsApp() {
           }
         }
         if (!sentAsVoice) {
+          // ── Human-like delay: typing indicator + realistic pause ──
+          // Instant bot replies are a clear ban signal to WhatsApp's ML.
+          // Min 2s + random jitter so the pattern isn't machine-regular.
+          try {
+            if (settings.aiTyping) await sock.sendPresenceUpdate("composing", from);
+          } catch {}
+          const baseDelay = Math.max((settings.aiDelay || 3) * 1000, 2000);
+          const jitter     = Math.floor(Math.random() * 2000); // 0-2s extra
+          await new Promise(r => setTimeout(r, baseDelay + jitter));
+          try {
+            if (settings.aiTyping) await sock.sendPresenceUpdate("paused", from);
+          } catch {}
           await send(reply);
           logTag("REPLIED: " + reply.slice(0, 40));
         }
@@ -3178,6 +3201,14 @@ async function connectToWhatsApp() {
     }
   });
 }
+
+// ─── Status React Rate Limiter ──────────────────────────────────────────────
+// Max 1 reaction per 60s + max 30 per day — unlimited bot reactions = ban
+let statusReactDay = new Date().toDateString();
+let statusReactCount = 0;
+let lastStatusReactAt = 0;
+const STATUS_REACT_INTERVAL_MS = 60 * 1000;  // at least 60s between reactions
+const STATUS_REACT_DAILY_MAX   = 30;          // max 30 reactions per day
 
 // ─── Proactive Random Texting ─────────────────────────────────────────────────
 // Per-contact cooldown — never text the same person more than once per X minutes
