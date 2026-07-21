@@ -2,15 +2,18 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
 import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Volume2, Upload } from 'lucide-react'
 
-// Tone.js PitchShift — same engine as VoiceChangerPage's "Girl" voice.
-// pitch in semitones (not ratio). Proper phase vocoder — preserves natural speech speed.
+// Tone.js PitchShift — proper phase vocoder. pitch in semitones.
+// Female = +8 semitones (same as VoiceChangerPage "Girl" — sounds like a real woman, NOT chipmunk).
+// Elon Musk / Collin Raye = pitch-shifted approximations of their voice register.
 const VOICE_MODES = [
-  { voiceId: 'natural',  name: 'Natural',  emoji: '🎙️', semitones:  0,  tag: 'real voice' },
-  { voiceId: 'female',   name: 'Female',   emoji: '👩', semitones:  8,  tag: 'sounds like a real woman' },
-  { voiceId: 'deep',     name: 'Deep',     emoji: '🎭', semitones: -5,  tag: 'low & serious' },
-  { voiceId: 'older',    name: 'Older',    emoji: '👴', semitones: -8,  tag: 'older, gruff' },
-  { voiceId: 'chipmunk', name: 'Chipmunk', emoji: '🐿️', semitones:  12, tag: 'very high' },
-  { voiceId: 'demon',    name: 'Demon',    emoji: '😈', semitones: -12, tag: 'one octave down' },
+  { voiceId: 'natural',  name: 'Natural',      emoji: '🎙️', semitones:  0,  tag: 'your real voice' },
+  { voiceId: 'female',   name: 'Female',        emoji: '👩', semitones:  8,  tag: 'real woman sound' },
+  { voiceId: 'deep',     name: 'Deep',          emoji: '🎭', semitones: -5,  tag: 'low & serious' },
+  { voiceId: 'older',    name: 'Older',         emoji: '👴', semitones: -8,  tag: 'older, gruff' },
+  { voiceId: 'chipmunk', name: 'Chipmunk',      emoji: '🐿️', semitones:  12, tag: 'intentionally silly' },
+  { voiceId: 'demon',    name: 'Demon',         emoji: '😈', semitones: -12, tag: 'one octave down' },
+  { voiceId: 'elon',     name: 'Elon Musk',     emoji: '🚀', semitones: -2,  tag: 'low, deliberate' },
+  { voiceId: 'collin',   name: 'Collin Raye',   emoji: '🎸', semitones:  3,  tag: 'country tenor' },
 ]
 
 
@@ -27,6 +30,7 @@ export default function CallRoomPage({ code, onLeave }) {
   const [trainName, setTrainName]   = useState('')
   const [trainStatus, setTrainStatus] = useState(null)
   const [trainedVoices, setTrainedVoices] = useState([])
+  const [pitchOffset, setPitchOffset] = useState(0)
 
   const socketRef   = useRef(null)
   const streamRef   = useRef(null)
@@ -54,10 +58,11 @@ export default function CallRoomPage({ code, onLeave }) {
   }, [isLive])
 
   // Update pitch live — Tone.js PitchShift.pitch is hot-swappable, no restart needed
+  // Total pitch = preset semitones + user's fine-tune offset
   useEffect(() => {
     const mode = allVoices.find(v => v.voiceId === voiceId) ?? VOICE_MODES[0]
-    if (pitchRef.current) pitchRef.current.pitch = mode.semitones ?? 0
-  }, [voiceId, trainedVoices])
+    if (pitchRef.current) pitchRef.current.pitch = (mode.semitones ?? 0) + pitchOffset
+  }, [voiceId, pitchOffset, trainedVoices])
 
   const f32ToB64 = arr => {
     const b = new Uint8Array(arr.buffer); let s = ''
@@ -404,7 +409,7 @@ export default function CallRoomPage({ code, onLeave }) {
           {allVoices.map(v => {
             const sel = voiceId === v.voiceId
             return (
-              <button key={v.voiceId} onClick={() => setVoiceId(v.voiceId)}
+              <button key={v.voiceId} onClick={() => { setVoiceId(v.voiceId); setPitchOffset(0) }}
                 className="flex-shrink-0 flex flex-col items-center gap-1 rounded-2xl px-3 py-2.5 min-w-[72px] transition-all"
                 style={sel
                   ? { background: 'rgba(139,92,246,0.2)', border: '1.5px solid rgba(139,92,246,0.7)' }
@@ -419,6 +424,41 @@ export default function CallRoomPage({ code, onLeave }) {
               </button>
             )
           })}
+        </div>
+
+        {/* Pitch fine-tune slider */}
+        <div className="mt-3 rounded-2xl px-3 py-2.5"
+          style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] uppercase tracking-widest text-gray-600 font-mono">Pitch Fine-Tune</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-mono font-bold"
+                style={{ color: pitchOffset === 0 ? 'rgba(156,163,175,1)' : pitchOffset > 0 ? '#a78bfa' : '#60a5fa' }}>
+                {pitchOffset > 0 ? `+${pitchOffset}` : pitchOffset} st
+              </span>
+              {pitchOffset !== 0 && (
+                <button onClick={() => setPitchOffset(0)}
+                  className="text-[9px] px-2 py-0.5 rounded-full font-semibold"
+                  style={{ background: 'rgba(255,255,255,0.08)', color: 'rgba(156,163,175,1)' }}>
+                  reset
+                </button>
+              )}
+            </div>
+          </div>
+          <input
+            type="range" min="-12" max="12" step="1"
+            value={pitchOffset}
+            onChange={e => setPitchOffset(Number(e.target.value))}
+            className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+            style={{
+              background: `linear-gradient(to right, #7c3aed ${((pitchOffset + 12) / 24) * 100}%, rgba(255,255,255,0.1) ${((pitchOffset + 12) / 24) * 100}%)`
+            }}
+          />
+          <div className="flex justify-between mt-1">
+            <span className="text-[9px] text-gray-700 font-mono">-12 (lower)</span>
+            <span className="text-[9px] text-gray-700 font-mono">0</span>
+            <span className="text-[9px] text-gray-700 font-mono">+12 (higher)</span>
+          </div>
         </div>
       </div>
 
