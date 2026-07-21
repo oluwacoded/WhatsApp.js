@@ -35,6 +35,14 @@ const { Server: SocketIOServer } = require("socket.io");
 const app = express();
 app.use(cors());
 app.use(express.json());
+// No-cache for index.html so browsers always load the latest JS bundle
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.html')) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache'); res.setHeader('Expires', '0');
+  }
+  next();
+});
 app.use(express.static(path.join(__dirname, "client/dist")));
 
 // ─── Persistence ────────────────────────────────────────────────────────────
