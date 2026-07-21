@@ -2,114 +2,17 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { io } from 'socket.io-client'
 import { Mic, MicOff, PhoneOff, Copy, Check, ChevronLeft, Users, Volume2, Upload } from 'lucide-react'
 
-// All voice effects run LOCALLY via AudioWorklet — instant, zero cracking, no API calls needed
-// Ratios are semitone-based: 2^(semitones/12). OLA preserves speech timing — no chipmunk effect.
+// Tone.js PitchShift — same engine as VoiceChangerPage's "Girl" voice.
+// pitch in semitones (not ratio). Proper phase vocoder — preserves natural speech speed.
 const VOICE_MODES = [
-  { voiceId: 'natural',  name: 'Natural',  emoji: '🎙️', ratio: 1.000, tag: 'real voice' },
-  { voiceId: 'female',   name: 'Female',   emoji: '👩', ratio: 1.189, tag: '+3 semitones' },
-  { voiceId: 'deep',     name: 'Deep',     emoji: '🎭', ratio: 0.794, tag: '-4 semitones' },
-  { voiceId: 'older',    name: 'Older',    emoji: '👴', ratio: 0.891, tag: '-2 semitones' },
-  { voiceId: 'chipmunk', name: 'Chipmunk', emoji: '🐿️', ratio: 1.587, tag: '+8 semitones' },
-  { voiceId: 'demon',    name: 'Demon',    emoji: '😈', ratio: 0.500, tag: '-1 octave' },
+  { voiceId: 'natural',  name: 'Natural',  emoji: '🎙️', semitones:  0,  tag: 'real voice' },
+  { voiceId: 'female',   name: 'Female',   emoji: '👩', semitones:  8,  tag: 'sounds like a real woman' },
+  { voiceId: 'deep',     name: 'Deep',     emoji: '🎭', semitones: -5,  tag: 'low & serious' },
+  { voiceId: 'older',    name: 'Older',    emoji: '👴', semitones: -8,  tag: 'older, gruff' },
+  { voiceId: 'chipmunk', name: 'Chipmunk', emoji: '🐿️', semitones:  12, tag: 'very high' },
+  { voiceId: 'demon',    name: 'Demon',    emoji: '😈', semitones: -12, tag: 'one octave down' },
 ]
 
-// AudioWorklet — OLA (Overlap-Add) pitch shifter running in dedicated audio thread.
-// OLA decouples pitch from speed: female sounds naturally feminine, NOT chipmunk-like.
-// Previous naive resampler changed speed+pitch together → that's fixed here.
-const WORKLET = `
-class PitchProcessor extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this._ratio = 1.0;
-    this._GS = 1024;   // grain size (samples) — larger = smoother, more latency
-    this._HS = 256;    // synthesis hop — controls time resolution
-    // Hanning window for smooth grain edges (prevents clicks at grain boundaries)
-    this._win = new Float32Array(this._GS);
-    for (let i = 0; i < this._GS; i++)
-      this._win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / this._GS);
-    // Ring buffers — must be power-of-2 for fast masking
-    this._inBuf  = new Float32Array(32768);
-    this._outBuf = new Float32Array(32768);
-    this._IM = 32767; this._OM = 32767;
-    this._inW  = 0;     // input write pointer (integer)
-    this._inR  = 0.0;   // input read pointer (fractional) — grain start position
-    this._outW = 0;     // output overlap-add write pointer
-    this._outR = 0;     // output consumer read pointer
-    this._ctr  = 0;     // samples accumulated since last grain synthesis
-    // Batch buffer — collect samples then send to main thread for socket emit
-    this._bb = new Float32Array(4096);
-    this._bp = 0;
-    this.port.onmessage = e => {
-      if (e.data.ratio !== undefined) this._ratio = Math.max(0.25, Math.min(4.0, e.data.ratio));
-    };
-  }
-  process(inputs, outputs) {
-    const inp = inputs[0]?.[0], out = outputs[0]?.[0];
-    if (!inp || !out) return true;
-    const N = inp.length;
-    const GS = this._GS, HS = this._HS;
-    const IM = this._IM, OM = this._OM;
-
-    // 1. Write mic input into ring buffer
-    for (let i = 0; i < N; i++) {
-      this._inBuf[this._inW & IM] = inp[i];
-      this._inW++;
-      this._ctr++;
-    }
-
-    // 2. Every HS samples, synthesize one grain via OLA
-    //    Analysis hop = HS * ratio (reads more/less input per grain = pitch change)
-    //    Synthesis hop = HS (output always advances same amount = speed preserved)
-    while (this._ctr >= HS) {
-      this._ctr -= HS;
-      const avail = this._inW - Math.floor(this._inR);
-      if (avail < GS) {
-        // Not enough input buffered yet — advance anyway to avoid output stall
-        this._outW += HS;
-        this._inR  += HS * this._ratio;
-        continue;
-      }
-      // Clamp: don't let read pointer lag more than half the buffer behind write
-      if (this._inW - this._inR > 14000) this._inR = this._inW - 14000;
-
-      // Overlap-add windowed grain from fractional analysis position
-      for (let j = 0; j < GS; j++) {
-        const pos = this._inR + j;
-        const pi  = Math.floor(pos);
-        const pf  = pos - pi;
-        const s   = this._inBuf[pi & IM] * (1 - pf) + this._inBuf[(pi + 1) & IM] * pf;
-        this._outBuf[(this._outW + j) & OM] += s * this._win[j];
-      }
-      this._outW += HS;
-      this._inR  += HS * this._ratio;
-    }
-
-    // 3. Read processed samples out to speaker / network
-    for (let i = 0; i < N; i++) {
-      if (this._outW > this._outR) {
-        out[i] = this._outBuf[this._outR & OM];
-        this._outBuf[this._outR & OM] = 0; // clear after read
-        this._outR++;
-      } else {
-        out[i] = 0;
-      }
-    }
-
-    // 4. Batch samples and post to main thread for socket.io emit
-    const sp = this._bb.length - this._bp;
-    if (N <= sp) {
-      this._bb.set(out, this._bp); this._bp += N;
-    } else {
-      const send = this._bb.slice(0, this._bp);
-      this._bp = 0;
-      this.port.postMessage({ c: send.buffer }, [send.buffer]);
-      this._bb.set(out, 0); this._bp = N;
-    }
-    return true;
-  }
-}
-registerProcessor('mfg-pitch', PitchProcessor);
-`
 
 export default function CallRoomPage({ code, onLeave }) {
   const [audioState, setAudioState] = useState('new')
@@ -150,10 +53,10 @@ export default function CallRoomPage({ code, onLeave }) {
     return () => clearInterval(timerRef.current)
   }, [isLive])
 
-  // Update pitch ratio live — no audio restart needed
+  // Update pitch live — Tone.js PitchShift.pitch is hot-swappable, no restart needed
   useEffect(() => {
     const mode = allVoices.find(v => v.voiceId === voiceId) ?? VOICE_MODES[0]
-    pitchRef.current?.port.postMessage({ ratio: mode.ratio ?? 1.0 })
+    if (pitchRef.current) pitchRef.current.pitch = mode.semitones ?? 0
   }, [voiceId, trainedVoices])
 
   const f32ToB64 = arr => {
@@ -202,15 +105,17 @@ export default function CallRoomPage({ code, onLeave }) {
       if (!active) { stream.getTracks().forEach(t => t.stop()); return }
       streamRef.current = stream
 
-      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      // Use Tone.js — same engine as VoiceChangerPage's "Girl" voice (proven to sound natural)
+      const Tone = await import('tone')
+      await Tone.start()
+      const ctx = Tone.getContext().rawContext
       audioCtxRef.current = ctx
-      try { await ctx.resume() } catch {}
-      setAudioLocked(ctx.state === 'suspended')
 
       const unlock = async () => {
         if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
         setAudioLocked(ctx.state === 'suspended')
       }
+      setAudioLocked(ctx.state === 'suspended')
       document.addEventListener('touchstart', unlock, { once: true })
       document.addEventListener('click', unlock, { once: true })
 
@@ -226,53 +131,36 @@ export default function CallRoomPage({ code, onLeave }) {
       }
       tick()
 
-      // Silent gain prevents mic feedback through speakers
-      const silent = ctx.createGain(); silent.gain.value = 0
+      // Gain node for mute control
+      const gainNode = ctx.createGain(); gainNode.gain.value = 1
+      micSrc.connect(gainNode)
 
-      // Load AudioWorklet via Blob URL — processes in dedicated audio thread
-      let pitchNode = null
-      try {
-        const blob = new Blob([WORKLET], { type: 'application/javascript' })
-        const blobUrl = URL.createObjectURL(blob)
-        await ctx.audioWorklet.addModule(blobUrl)
-        URL.revokeObjectURL(blobUrl)
-        pitchNode = new AudioWorkletNode(ctx, 'mfg-pitch', {
-          numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1]
-        })
-        pitchRef.current = pitchNode
-        micSrc.connect(pitchNode)
-        pitchNode.connect(silent)
-      } catch {
-        micSrc.connect(silent)
-      }
-      silent.connect(ctx.destination)
+      // Tone.js PitchShift: proper phase vocoder — pitch changes, speech speed stays the same
+      // pitch: 8 semitones for Female = same as VoiceChangerPage "Girl" which sounds like a real woman
+      const currentMode = VOICE_MODES.find(v => v.voiceId === voiceId) ?? VOICE_MODES[0]
+      const pitchShift = new Tone.PitchShift({ pitch: currentMode.semitones, windowSize: 0.1, delayTime: 0, feedback: 0 })
+      pitchRef.current = pitchShift
+      gainNode.connect(pitchShift.input)
+
+      // ScriptProcessor captures pitch-shifted audio for socket.io
+      // Silent gain on output = mic audio doesn't play back through speakers
+      const capturer = ctx.createScriptProcessor(4096, 1, 1)
+      const silentGain = ctx.createGain(); silentGain.gain.value = 0
+      pitchShift.connect(capturer)
+      capturer.connect(silentGain)
+      silentGain.connect(ctx.destination) // must be in graph for onaudioprocess to fire
 
       const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'] })
       socketRef.current = socket
       socketSend.current = socket
 
-      // AudioWorklet sends batched pitch-shifted samples → emit to peer
-      if (pitchNode) {
-        pitchNode.port.onmessage = (e) => {
-          if (!active || !socket.connected || mutedRef.current) return
-          socket.emit('audio-chunk', {
-            roomCode: code,
-            chunk: f32ToB64(new Float32Array(e.data.c)),
-            sampleRate: ctx.sampleRate
-          })
-        }
-      } else {
-        // Fallback: ScriptProcessor for browsers without AudioWorklet support
-        const proc = ctx.createScriptProcessor(4096, 1, 1)
-        micSrc.connect(proc); proc.connect(silent)
-        proc.onaudioprocess = (e) => {
-          if (!active || !socket.connected || mutedRef.current) return
-          socket.emit('audio-chunk', {
-            roomCode: code,
-            chunk: f32ToB64(new Float32Array(e.inputBuffer.getChannelData(0))),
-            sampleRate: ctx.sampleRate
-          })
-        }
+      capturer.onaudioprocess = (e) => {
+        if (!active || !socket.connected || mutedRef.current) return
+        socket.emit('audio-chunk', {
+          roomCode: code,
+          chunk: f32ToB64(new Float32Array(e.inputBuffer.getChannelData(0))),
+          sampleRate: ctx.sampleRate
+        })
       }
 
       socket.on('connect',     () => { setAudioState('connecting'); socket.emit('join-room', code) })
@@ -290,11 +178,11 @@ export default function CallRoomPage({ code, onLeave }) {
       active = false
       cancelAnimationFrame(rafRef.current)
       clearInterval(timerRef.current)
-      pitchRef.current?.disconnect()
+      try { pitchRef.current?.dispose() } catch {}
       socketRef.current?.emit('leave-room', code)
       socketRef.current?.disconnect()
       streamRef.current?.getTracks().forEach(t => t.stop())
-      audioCtxRef.current?.close()
+      try { audioCtxRef.current?.close() } catch {}
     }
   }, [code])
 
@@ -323,7 +211,7 @@ export default function CallRoomPage({ code, onLeave }) {
       })
       const d = await resp.json()
       if (!resp.ok) throw new Error(d.error || 'Upload failed')
-      const newV = { voiceId: d.voiceId, name: trainName.trim(), emoji: '🌟', ratio: 1.0, tag: 'your clone' }
+      const newV = { voiceId: d.voiceId, name: trainName.trim(), emoji: '🌟', semitones: 0, tag: 'your clone' }
       setTrainedVoices(v => [...v, newV])
       setTrainStatus({ ok: true, voiceId: d.voiceId, name: trainName.trim() })
       setTrainName('')
