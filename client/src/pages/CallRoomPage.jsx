@@ -147,13 +147,17 @@ export default function CallRoomPage({ code, onLeave }) {
       pitchRef.current = pitchShift
       gainNode.connect(pitchShift.input)
 
-      // ScriptProcessor captures pitch-shifted audio for socket.io
-      // Silent gain on output = mic audio doesn't play back through speakers
+      // Bridge Tone.js output → native ScriptProcessor via MediaStreamDestination.
+      // Direct pitchShift.connect(scriptProcessor) is unreliable across Tone.js versions —
+      // MediaStreamDestination is the correct native bridge.
+      const msDest = ctx.createMediaStreamDestination()
+      pitchShift.connect(msDest)              // Tone → native MediaStreamDestination
+      const capturedSrc = ctx.createMediaStreamSource(msDest.stream) // re-source the stream
       const capturer = ctx.createScriptProcessor(4096, 1, 1)
       const silentGain = ctx.createGain(); silentGain.gain.value = 0
-      pitchShift.connect(capturer)
+      capturedSrc.connect(capturer)
       capturer.connect(silentGain)
-      silentGain.connect(ctx.destination) // must be in graph for onaudioprocess to fire
+      silentGain.connect(ctx.destination)     // must be in graph for onaudioprocess to fire
 
       const socket = io({ path: '/api/socket.io', transports: ['websocket', 'polling'] })
       socketRef.current = socket
@@ -170,7 +174,7 @@ export default function CallRoomPage({ code, onLeave }) {
 
       socket.on('connect',     () => { setAudioState('connecting'); socket.emit('join-room', code) })
       socket.on('disconnect',  () => { if (active) setAudioState('failed') })
-      socket.on('room-peers',  ids => setPeersCount(ids.length))
+      socket.on('room-peers',  ids => { setPeersCount(ids.length); if (ids.length > 0) setAudioState('live') })
       socket.on('peer-joined', () => { setPeersCount(n => n + 1); setAudioState('live') })
       socket.on('peer-left',   () => setPeersCount(n => Math.max(0, n - 1)))
       socket.on('audio-chunk', ({ chunk, sampleRate }) => {
@@ -228,7 +232,7 @@ export default function CallRoomPage({ code, onLeave }) {
   const glowIntensity = isLive && !isMuted ? volume : 0
 
   return (
-    <div className="flex flex-col h-full text-white overflow-hidden"
+    <div className="flex flex-col h-full text-white"
       style={{ background: 'linear-gradient(165deg,#0c0c1a 0%,#130a26 55%,#0c0c1a 100%)' }}>
 
       {audioLocked && (
@@ -267,8 +271,8 @@ export default function CallRoomPage({ code, onLeave }) {
         <div className="w-9" />
       </div>
 
-      {/* Avatar + glow ring */}
-      <div className="flex-1 flex flex-col items-center justify-center gap-5 px-6">
+      {/* Avatar + glow ring — compact, not flex-1 so voice+controls always fit */}
+      <div className="flex flex-col items-center justify-center gap-4 px-6 py-3">
         <div className="relative flex items-center justify-center" style={{ width: 200, height: 200 }}>
           <div className="absolute inset-0 rounded-full pointer-events-none" style={{
             boxShadow: `0 0 ${50 + glowIntensity * 80}px ${15 + glowIntensity * 40}px rgba(139,92,246,${0.08 + glowIntensity * 0.28})`,
@@ -352,8 +356,8 @@ export default function CallRoomPage({ code, onLeave }) {
         </button>
       </div>
 
-      {/* Voice selector */}
-      <div className="px-4 pb-2">
+      {/* Voice selector — scrollable so controls stay visible on small screens */}
+      <div className="px-4 pb-2 overflow-y-auto flex-1 no-scrollbar">
         <div className="flex items-center justify-between mb-2">
           <p className="text-[10px] uppercase tracking-widest text-gray-600 font-mono">
             Voice Effects · local · instant
@@ -462,8 +466,8 @@ export default function CallRoomPage({ code, onLeave }) {
         </div>
       </div>
 
-      {/* Controls */}
-      <div className="flex items-center justify-center gap-8 px-6 py-5"
+      {/* Controls — flex-shrink-0 so they're always visible at the bottom */}
+      <div className="flex-shrink-0 flex items-center justify-center gap-8 px-6 py-5"
         style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
         <button onClick={toggleMute}
           className="w-14 h-14 rounded-full flex items-center justify-center transition-all"
