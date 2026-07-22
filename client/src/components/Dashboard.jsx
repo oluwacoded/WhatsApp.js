@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, X, Wifi, WifiOff, Loader, ChevronRight, Bot, Zap } from 'lucide-react'
+import { Plus, X, Wifi, WifiOff, Loader, ChevronRight, Bot, Zap, Mic } from 'lucide-react'
 import { useBotStatus } from '../hooks/useBotApi'
 
 function BotCard({ bot, onOpen, onRemove }) {
@@ -172,6 +172,40 @@ export default function Dashboard({ bots, onOpenBot, onAddBot, onRemoveBot }) {
           {bots.map(bot => (
             <BotCard key={bot.id} bot={bot} onOpen={onOpenBot} onRemove={onRemoveBot} />
           ))}
+        </div>
+
+        {/* Tools */}
+        <div className="mt-10">
+          <h2 className="text-xl font-bold text-slate-100 mb-1">Tools</h2>
+          <p className="text-sm text-slate-500 mb-5">Extra features powered by your connected APIs</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <a
+              href="/voice-studio"
+              className="bg-slate-900 border border-slate-800 hover:border-purple-600/50 rounded-xl p-5 flex items-center gap-4 transition-all group cursor-pointer no-underline"
+            >
+              <div className="w-10 h-10 bg-purple-600/20 group-hover:bg-purple-600/30 rounded-xl flex items-center justify-center transition-colors flex-shrink-0">
+                <Mic size={18} className="text-purple-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-slate-100">Voice Studio</p>
+                <p className="text-xs text-slate-500 mt-0.5">Generate audio · ElevenLabs TTS</p>
+              </div>
+              <ChevronRight size={16} className="text-slate-700 group-hover:text-purple-400 ml-auto transition-colors" />
+            </a>
+            <a
+              href="/voice-changer"
+              className="bg-slate-900 border border-slate-800 hover:border-blue-600/50 rounded-xl p-5 flex items-center gap-4 transition-all group cursor-pointer no-underline"
+            >
+              <div className="w-10 h-10 bg-blue-600/20 group-hover:bg-blue-600/30 rounded-xl flex items-center justify-center transition-colors flex-shrink-0">
+                <Zap size={18} className="text-blue-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-slate-100">Voice Changer</p>
+                <p className="text-xs text-slate-500 mt-0.5">Real-time pitch shift · live calls</p>
+              </div>
+              <ChevronRight size={16} className="text-slate-700 group-hover:text-blue-400 ml-auto transition-colors" />
+            </a>
+          </div>
         </div>
       </main>
     </div>
