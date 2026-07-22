@@ -269,11 +269,19 @@ function ConnectivityTab({ bot }) {
                 )}
 
                 {pairCode && (
-                  <div className="mt-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-5 text-center">
-                    <p className="text-xs text-slate-400 mb-3">✅ Code generated! Enter it in WhatsApp now:</p>
-                    <p className="text-4xl font-bold tracking-[0.35em] text-emerald-400 font-mono select-all">{pairCode}</p>
-                    <p className="text-xs text-slate-500 mt-3">WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number</p>
-                    <p className="text-xs text-amber-400 mt-1">⏱ Expires in ~60 seconds</p>
+                  <div className="mt-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
+                    <p className="text-xs font-semibold text-emerald-400 mb-3 text-center">✅ Code ready — act fast, expires in ~60s!</p>
+                    <p className="text-4xl font-bold tracking-[0.35em] text-emerald-400 font-mono text-center select-all mb-4">{pairCode}</p>
+                    <div className="space-y-2 text-xs">
+                      <p className="text-slate-300 font-semibold mb-1">Do this RIGHT NOW in WhatsApp:</p>
+                      <p className="text-slate-400">1️⃣ Open <strong className="text-slate-200">WhatsApp</strong> on your phone</p>
+                      <p className="text-slate-400">2️⃣ Tap <strong className="text-slate-200">Settings</strong> (bottom right on iPhone / top right ⋮ on Android)</p>
+                      <p className="text-slate-400">3️⃣ Tap <strong className="text-slate-200">Linked Devices</strong></p>
+                      <p className="text-slate-400">4️⃣ Tap <strong className="text-slate-200">Link a Device</strong></p>
+                      <p className="text-slate-400">5️⃣ Tap <strong className="text-slate-200">"Link with phone number"</strong> (below the QR box)</p>
+                      <p className="text-slate-400">6️⃣ Type the code above — <strong className="text-emerald-400">without the dash</strong></p>
+                    </div>
+                    <p className="text-xs text-amber-400 mt-3 text-center">⚠️ No notification appears — you must open WhatsApp yourself</p>
                   </div>
                 )}
               </div>

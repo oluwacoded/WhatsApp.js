@@ -198,6 +198,7 @@ let contactPersonas = { ...PERSONAS_DEFAULTS, ...readJSON("personas.json", {}) }
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
+const BUILD_VERSION = Date.now(); // bumps on every server restart → busts browser asset cache
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
 let lastGreetTime = 0;         // debounce: prevent greeting flood on rapid reconnections
@@ -4176,10 +4177,15 @@ app.get("/api/groups/search", async (req, res) => {
 });
 
 // Serve React for all non-API routes (MUST be last — after all API routes)
+// Dynamically inject ?v=BUILD_VERSION into asset URLs so every deploy busts the browser cache.
+// index.html is already no-cache; the injected version changes the asset URLs the browser requests.
 app.get("*", (req, res) => {
   const indexPath = path.join(__dirname, "client/dist/index.html");
   if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
+    let html = fs.readFileSync(indexPath, "utf8");
+    html = html.replace(/(\/assets\/[^"']+\.(js|css))/g, `$1?v=${BUILD_VERSION}`);
+    res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.type("html").send(html);
   } else {
     res.send("MFG_bot Hub — building frontend... restart after build completes.");
   }
