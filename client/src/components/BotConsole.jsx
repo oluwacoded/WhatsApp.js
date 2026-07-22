@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { ArrowLeft, Wifi, WifiOff, Loader, RefreshCw, Save, Trash2, Radio, Zap, Settings, BookOpen, Link, ToggleLeft, ToggleRight, Send, AlertCircle, Phone, Mic } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useBotStatus, useBotApi } from '../hooks/useBotApi'
@@ -82,6 +82,9 @@ function ConnectivityTab({ bot }) {
   const [pairCode, setPairCode] = useState(null)
   const [pairLoading, setPairLoading] = useState(false)
   const [pairError, setPairError] = useState(null)
+  const [pairStep, setPairStep] = useState('')
+  const [pairElapsed, setPairElapsed] = useState(0)
+  const pairTimerRef = useRef(null)
 
   const fetchQr = async () => {
     setQrLoading(true)
@@ -90,15 +93,41 @@ function ConnectivityTab({ bot }) {
   }
 
   const requestPairCode = async () => {
-    if (!phone.trim()) return
-    setPairLoading(true); setPairError(null); setPairCode(null)
+    const cleaned = phone.trim().replace(/[^0-9]/g, '')
+    if (!cleaned || cleaned.length < 10) {
+      setPairError('Enter your full number with country code, digits only (e.g. 2349012345678)')
+      return
+    }
+    setPairLoading(true); setPairError(null); setPairCode(null); setPairElapsed(0)
+    setPairStep('Restarting socket in pairing mode…')
+    // Countdown timer
+    pairTimerRef.current = setInterval(() => setPairElapsed(s => s + 1), 1000)
     try {
-      const d = await post('/api/pair', { phone: phone.trim() }, { timeoutMs: 95000 })
-      setPairCode(d.code)
+      const d = await post('/api/pair', { phone: cleaned }, { timeoutMs: 95000 })
+      if (d.code) {
+        setPairCode(d.code)
+        setPairStep('Code ready!')
+      } else {
+        setPairError('Server returned no code. Try again.')
+      }
     } catch (e) {
-      setPairError(e.message || 'Failed to get code. Make sure bot is in waiting state.')
-    } finally { setPairLoading(false) }
+      const msg = e.message || ''
+      if (msg.includes('already connected')) {
+        setPairError('Bot is already connected to WhatsApp. Logout first, then try again.')
+      } else if (msg.includes('already registered')) {
+        setPairError('Session already registered. Logout first to re-pair.')
+      } else if (msg.includes('Timed out')) {
+        setPairError('Timed out — WhatsApp did not respond. Make sure your number is correct (with country code, no +) and try again.')
+      } else {
+        setPairError(msg || 'Failed to get code. Try logging out first, then retry.')
+      }
+    } finally {
+      setPairLoading(false)
+      clearInterval(pairTimerRef.current)
+    }
   }
+
+  useEffect(() => () => clearInterval(pairTimerRef.current), [])
 
   const handleLogout = async () => {
     if (!confirm('Logout and reset session?')) return
@@ -180,37 +209,71 @@ function ConnectivityTab({ bot }) {
             <>
               <div>
                 <h3 className="text-sm font-semibold text-slate-200 mb-1">Link with Phone Number</h3>
-                <p className="text-xs text-slate-500 mb-4">
-                  More reliable than QR. Enter your number with country code, get an 8-digit code, then enter it in WhatsApp → Linked Devices → Link with phone number.
+                <p className="text-xs text-slate-500 mb-3">
+                  Enter your number with country code (no + or spaces). The bot will generate an 8-digit code — enter it in WhatsApp → Settings → Linked Devices → Link with phone number.
                 </p>
+                <div className="text-xs text-slate-500 bg-slate-800/60 rounded-lg px-3 py-2 mb-3 space-y-0.5">
+                  <p>🇳🇬 Nigeria example: <span className="text-slate-300 font-mono">2349012345678</span></p>
+                  <p>🌍 Other countries: <span className="text-slate-300 font-mono">countrycode + number</span></p>
+                </div>
                 <div className="flex gap-2">
                   <input
                     value={phone}
-                    onChange={e => setPhone(e.target.value)}
-                    placeholder="e.g. 23409132883869"
-                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono"
+                    onChange={e => { setPhone(e.target.value); setPairError(null) }}
+                    onKeyDown={e => e.key === 'Enter' && !pairLoading && requestPairCode()}
+                    placeholder="e.g. 2349132883869"
+                    disabled={pairLoading}
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors font-mono disabled:opacity-50"
                   />
                   <button
                     onClick={requestPairCode}
                     disabled={pairLoading || !phone.trim()}
-                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
+                    className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors whitespace-nowrap flex items-center gap-2"
                   >
-                    {pairLoading ? <Loader size={14} className="animate-spin" /> : 'Get Code'}
+                    {pairLoading ? <><Loader size={14} className="animate-spin" /> Getting…</> : 'Get Code'}
                   </button>
                 </div>
+
+                {pairLoading && (
+                  <div className="mt-3 bg-blue-500/10 border border-blue-500/20 rounded-lg px-4 py-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Loader size={13} className="animate-spin text-blue-400 shrink-0" />
+                      <p className="text-xs text-blue-300 font-medium">{pairStep || 'Connecting to WhatsApp…'}</p>
+                    </div>
+                    <p className="text-xs text-slate-500 ml-5">Elapsed: {pairElapsed}s — please wait up to 90s</p>
+                    {pairElapsed > 10 && pairElapsed < 30 && (
+                      <p className="text-xs text-slate-500 ml-5 mt-1">🔄 Negotiating with WhatsApp servers…</p>
+                    )}
+                    {pairElapsed >= 30 && (
+                      <p className="text-xs text-amber-400 ml-5 mt-1">⚠️ Taking longer than usual — Railway cold-start? Hang tight…</p>
+                    )}
+                  </div>
+                )}
 
                 {pairError && (
                   <div className="mt-3 flex items-start gap-2 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
                     <AlertCircle size={14} className="text-red-400 mt-0.5 shrink-0" />
-                    <p className="text-xs text-red-400">{pairError}</p>
+                    <div>
+                      <p className="text-xs text-red-400">{pairError}</p>
+                      {pairError.includes('Logout') || pairError.includes('already') ? (
+                        <button onClick={handleLogout} disabled={logoutLoading} className="mt-1.5 text-xs text-red-300 underline hover:text-red-200">
+                          Logout now →
+                        </button>
+                      ) : (
+                        <button onClick={requestPairCode} disabled={pairLoading} className="mt-1.5 text-xs text-blue-400 underline hover:text-blue-300">
+                          Try again →
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 
                 {pairCode && (
-                  <div className="mt-4 bg-blue-600/10 border border-blue-600/30 rounded-xl p-4 text-center">
-                    <p className="text-xs text-slate-400 mb-2">Enter this code in WhatsApp → Linked Devices → Link with phone number</p>
-                    <p className="text-3xl font-bold tracking-[0.3em] text-blue-400 font-mono">{pairCode}</p>
-                    <p className="text-xs text-slate-500 mt-2">Code expires in ~60 seconds</p>
+                  <div className="mt-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-5 text-center">
+                    <p className="text-xs text-slate-400 mb-3">✅ Code generated! Enter it in WhatsApp now:</p>
+                    <p className="text-4xl font-bold tracking-[0.35em] text-emerald-400 font-mono select-all">{pairCode}</p>
+                    <p className="text-xs text-slate-500 mt-3">WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number</p>
+                    <p className="text-xs text-amber-400 mt-1">⏱ Expires in ~60 seconds</p>
                   </div>
                 )}
               </div>

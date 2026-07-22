@@ -925,39 +925,37 @@ async function connectToWhatsApp() {
   });
 
   // ─── Pairing Code Request ─────────────────────────────────────────────────
-  // Calling requestPairingCode immediately throws "Connection Closed" (socket
-  // hasn't finished noise handshake). Calling after a setTimeout produces a
-  // code WA hasn't registered ("Couldn't link device"). The correct moment is
-  // when the socket emits its FIRST connection.update event (state becomes
-  // "connecting"), which means the handshake is done but creds aren't yet.
+  // Strategy: three-layer approach to catch the exact right moment.
+  //   1. Event listener on "connecting" or qr (most precise)
+  //   2. Short timers at 1.5s and 4s (catch race where event fired before listener registered)
+  //   3. No 30s fallback — by 30s the socket is "open" and requestPairingCode always fails
+  // Retry loop: 6 attempts × 1.5s gap so we span the full handshake window.
   if (usingPairingCode && !sock.authState.creds.registered) {
     const phone = pendingPairPhone;
     pendingPairPhone = null;
     let pairRequested = false;
+
     const tryRequest = async (trigger) => {
       if (pairRequested) return;
       pairRequested = true;
-      // Retry up to 4 times with 3s gap — socket may not be ready on first event
       let lastErr;
-      for (let attempt = 1; attempt <= 4; attempt++) {
+      for (let attempt = 1; attempt <= 6; attempt++) {
         try {
-          console.log(`[MFG_bot] Pairing code attempt ${attempt}/4 (trigger=${trigger}) for ${phone}...`);
+          console.log(`[MFG_bot] Pairing code attempt ${attempt}/6 (trigger=${trigger}) for ${phone}...`);
           const code = await sock.requestPairingCode(phone);
-          console.log(`[MFG_bot] Pairing code generated: ${code}`);
+          console.log(`[MFG_bot] ✅ Pairing code generated: ${code}`);
           if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
           return;
         } catch (e) {
           lastErr = e;
-          console.error(`[MFG_bot] Pairing attempt ${attempt}/4 failed:`, e.message);
-          if (attempt < 4) await new Promise(r => setTimeout(r, 3000));
+          console.error(`[MFG_bot] Pairing attempt ${attempt}/6 failed: ${e.message}`);
+          if (attempt < 6) await new Promise(r => setTimeout(r, 1500));
         }
       }
       if (pairCodeResolve) { pairCodeResolve({ success: false, error: lastErr?.message || "Failed to get pairing code" }); pairCodeResolve = null; }
     };
-    // Request pairing code when socket is alive and ready:
-    //   "connecting"  = noise handshake done, creds not yet exchanged (ideal moment)
-    //   qr present    = WA is about to show a QR, meaning socket is live and ready
-    // NEVER fire on "close" (it's truthy but the socket is dead → instant "Connection Closed")
+
+    // Layer 1: event-driven — "connecting" is the ideal moment (noise handshake done, creds not yet)
     const pairListener = ({ connection, qr }) => {
       if (pairRequested) return;
       if (connection === "connecting" || qr) {
@@ -966,8 +964,11 @@ async function connectToWhatsApp() {
       }
     };
     sock.ev.on("connection.update", pairListener);
-    // Safety fallback: if "connecting" or QR never fire within 30s, try anyway
-    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("timeout-fallback"); } }, 30000);
+
+    // Layer 2a: 1.5s timer — catches race where "connecting" fired before listener registered
+    setTimeout(() => { if (!pairRequested) tryRequest("1.5s-fallback"); }, 1500);
+    // Layer 2b: 4s timer — socket always ready by this point on any connection
+    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("4s-fallback"); } }, 4000);
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
