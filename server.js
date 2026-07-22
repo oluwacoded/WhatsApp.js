@@ -49,7 +49,9 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.static(path.join(__dirname, "client/dist")));
+// { index: false } → prevents express.static from auto-serving index.html for /
+// The catch-all app.get("*") below handles that with BUILD_VERSION injected into asset URLs
+app.use(express.static(path.join(__dirname, "client/dist"), { index: false }));
 
 // ─── Persistence ────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, "data");
