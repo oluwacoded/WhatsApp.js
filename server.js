@@ -3901,6 +3901,62 @@ io.on("connection", (socket) => {
   });
 });
 
+// ─── Voice Studio API ──────────────────────────────────────────────────────
+// GET /api/studio/voices — list all voices on the user's ElevenLabs account
+app.get("/api/studio/voices", async (req, res) => {
+  if (!process.env.ELEVENLABS_API_KEY) return res.status(400).json({ error: "ELEVENLABS_API_KEY not set" });
+  try {
+    const r = await fetch("https://api.elevenlabs.io/v1/voices", {
+      headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!r.ok) return res.status(502).json({ error: "ElevenLabs error: " + r.status });
+    const d = await r.json();
+    res.json({ voices: d.voices || [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/studio/models — list available TTS models
+app.get("/api/studio/models", async (req, res) => {
+  if (!process.env.ELEVENLABS_API_KEY) return res.status(400).json({ error: "ELEVENLABS_API_KEY not set" });
+  try {
+    const r = await fetch("https://api.elevenlabs.io/v1/models", {
+      headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!r.ok) return res.status(502).json({ error: "ElevenLabs error: " + r.status });
+    const d = await r.json();
+    res.json({ models: d || [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/studio/tts — generate audio from text
+app.post("/api/studio/tts", express.json({ limit: "1mb" }), async (req, res) => {
+  if (!process.env.ELEVENLABS_API_KEY) return res.status(400).json({ error: "ELEVENLABS_API_KEY not set" });
+  const { text, voiceId, modelId = "eleven_turbo_v2_5", stability = 0.5, similarity = 0.75, style = 0.0 } = req.body || {};
+  if (!text?.trim()) return res.status(400).json({ error: "No text provided" });
+  if (!voiceId) return res.status(400).json({ error: "No voiceId provided" });
+  try {
+    const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+      method: "POST",
+      headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: text.slice(0, 2500),
+        model_id: modelId,
+        voice_settings: { stability, similarity_boost: similarity, style, use_speaker_boost: true }
+      }),
+      signal: AbortSignal.timeout(30000)
+    });
+    if (!r.ok) {
+      const err = await r.text().catch(() => r.status);
+      return res.status(502).json({ error: "ElevenLabs TTS failed: " + err });
+    }
+    res.set("Content-Type", "audio/mpeg");
+    res.set("Content-Disposition", `attachment; filename="mfg-studio-${Date.now()}.mp3"`);
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 const server = httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
   connectToWhatsApp();
