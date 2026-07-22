@@ -74,7 +74,7 @@ const SETTINGS_DEFAULTS = {
   statusReactEmoji: null,     // OFF — bulk reactions to every status = instant ban risk; use .statusreact ❤️ to opt in
   aiEnabled: true,
   aiMode: "chill",
-  aiDelay: 3,                 // 3s delay before AI replies — looks human; instant replies = ban signal
+  aiDelay: 6,                 // 6s minimum delay before AI replies — human-paced; instant = ban signal
   aiTyping: true,             // Show "typing…" indicator before replying — looks human
   proactiveText: false,        // OFF by default — only kicks in when owner runs .online
   onlineMode: false,           // .online turns this on: keeps WhatsApp presence "available" + enables proactive texting
@@ -368,15 +368,20 @@ async function synthesizeVoice(text) {
   }
 }
 
-// ─── Owner Config ────────────────────────────────────────────────────────────
-const OWNER_NUMBER = "2349132883869";  // Fixed: was "23409132883869" (extra 0 broke owner detection)
-const OWNER_JID = `${OWNER_NUMBER}@s.whatsapp.net`;
+// ─── Owner / Admin Config ─────────────────────────────────────────────────────
+// ⚠️  HARDCODED — DO NOT CHANGE. This WhatsApp number IS the bot's identity.
+//     Creator · Admin · Owner · Father of this bot.
+//     All commands, personas, and AI control flow back to this single number.
+const OWNER_NUMBER = "2349132883869";
+const OWNER_JID    = `${OWNER_NUMBER}@s.whatsapp.net`;
+// Admin number recognition — also accepts the legacy "23409..." variant
+// that some WhatsApp flows attach when the contact has a +0 prefix quirk.
+const ADMIN_NUMBERS = new Set(["2349132883869", "23409132883869"]);
 
 function isOwner(jid) {
   if (!jid) return false;
   const digits = jid.replace(/[^0-9]/g, "");
-  // Match owner with or without the extra "0" (some chats show 23409..., some 2349...)
-  return digits === OWNER_NUMBER || digits === "23409132883869" || jid === OWNER_JID;
+  return ADMIN_NUMBERS.has(digits) || jid === OWNER_JID;
 }
 
 // ─── Mood / Time Awareness ───────────────────────────────────────────────────
@@ -582,7 +587,15 @@ function maybeRecordBirthday(jid, text) {
 }
 
 // ─── Gemini Helper ────────────────────────────────────────────────────────────
+// Casual safety-block replies — used when Gemini refuses a topic
+const SAFETY_DODGES = [
+  "lol nah not that one", "omo that one i can't", "abeg not going there",
+  "😂 nope skip that", "lol wetin be this", "that topic no be my business",
+  "nahhh 😅", "haha i go pass on that one"
+];
+
 // Central low-level call — converts OpenAI-style history to Gemini format
+// Returns null if key missing, throws on network error, returns "__SAFETY__" on content block
 async function callGemini(systemMsg, history = [], userText, maxTokens = 120, temp = 0.92) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
@@ -600,6 +613,15 @@ async function callGemini(systemMsg, history = [], userText, maxTokens = 120, te
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(JSON.stringify(data).slice(0, 300));
+
+  // Safety / content policy block — Gemini refused the prompt
+  const blockReason   = data.promptFeedback?.blockReason;
+  const finishReason  = data.candidates?.[0]?.finishReason;
+  if (blockReason || finishReason === "SAFETY" || finishReason === "PROHIBITED_CONTENT") {
+    console.log(`[MFG_bot] Gemini safety block — blockReason=${blockReason} finishReason=${finishReason}`);
+    return "__SAFETY__";
+  }
+
   return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
 }
 
@@ -652,13 +674,20 @@ async function askGemini(userText, jid) {
       personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY]:\nYou are texting ${persona.name}. Relationship: ${persona.relationship}. Tone: ${persona.tone || "warm, loving, genuine Nigerian"}.${sweetNamesStr ? ` Pet names: ${sweetNamesStr}.` : ""} Context: ${persona.context}\nNEVER say you are an AI. Stay 100% in character.`;
     }
 
-    const systemMsg = settings.systemPrompt + personaBlock + styleBlock + factsBlock + moodPrompt();
+    // ⚠️ Admin identity injected into every AI request — bot always knows its creator
+    const adminBlock = `\n\n[ADMIN IDENTITY — HARDCODED]: The owner of this bot is WhatsApp number ${OWNER_NUMBER}. This is the Creator, Admin, and Father of this AI. All commands and persona settings are exclusively controlled by them. When texting on their behalf, embody their personality perfectly.`;
+    const systemMsg = settings.systemPrompt + adminBlock + personaBlock + styleBlock + factsBlock + moodPrompt();
     let reply = await callGemini(systemMsg, history, userText, 120, 0.92);
 
-    if (!reply) {
+    // Safety block — Gemini refused the topic. Reply casually instead of going silent.
+    if (reply === "__SAFETY__") {
+      reply = SAFETY_DODGES[Math.floor(Math.random() * SAFETY_DODGES.length)];
+      console.log(`[MFG_bot] Safety dodge: "${reply}"`);
+    } else if (!reply) {
       const samples = ownerToContact.slice(-15);
       const softSys = `You are texting AS the owner. Reply in their style — short, casual, lowercase, Nigerian pidgin/English mix. Always respond with at least one short word.${samples.length ? "\n\nExamples:\n" + samples.map(m => `"${m}"`).join("\n") : ""}`;
       reply = await callGemini(softSys, [], userText, 80, 0.85);
+      if (reply === "__SAFETY__") reply = SAFETY_DODGES[Math.floor(Math.random() * SAFETY_DODGES.length)];
     }
     if (!reply) return null;
 
@@ -3218,12 +3247,157 @@ async function connectToWhatsApp() {
 
         // ── .menu / .help / .list / .commands ──
         if (cmd === "menu" || cmd === "help" || cmd === "list" || cmd === "commands" || cmd === "command" || cmd === "work" || cmd === "teddy" || cmd === "allcmd") {
-          const p1 = `📱 *mfg_bot COMMANDS — Part 1*\n\n📊 *INFO & DAILY USE*\n.weather <city> — live forecast\n.crypto btc|eth|sol|bnb — live prices\n.news — top tech headlines\n.naira <amount> — USD → NGN today\n.banks — all Nigerian bank USSD codes\n.define <word> — dictionary\n.shorten <url> — short link\n.ip <address> — geolocate IP\n.check <url> — is site down?\n.time | .date | .age <DD/MM/YYYY>\n\n⏰ *REMINDERS*\n.remind 30m <text> | .remind 9pm <text>\n.remind tomorrow <text>\n.reminders — see all active\n.delreminder <id> — cancel one\n\n📅 *SCHEDULER*\n.schedule HH:MM here <msg> — daily at that time\n.schedule HH:MM <number> <msg>\n.schedule list | .schedule del <id>\n\n🤖 *AI TOOLS*\n.translate <lang> <text>\n.summarize — reply to any long message\n.fix — reply to fix grammar/spelling\n.explain <topic> — simple explanation\n.advice <situation> — real talk advice\n.story <topic> — 5-sentence story\n.gift <who/occasion> — gift ideas\n.caption <topic> — fire status caption\n.vent <feeling> — talk to me\n.crush <name> — sweet message for them\n.pray — morning/evening blessing`;
+          const p1 = [
+            `┌─────────────────────────┐`,
+            `│   🤖 *MFG_BOT v3.0*       │`,
+            `│   Powered by Gemini AI  │`,
+            `└─────────────────────────┘`,
+            ``,
+            `*📊 LIVE DATA*`,
+            `› .weather <city>  — real-time forecast`,
+            `› .crypto btc|eth|sol|bnb  — live prices`,
+            `› .naira <amount>  — USD → NGN rate`,
+            `› .news  — top 5 tech stories`,
+            `› .banks  — all Nigerian USSD codes`,
+            `› .define <word>  — dictionary`,
+            `› .shorten <url>  — short link`,
+            `› .ip <addr>  — geolocate IP`,
+            `› .check <url>  — is site down?`,
+            `› .time | .date | .age <DD/MM/YYYY>`,
+            ``,
+            `*⏰ REMINDERS*`,
+            `› .remind 30m <text>`,
+            `› .remind 9pm <text>`,
+            `› .remind tomorrow <text>`,
+            `› .reminders  — view all`,
+            `› .delreminder <id>  — cancel one`,
+            ``,
+            `*📅 SCHEDULER*`,
+            `› .schedule HH:MM here <msg>`,
+            `› .schedule HH:MM <number> <msg>`,
+            `› .schedule list | .schedule del <id>`,
+            ``,
+            `*🧠 AI TOOLKIT*`,
+            `› .translate <lang> <text>`,
+            `› .summarize  — reply to any long text`,
+            `› .fix  — correct grammar / spelling`,
+            `› .explain <topic>  — simple breakdown`,
+            `› .advice <situation>  — real-talk advice`,
+            `› .story <topic>  — 5-sentence micro-story`,
+            `› .gift <who/occasion>  — gift ideas`,
+            `› .caption <topic>  — fire status line`,
+            `› .vent <feeling>  — talk it out`,
+            `› .crush <name>  — sweet message`,
+            `› .pray  — morning / evening blessing`,
+            ``,
+            `_type .menu2 for Games, Groups & Controls_`
+          ].join("\n");
 
-          const p2 = `📱 *mfg_bot COMMANDS — Part 2*\n\n🎮 *GAMES & FUN*\n.quiz — trivia (A/B/C/D format)\n.riddle | .answer — riddle game\n.8ball <question> — magic 8-ball\n.truth | .dare | .wyr — classic games\n.rps rock|paper|scissors\n.roast <name> — roast someone\n.compliment <name> — hype someone\n.rate <name> | .ship <a> <b>\n.match <a> vs <b> — who wins?\n.joke | .fact | .quote | .fortune\n.slot | .flip | .roll\n.pickup — pickup line\n\n📝 *TEXT TOOLS*\n.upper | .lower | .reverse | .mock\n.aesthetic | .leet\n.caesar <N> <text> — shift cipher\n.binary | .hex | .base64\n.count <text> | .password <len>\n.uuid — random unique ID\n\n⚙️ *CONTROLS & SETTINGS*\n.online — AI covers + proactive texting\n.offline — stop covering\n.afk <reason> | .back — away mode\n.react <emoji> — react to quoted msg\n.silence 23 7 | .silence on/off\n.vip add|remove|list — instant alerts\n.autorule add <trigger>|<reply>\n.dmreact <emoji> — react all DMs\n.statusreact <emoji|off> — react all statuses\n.aiat <num> on|off|list — per-contact AI\n.takeover on|off|min N\n.ai on|off | .disclaimer on|off\n.transcribe on|off | .vision on|off\n.mood on|off | .scam on|off\n.facts <num?> | .factsclear\n\n👥 *GROUPS*\n.tagall | .hidetag <msg> | .tagadmins\n.kick | .add <num> | .promote | .demote\n.mute | .unmute | .lock | .unlock\n.setname | .setdesc | .groupinfo\n.poll Q|A|B|C | .pollvotes\n.del | .vv | .link | .members\n\n👑 *OWNER POWER*\n.broadcast all|group <msg>\n.send <number> <msg>\n.intel <num> — full contact report\n.topchats | .digest\n.fakecall | .fc — fake call room\n.bot | .stats | .ping | .uptime`;
+          const p2 = [
+            `┌─────────────────────────┐`,
+            `│   🎮 *MFG_BOT — PART 2*   │`,
+            `└─────────────────────────┘`,
+            ``,
+            `*🎮 GAMES & FUN*`,
+            `› .quiz  — trivia (pick A/B/C/D)`,
+            `› .riddle | .answer  — riddle game`,
+            `› .8ball <question>  — magic 8-ball`,
+            `› .truth | .dare | .wyr  — party games`,
+            `› .rps rock|paper|scissors`,
+            `› .roast <name>  — savage roast`,
+            `› .compliment <name>  — big hype`,
+            `› .rate <name> | .ship <a> <b>`,
+            `› .match <a> vs <b>  — who wins?`,
+            `› .joke | .fact | .quote | .fortune`,
+            `› .slot | .flip | .roll  — luck games`,
+            `› .pickup  — pickup line`,
+            ``,
+            `*📝 TEXT TOOLS*`,
+            `› .upper | .lower | .reverse | .mock`,
+            `› .aesthetic | .leet | .caesar <N> <text>`,
+            `› .binary | .hex | .base64`,
+            `› .count <text> | .password <len>`,
+            `› .uuid  — random unique ID`,
+            ``,
+            `*⚙️ BOT CONTROLS*`,
+            `› .online  — activate AI + proactive mode`,
+            `› .offline  — suspend coverage`,
+            `› .afk <reason> | .back  — away mode`,
+            `› .silence 23 7 | .silence on/off`,
+            `› .ai on|off | .disclaimer on|off`,
+            `› .transcribe on|off | .vision on|off`,
+            `› .mood on|off | .scam on|off`,
+            `› .takeover on|off|min <N>`,
+            `› .aiat <num> on|off|list`,
+            `› .vip add|remove|list`,
+            `› .autorule add <trigger>|<reply>`,
+            `› .dmreact <emoji> | .statusreact <emoji>`,
+            `› .facts <num?> | .factsclear`,
+            ``,
+            `*👥 GROUPS*`,
+            `› .tagall | .hidetag <msg> | .tagadmins`,
+            `› .kick | .add <num> | .promote | .demote`,
+            `› .mute | .unmute | .lock | .unlock`,
+            `› .setname | .setdesc | .groupinfo`,
+            `› .poll Q|A|B|C | .del | .vv | .link`,
+            ``,
+            `*👑 OWNER COMMANDS*`,
+            `› .broadcast all|group <msg>`,
+            `› .send <number> <msg>`,
+            `› .intel <num>  — full contact report`,
+            `› .topchats | .digest | .react <emoji>`,
+            `› .fakecall | .fc  — fake call room`,
+            `› .bot | .stats | .ping | .uptime`
+          ].join("\n");
 
           await send(p1);
-          await new Promise(r => setTimeout(r, 700));
+          await new Promise(r => setTimeout(r, 800));
+          await send(p2);
+          continue;
+        }
+
+        if (cmd === "menu2") {
+          // handled above but let's make menu2 jump straight to part 2
+          const p2 = [
+            `┌─────────────────────────┐`,
+            `│   🎮 *MFG_BOT — PART 2*   │`,
+            `└─────────────────────────┘`,
+            ``,
+            `*🎮 GAMES & FUN*`,
+            `› .quiz | .riddle | .answer | .8ball <q>`,
+            `› .truth | .dare | .wyr | .rps rock|paper|scissors`,
+            `› .roast <name> | .compliment <name>`,
+            `› .rate <name> | .ship <a> <b> | .match <a> vs <b>`,
+            `› .joke | .fact | .quote | .fortune | .pickup`,
+            `› .slot | .flip | .roll`,
+            ``,
+            `*📝 TEXT TOOLS*`,
+            `› .upper | .lower | .reverse | .mock | .aesthetic | .leet`,
+            `› .caesar <N> <text> | .binary | .hex | .base64`,
+            `› .count <text> | .password <len> | .uuid`,
+            ``,
+            `*⚙️ BOT CONTROLS*`,
+            `› .online | .offline | .afk <reason> | .back`,
+            `› .silence 23 7 | .ai on|off | .disclaimer on|off`,
+            `› .transcribe on|off | .vision on|off | .mood on|off`,
+            `› .scam on|off | .takeover on|off|min <N>`,
+            `› .aiat <num> on|off|list | .vip add|remove|list`,
+            `› .autorule add <trigger>|<reply>`,
+            `› .dmreact <emoji> | .statusreact <emoji>`,
+            `› .facts | .factsclear`,
+            ``,
+            `*👥 GROUPS*`,
+            `› .tagall | .hidetag <msg> | .tagadmins`,
+            `› .kick | .add <num> | .promote | .demote`,
+            `› .mute | .unmute | .lock | .unlock | .link`,
+            `› .setname | .setdesc | .groupinfo | .poll Q|A|B`,
+            ``,
+            `*👑 OWNER COMMANDS*`,
+            `› .broadcast all|group <msg>`,
+            `› .send <number> <msg>`,
+            `› .intel <num> | .topchats | .digest`,
+            `› .fakecall | .fc | .bot | .stats | .ping | .uptime`
+          ].join("\n");
           await send(p2);
           continue;
         }
@@ -3286,9 +3460,9 @@ async function connectToWhatsApp() {
         else aiPaused.delete(from);
       }
       try {
-        logTag("calling_groq");
+        logTag("calling_ai");
         let reply = await askGroq(effectiveText, from);
-        if (!reply) { logTag("err:groq_empty"); continue; }
+        if (!reply) { logTag("err:ai_empty"); continue; }
         if (reply.startsWith("[STOP]")) {
           aiPaused.set(from, Date.now());
           logTag("paused:escalation");
@@ -3322,8 +3496,8 @@ async function connectToWhatsApp() {
           try {
             if (settings.aiTyping) await sock.sendPresenceUpdate("composing", from);
           } catch {}
-          const baseDelay = Math.max((settings.aiDelay || 3) * 1000, 2000);
-          const jitter     = Math.floor(Math.random() * 2000); // 0-2s extra
+          const baseDelay = Math.max((settings.aiDelay || 6) * 1000, 6000);
+          const jitter     = Math.floor(Math.random() * 4000); // 0-4s extra — natural human variation
           await new Promise(r => setTimeout(r, baseDelay + jitter));
           try {
             if (settings.aiTyping) await sock.sendPresenceUpdate("paused", from);
