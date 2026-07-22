@@ -710,6 +710,7 @@ async function askGroq(userText, jid) {
   if (process.env.GEMINI_API_KEY) {
     const reply = await askGemini(userText, jid);
     if (reply) return reply;
+    console.log("[MFG_bot] Gemini unavailable — falling back to Groq");
   }
   const key = process.env.GROQ_API_KEY;
   if (!key) return null;
