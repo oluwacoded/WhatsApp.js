@@ -4105,6 +4105,75 @@ app.post("/api/studio/tts", express.json({ limit: "1mb" }), async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Group Finder ─────────────────────────────────────────────────────────────
+app.get("/api/groups/search", async (req, res) => {
+  const { q = "singles dating usa", platform = "all" } = req.query;
+  const siteMap = {
+    telegram: "site:t.me",
+    discord:  "site:discord.gg OR site:discord.com/invite",
+    whatsapp: "site:chat.whatsapp.com",
+    all:      "(site:t.me OR site:discord.gg OR site:chat.whatsapp.com)",
+  };
+  const siteFilter = siteMap[platform] || siteMap.all;
+  const searchQ = `${q} group invite link ${siteFilter}`;
+
+  try {
+    const encoded = encodeURIComponent(searchQ);
+    const https   = require("https");
+    const raw = await new Promise((resolve, reject) => {
+      const opts = {
+        hostname: "html.duckduckgo.com",
+        path: `/html/?q=${encoded}`,
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; MFGBot/1.0)",
+          "Accept": "text/html",
+        },
+      };
+      const r = https.get(opts, (resp) => {
+        let d = "";
+        resp.on("data", (c) => (d += c));
+        resp.on("end", () => resolve(d));
+      });
+      r.on("error", reject);
+      r.setTimeout(8000, () => { r.destroy(); reject(new Error("timeout")); });
+    });
+
+    const results = [];
+    // DuckDuckGo encodes real URLs in uddg= param
+    const uddgRe = /uddg=(https?%3A%2F%2F[^&"]+)/g;
+    const titleRe = /<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g;
+    const descRe  = /<a[^>]+class="result__snippet"[^>]*>([^<]+)<\/a>/gs;
+
+    const urls   = [...raw.matchAll(uddgRe)].map(m => decodeURIComponent(m[1]));
+    const titles = [...raw.matchAll(titleRe)].map(m => m[1].trim());
+    const descs  = [...raw.matchAll(descRe)].map(m => m[1].replace(/<[^>]+>/g,"").trim());
+
+    for (let i = 0; i < urls.length && results.length < 20; i++) {
+      const url = urls[i];
+      if (!url) continue;
+      let plat = null;
+      if (url.includes("t.me"))              plat = "telegram";
+      else if (url.includes("discord.gg") || url.includes("discord.com/invite")) plat = "discord";
+      else if (url.includes("chat.whatsapp.com")) plat = "whatsapp";
+      if (!plat) continue;
+      // skip obvious spam patterns
+      if (url.length > 120) continue;
+      results.push({
+        url,
+        title:       titles[i] || url.split("/").pop() || "Group Invite",
+        description: descs[i]  || "",
+        platform:    plat,
+        verified:    true,
+      });
+    }
+
+    res.json({ results, query: q, platform });
+  } catch (e) {
+    res.status(500).json({ error: e.message, results: [] });
+  }
+});
+
 // Serve React for all non-API routes (MUST be last — after all API routes)
 app.get("*", (req, res) => {
   const indexPath = path.join(__dirname, "client/dist/index.html");

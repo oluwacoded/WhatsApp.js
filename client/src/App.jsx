@@ -4,6 +4,7 @@ import BotConsole from './components/BotConsole'
 import GuestCallPage from './pages/GuestCallPage'
 import VoiceChangerPage from './pages/VoiceChangerPage'
 import VoiceStudioPage from './pages/VoiceStudioPage'
+import GroupFinderPage from './pages/GroupFinderPage'
 import './index.css'
 
 const DEFAULT_BOTS = [
@@ -28,6 +29,11 @@ export default function App() {
   // Voice Studio page
   if (window.location.pathname === '/voice-studio') {
     return <VoiceStudioPage />
+  }
+
+  // Group finder page
+  if (window.location.pathname === '/group-finder') {
+    return <GroupFinderPage />
   }
 
   // Standalone voice changer page

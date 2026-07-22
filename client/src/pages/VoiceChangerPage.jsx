@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Mic, MicOff, Square, Play, Monitor, Smartphone, Volume2, ChevronDown, ExternalLink, RefreshCw } from 'lucide-react'
+import { Mic, MicOff, Square, Play, Monitor, Smartphone, Volume2, ChevronDown, ExternalLink, RefreshCw, Send } from 'lucide-react'
 
 const VOICE_PRESETS = [
   { name: 'Natural',    pitch: 0,    formant: 0,    emoji: '🎙️', color: 'slate',  desc: 'Your real voice' },
@@ -215,16 +215,17 @@ export default function VoiceChangerPage({ standalone = false }) {
             <p className="text-xs text-slate-500 mt-0.5">Change your voice live on any call</p>
           </div>
           <div className="flex gap-1 bg-slate-800 rounded-lg p-1">
-            <button onClick={() => setPlatform('pc')}
-              className={`text-xs px-3 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors
-                ${platform === 'pc' ? 'bg-slate-600 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}>
-              <Monitor size={12} /> PC
-            </button>
-            <button onClick={() => setPlatform('android')}
-              className={`text-xs px-3 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors
-                ${platform === 'android' ? 'bg-slate-600 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}>
-              <Smartphone size={12} /> Android
-            </button>
+            {[
+              { id:'pc',       icon: Monitor,    label:'PC' },
+              { id:'android',  icon: Smartphone, label:'Android' },
+              { id:'telegram', icon: Send,       label:'Telegram' },
+            ].map(({ id, icon: Icon, label }) => (
+              <button key={id} onClick={() => setPlatform(id)}
+                className={`text-xs px-3 py-1.5 rounded-md flex items-center gap-1.5 font-medium transition-colors
+                  ${platform === id ? 'bg-slate-600 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}>
+                <Icon size={12} /> {label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -316,6 +317,77 @@ export default function VoiceChangerPage({ standalone = false }) {
 
             <div className="px-4 py-3">
               <p className="text-[11px] text-slate-500"><span className="text-slate-400 font-medium">Why can't I route directly?</span> Android blocks web pages from piping audio into WhatsApp's mic for security reasons. Neither method needs rooting.</p>
+            </div>
+          </div>
+        )}
+
+        {/* ── TELEGRAM GUIDE ── */}
+        {platform === 'telegram' && (
+          <div className="bg-sky-950/40 border border-sky-800/40 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-sky-800/30">
+              <p className="text-xs font-bold text-sky-300">📨 Using on Telegram Desktop (PC)</p>
+              <p className="text-[11px] text-sky-400/70 mt-0.5">Same VB-Cable setup as WhatsApp — works perfectly on Telegram Desktop.</p>
+            </div>
+            <div className="divide-y divide-sky-900/30">
+              <div className="px-4 py-3 flex gap-3">
+                <span className="w-6 h-6 shrink-0 rounded-full bg-sky-700 text-white text-[11px] font-bold flex items-center justify-center">1</span>
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-slate-100">Install VB-Cable (if not done yet)</p>
+                  <p className="text-xs text-slate-400">Creates a virtual microphone. Telegram will use it to send your changed voice.</p>
+                  <a href="https://vb-audio.com/Cable/" target="_blank" rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs text-sky-400 underline font-medium mt-1">
+                    <ExternalLink size={11}/> vb-audio.com/Cable — free download
+                  </a>
+                </div>
+              </div>
+              <div className="px-4 py-3 flex gap-3">
+                <span className="w-6 h-6 shrink-0 rounded-full bg-sky-700 text-white text-[11px] font-bold flex items-center justify-center">2</span>
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold text-slate-100">Set dropdowns below</p>
+                  <div className="bg-slate-800/60 rounded-lg p-3 space-y-1.5 text-xs">
+                    {[['🎤 Your Real Mic','your normal microphone'],['🔊 Send Voice To','CABLE Input (VB-Audio)']].map(([l,r])=>(
+                      <div key={l} className="flex justify-between gap-4">
+                        <span className="text-slate-400">{l}</span>
+                        <span className={`font-medium ${r.includes('CABLE')?'text-sky-300':'text-slate-200'}`}>{r}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="px-4 py-3 flex gap-3">
+                <span className="w-6 h-6 shrink-0 rounded-full bg-sky-700 text-white text-[11px] font-bold flex items-center justify-center">3</span>
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Pick a voice and press Start</p>
+                  <p className="text-xs text-slate-400 mt-0.5">You should see the volume bar move when you speak.</p>
+                </div>
+              </div>
+              <div className="px-4 py-3 flex gap-3">
+                <span className="w-6 h-6 shrink-0 rounded-full bg-sky-700 text-white text-[11px] font-bold flex items-center justify-center">4</span>
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Set Telegram Desktop to use CABLE Output</p>
+                  <div className="bg-slate-800/60 rounded-lg p-3 mt-2 text-xs text-slate-300 space-y-1">
+                    <p><span className="text-sky-300 font-medium">Telegram Desktop:</span> Settings → Privacy & Security → Voice Calls → Input device → select <span className="text-sky-300 font-semibold">"CABLE Output (VB-Audio)"</span></p>
+                  </div>
+                </div>
+              </div>
+              <div className="px-4 py-3 flex gap-3">
+                <span className="w-6 h-6 shrink-0 rounded-full bg-emerald-700 text-white text-[11px] font-bold flex items-center justify-center">✓</span>
+                <div>
+                  <p className="text-sm font-semibold text-emerald-300">Make a Telegram voice call — they hear your changed voice!</p>
+                  <p className="text-xs text-slate-400 mt-0.5">Works for 1-on-1 calls and group voice chats. Keep this tab open.</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Mobile Telegram */}
+            <div className="px-4 py-4 border-t border-sky-800/30">
+              <div className="flex items-start gap-3">
+                <span className="shrink-0 bg-slate-700 text-slate-300 text-[10px] font-bold px-2.5 py-1 rounded-full mt-0.5">MOBILE</span>
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Telegram on phone — use the two-phone trick</p>
+                  <p className="text-xs text-slate-400 mt-1">On Phone 1: start a Telegram voice call on speaker. On Phone 2: open this page, start voice changer, hold it near Phone 1. Same trick as Android.</p>
+                </div>
+              </div>
             </div>
           </div>
         )}
