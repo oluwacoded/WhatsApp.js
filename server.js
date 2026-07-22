@@ -323,6 +323,7 @@ const pendingDownload = new Map(); // JID → timestamp; awaits next msg as song
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
 let pairCodeResolve = null;    // Promise resolver waiting for the code
+let pairSocketReady = false;   // true once "connecting" or qr fires on the pair socket
 
 function trackCommand(cmd) {
   commandStats[cmd] = (commandStats[cmd] || 0) + 1;
@@ -882,7 +883,7 @@ async function connectToWhatsApp() {
     },
     logger: pino({ level: "silent" }),
     // Browser fingerprint MUST be one WhatsApp accepts for pairing codes.
-    browser: usingPairingCode ? Browsers.ubuntu("Chrome") : Browsers.macOS("Desktop"),
+    browser: Browsers.windows("Chrome"),
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
@@ -927,51 +928,21 @@ async function connectToWhatsApp() {
     }
   });
 
-  // ─── Pairing Code Request ─────────────────────────────────────────────────
-  // Strategy: three-layer approach to catch the exact right moment.
-  //   1. Event listener on "connecting" or qr (most precise)
-  //   2. Short timers at 1.5s and 4s (catch race where event fired before listener registered)
-  //   3. No 30s fallback — by 30s the socket is "open" and requestPairingCode always fails
-  // Retry loop: 6 attempts × 1.5s gap so we span the full handshake window.
+  // ─── Pairing Code Readiness Signal ────────────────────────────────────────
+  // When in pairing mode, set pairSocketReady as soon as the socket finishes
+  // the noise handshake. handlePair() polls this flag then calls requestPairingCode()
+  // directly — polling is more reliable than event-listener races or fixed timers.
+  // A QR event is the strongest readiness signal (handshake done, unregistered).
   if (usingPairingCode && !sock.authState.creds.registered) {
-    const phone = pendingPairPhone;
-    pendingPairPhone = null;
-    let pairRequested = false;
-
-    const tryRequest = async (trigger) => {
-      if (pairRequested) return;
-      pairRequested = true;
-      let lastErr;
-      for (let attempt = 1; attempt <= 6; attempt++) {
-        try {
-          console.log(`[MFG_bot] Pairing code attempt ${attempt}/6 (trigger=${trigger}) for ${phone}...`);
-          const code = await sock.requestPairingCode(phone);
-          console.log(`[MFG_bot] ✅ Pairing code generated: ${code}`);
-          if (pairCodeResolve) { pairCodeResolve({ success: true, code }); pairCodeResolve = null; }
-          return;
-        } catch (e) {
-          lastErr = e;
-          console.error(`[MFG_bot] Pairing attempt ${attempt}/6 failed: ${e.message}`);
-          if (attempt < 6) await new Promise(r => setTimeout(r, 1500));
-        }
-      }
-      if (pairCodeResolve) { pairCodeResolve({ success: false, error: lastErr?.message || "Failed to get pairing code" }); pairCodeResolve = null; }
-    };
-
-    // Layer 1: event-driven — "connecting" is the ideal moment (noise handshake done, creds not yet)
-    const pairListener = ({ connection, qr }) => {
-      if (pairRequested) return;
-      if (connection === "connecting" || qr) {
-        sock.ev.off("connection.update", pairListener);
-        tryRequest(qr ? "qr-ready" : "connecting");
+    pendingPairPhone = null; // consumed
+    const pairReadyListener = ({ connection, qr }) => {
+      if (qr || connection === "connecting") {
+        pairSocketReady = true;
+        sock.ev.off("connection.update", pairReadyListener);
+        console.log(`[MFG_bot] Pair socket ready (trigger: ${qr ? "qr" : "connecting"})`);
       }
     };
-    sock.ev.on("connection.update", pairListener);
-
-    // Layer 2a: 1.5s timer — catches race where "connecting" fired before listener registered
-    setTimeout(() => { if (!pairRequested) tryRequest("1.5s-fallback"); }, 1500);
-    // Layer 2b: 4s timer — socket always ready by this point on any connection
-    setTimeout(() => { if (!pairRequested) { sock.ev.off("connection.update", pairListener); tryRequest("4s-fallback"); } }, 4000);
+    sock.ev.on("connection.update", pairReadyListener);
   } else if (usingPairingCode) {
     pendingPairPhone = null;
     console.log(`[MFG_bot] Skipping pair request — creds already registered`);
@@ -1026,6 +997,10 @@ async function connectToWhatsApp() {
         const wipePath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
         try { fs.rmSync(wipePath, { recursive: true, force: true }); console.log(`[MFG_bot] Real logout (credsAreDead=${credsAreDead}) — wiped ${wipePath}`); }
         catch (e) { console.log(`[MFG_bot] auth wipe warn: ${e.message}`); }
+        // CRITICAL: reset hasEverConnected so the NEXT pairing starts fresh.
+        // If it stays true, the first post-pair 401 of a re-link looks like a real
+        // logout and wipes the new session before it ever connects.
+        hasEverConnected = false;
         consecutive401s = 0; reconnectCount = 0; pendingPairPhone = null;
       }
       if (shouldReconnect) {
@@ -1033,8 +1008,8 @@ async function connectToWhatsApp() {
         // 515 = "restart required" (normal post-pair) → reconnect FAST
         // post-pair-restart (any code, no prior open) → reconnect FAST so creds get used
         // otherwise standard backoff
-        const fastReconnect = code === 515 || isPostPairRestart;
-        const delay = fastReconnect ? 1500 : Math.min(reconnectCount * 8000, 60000);
+        const fastReconnect = code === 515 || code === DisconnectReason.restartRequired || isPostPairRestart;
+        const delay = fastReconnect ? 0 : Math.min(reconnectCount * 8000, 60000);
         console.log(`[MFG_bot] Reconnecting in ${delay}ms (attempt ${reconnectCount}, fast=${fastReconnect})...`);
         setTimeout(connectToWhatsApp, delay);
       }
@@ -3739,7 +3714,8 @@ app.get("/api/qr", (req, res) =>
   currentQr ? res.json({ qr: currentQr }) : res.status(404).json({ error: "no qr available" })
 );
 
-// Pairing code — restarts the socket in phone-pairing mode (no QR conflict)
+// Pairing code — restarts socket fresh, polls for readiness, calls requestPairingCode directly.
+// Based on the proven pattern: poll for QR event (strongest handshake signal) then settle 1s.
 // Accepts: POST {phone}  OR  GET ?number=...  OR  GET ?phone=...
 let pairInProgress = false; // guard against double-calls
 async function handlePair(req, res) {
@@ -3751,52 +3727,74 @@ async function handlePair(req, res) {
 
   pairInProgress = true;
 
-  // CRITICAL: WhatsApp rejects pairing codes if the auth folder has stale creds
-  // from a previous (failed/expired) session. Wipe it so the new pairing is fresh.
   try {
+    // 1. Wipe stale auth — leftover/partial creds make WhatsApp reject the pairing
     const authPath = process.env.AUTH_PATH || path.join(__dirname, "auth_info_baileys");
-    if (fs.existsSync(authPath)) {
-      fs.rmSync(authPath, { recursive: true, force: true });
-      console.log(`[MFG_bot] /api/pair — wiped stale auth at ${authPath}`);
-    }
-  } catch (e) { console.log(`[MFG_bot] /api/pair — auth wipe warn: ${e.message}`); }
-
-  // Store the phone so the next connectToWhatsApp() uses pairing mode
-  pendingPairPhone = clean;
-  hasQr = false; currentQr = null;
-  console.log(`[MFG_bot] /api/pair — restarting socket in pairing mode for ${clean}`);
-
-  // Create a Promise that resolves when the pairing code is ready (or times out)
-  // 90s timeout — Railway connections can be slow to handshake
-  const codePromise = new Promise((resolve) => {
-    pairCodeResolve = resolve;
-    setTimeout(() => {
-      if (pairCodeResolve) {
-        pairCodeResolve({ success: false, error: "Timed out waiting for WhatsApp — check your number is correct (with country code, no +) and try again" });
-        pairCodeResolve = null;
+    try {
+      if (fs.existsSync(authPath)) {
+        fs.rmSync(authPath, { recursive: true, force: true });
+        console.log(`[MFG_bot] /api/pair — wiped stale auth at ${authPath}`);
       }
-    }, 90000);
-  });
+    } catch (e) { console.log(`[MFG_bot] /api/pair — auth wipe warn: ${e.message}`); }
 
-  // Tear down the existing socket. removeAllListeners first so the disconnect
-  // handler doesn't fire a competing connectToWhatsApp() call.
-  if (sock) {
-    try { sock.ev.removeAllListeners(); sock.end(new Error("switching to pairing code")); } catch (e) {}
-    sock = null;
+    // 2. Reset ALL lifecycle state (hasEverConnected MUST go false — see whatsapp-linking.md)
+    hasEverConnected = false;
+    consecutive401s = 0;
+    hasQr = false; currentQr = null;
+    pairSocketReady = false;
+
+    // 3. Tear down existing socket cleanly (removeAllListeners prevents rogue reconnects)
+    if (sock) {
+      try { sock.ev.removeAllListeners(); sock.end(new Error("fresh pair")); } catch {}
+      sock = null;
+    }
+    await new Promise(r => setTimeout(r, 1200));
+
+    // 4. Start fresh socket in pairing mode
+    pendingPairPhone = clean;
+    connectToWhatsApp();
+
+    // 5. Poll for QR event — strongest signal the noise handshake is done and
+    //    the session is unregistered (ready to accept a pairing code request).
+    //    QR fires even in pairing mode because the session is fresh/unregistered.
+    console.log(`[MFG_bot] /api/pair — waiting for socket readiness for ${clean}...`);
+    const qrDeadline = Date.now() + 20000;
+    while (!hasQr && Date.now() < qrDeadline) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    // 6. Fallback: if QR never appeared, wait for the weaker "connecting" flag
+    if (!hasQr && !pairSocketReady) {
+      const fallback = Date.now() + 5000;
+      while (!pairSocketReady && Date.now() < fallback) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+
+    // 7. Settle — Baileys needs a moment after the handshake before requestPairingCode works
+    await new Promise(r => setTimeout(r, 1000));
+
+    if (!sock) throw new Error("WhatsApp socket not ready — try again in a few seconds");
+    if (sock.authState?.creds?.registered) throw new Error("Session already registered — logout first");
+
+    // 8. Request the code directly — single call, no retry loop (retrying after failure
+    //    causes the same socket-state issues that made codes invalid)
+    console.log(`[MFG_bot] /api/pair — requesting pairing code for ${clean}`);
+    const code = await sock.requestPairingCode(clean);
+    console.log(`[MFG_bot] ✅ Pairing code: ${code}`);
+
+    const pretty = code && code.length === 8 ? `${code.slice(0,4)}-${code.slice(4)}` : code;
+    pairInProgress = false;
+    return res.json({
+      success: true, ok: true, code: pretty, raw: code,
+      note: "If WhatsApp says 'Couldn't link device' — check Settings → Linked Devices anyway. It often links successfully despite that error. Only retry if no device appears there."
+    });
+
+  } catch (e) {
+    pairInProgress = false;
+    console.error(`[MFG_bot] /api/pair error: ${e.message}`);
+    return res.status(500).json({ error: e.message || "Failed to get pairing code — try again" });
   }
-  // Small pause so the old socket fully closes before we open a new one
-  await new Promise(r => setTimeout(r, 1200));
-  connectToWhatsApp();
-
-  const result = await codePromise;
-  pairInProgress = false;
-
-  if (result.success) {
-    const c = result.code;
-    const pretty = c && c.length === 8 ? `${c.slice(0,4)}-${c.slice(4)}` : c;
-    return res.json({ success: true, ok: true, code: pretty, raw: c, instructions: "WhatsApp → Settings → Linked Devices → Link a device → Link with phone number → enter this code (valid ~60s)" });
-  }
-  return res.status(500).json({ error: result.error || "Failed to get pairing code — try again" });
 }
 app.post("/api/pair", handlePair);
 app.get("/api/pair", handlePair);
