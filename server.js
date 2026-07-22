@@ -35,11 +35,17 @@ const { Server: SocketIOServer } = require("socket.io");
 const app = express();
 app.use(cors());
 app.use(express.json());
-// No-cache for index.html so browsers always load the latest JS bundle
+// No-cache for HTML — forces browser to always fetch fresh index.html with latest JS hashes
+// JS/CSS assets use content-hashed filenames so they CAN be cached long-term
 app.use((req, res, next) => {
-  if (req.path === '/' || req.path.endsWith('.html')) {
+  const isHtml = req.path === '/' || req.path.endsWith('.html') || !req.path.includes('.');
+  if (isHtml) {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache'); res.setHeader('Expires', '0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  } else if (req.path.startsWith('/assets/')) {
+    // Hashed asset filenames — safe to cache for 1 year
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   }
   next();
 });
