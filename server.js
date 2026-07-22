@@ -472,49 +472,63 @@ async function transcribeAudio(buffer, mimetype) {
   }
 }
 
-// ─── Image Vision (Groq Llama-4 Scout) ───────────────────────────────────────
+// ─── Image Vision (Gemini preferred, Groq fallback) ──────────────────────────
 async function describeImage(buffer, caption, mimetype) {
-  const key = process.env.GROQ_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const groqKey   = process.env.GROQ_API_KEY;
   lastVisionResult = { at: new Date().toISOString(), ok: null, bytes: buffer?.length || 0, text: "", error: "" };
-  if (!key) { lastVisionResult.error = "no GROQ_API_KEY"; return null; }
-  if (!buffer || buffer.length < 100) { lastVisionResult.error = "buffer too small: " + (buffer?.length || 0); return null; }
-  // Groq vision has 4MB limit on base64 — downscale check
-  if (buffer.length > 3500000) { lastVisionResult.error = `image too big (${buffer.length} bytes, max ~3.5MB)`; console.log("[MFG_bot] " + lastVisionResult.error); return null; }
-  try {
-    const b64 = buffer.toString("base64");
-    const mt = mimetype && mimetype.startsWith("image/") ? mimetype : "image/jpeg";
-    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-      body: JSON.stringify({
-        model: "meta-llama/llama-4-scout-17b-16e-instruct",
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: `Describe this image in 1-2 short sentences focused on what matters for replying to it casually. ${caption ? `Caption: "${caption}"` : ""}` },
-            { type: "image_url", image_url: { url: `data:${mt};base64,${b64}` } }
-          ]
-        }],
-        max_tokens: 120
-      })
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      lastVisionResult.ok = false;
-      lastVisionResult.error = `HTTP ${resp.status}: ` + JSON.stringify(data).slice(0,300);
-      console.log("[MFG_bot] Vision error:", lastVisionResult.error);
-      return null;
+  if (!geminiKey && !groqKey) { lastVisionResult.error = "no AI key"; return null; }
+  if (!buffer || buffer.length < 100) { lastVisionResult.error = "buffer too small"; return null; }
+  const prompt = `Describe this image in 1-2 short sentences focused on what matters for replying to it casually.${caption ? ` Caption: "${caption}"` : ""}`;
+
+  // ── Gemini Vision (primary) ───────────────────────────────────────────────
+  if (geminiKey) {
+    try {
+      const b64 = buffer.toString("base64");
+      const mt  = mimetype?.startsWith("image/") ? mimetype : "image/jpeg";
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: mt, data: b64 } }] }],
+          generationConfig: { maxOutputTokens: 120, temperature: 0.4 }
+        }),
+        signal: AbortSignal.timeout(20000)
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(JSON.stringify(data).slice(0, 200));
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+      lastVisionResult.ok = true; lastVisionResult.text = text;
+      console.log("[MFG_bot] Gemini vision OK len=" + text.length);
+      return text || null;
+    } catch (e) {
+      console.log("[MFG_bot] Gemini vision error:", e.message, "— trying Groq");
     }
-    const text = data.choices?.[0]?.message?.content?.trim() || "";
-    lastVisionResult.ok = true;
-    lastVisionResult.text = text;
-    return text || null;
-  } catch (e) {
-    lastVisionResult.ok = false;
-    lastVisionResult.error = e.message;
-    console.log("[MFG_bot] Vision error:", e.message);
-    return null;
   }
+
+  // ── Groq Vision (fallback) ────────────────────────────────────────────────
+  if (groqKey) {
+    if (buffer.length > 3500000) { lastVisionResult.error = `image too big (${buffer.length}B)`; return null; }
+    try {
+      const b64 = buffer.toString("base64");
+      const mt  = mimetype?.startsWith("image/") ? mimetype : "image/jpeg";
+      const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+        body: JSON.stringify({
+          model: "meta-llama/llama-4-scout-17b-16e-instruct",
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: `data:${mt};base64,${b64}` } }] }],
+          max_tokens: 120
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(JSON.stringify(data).slice(0, 200));
+      const text = data.choices?.[0]?.message?.content?.trim() || "";
+      lastVisionResult.ok = true; lastVisionResult.text = text;
+      return text || null;
+    } catch (e) { lastVisionResult.ok = false; lastVisionResult.error = e.message; return null; }
+  }
+  return null;
 }
 
 // ─── Anti-Scam Detection ────────────────────────────────────────────────────
@@ -538,27 +552,13 @@ function isScamLikely(text) {
 
 // ─── Long-term Fact Extraction ──────────────────────────────────────────────
 async function extractFacts(jid, recentMessages) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key || !recentMessages?.length) return;
+  if (!recentMessages?.length) return;
+  if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API_KEY) return;
   try {
     const existing = contactFacts[jid]?.facts || [];
-    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [{
-          role: "system",
-          content: `Extract 0-3 NEW concrete facts about the user from these messages. Facts must be specific (names, places, jobs, relationships, plans, preferences). Return ONLY a JSON array of strings, no prose. Empty array if nothing notable. Existing facts to avoid duplicating: ${JSON.stringify(existing.slice(-10))}`
-        }, {
-          role: "user",
-          content: recentMessages.slice(-6).join("\n")
-        }],
-        max_tokens: 200, temperature: 0.3
-      })
-    });
-    const data = await resp.json();
-    const raw = data.choices?.[0]?.message?.content?.trim() || "[]";
+    const sys = `Extract 0-3 NEW concrete facts about the user from these messages. Facts must be specific (names, places, jobs, relationships, plans, preferences). Return ONLY a JSON array of strings, no prose. Empty array if nothing notable. Existing facts to avoid duplicating: ${JSON.stringify(existing.slice(-10))}`;
+    const raw = await quickAI(sys, recentMessages.slice(-6).join("\n"), 200, 0.3);
+    if (!raw) return;
     const m = raw.match(/\[[\s\S]*\]/);
     if (!m) return;
     const newFacts = JSON.parse(m[0]).filter(f => typeof f === "string" && f.length > 5);
@@ -581,8 +581,107 @@ function maybeRecordBirthday(jid, text) {
   console.log(`[MFG_bot] Birthday recorded for ${jid.slice(-15)}: ${m[3]}`);
 }
 
-// ─── Groq AI ─────────────────────────────────────────────────────────────────
+// ─── Gemini Helper ────────────────────────────────────────────────────────────
+// Central low-level call — converts OpenAI-style history to Gemini format
+async function callGemini(systemMsg, history = [], userText, maxTokens = 120, temp = 0.92) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) return null;
+  const contents = [];
+  for (const h of history) {
+    if (h.role === "system") continue;
+    contents.push({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.content }] });
+  }
+  contents.push({ role: "user", parts: [{ text: userText }] });
+  const body = { contents, generationConfig: { maxOutputTokens: maxTokens, temperature: temp, topP: 0.95 } };
+  if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg }] };
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(20000)
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(JSON.stringify(data).slice(0, 300));
+  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+}
+
+// Quick one-shot Gemini call (no history) — used by commands like .translate, .summarize etc.
+// Falls back to Groq if Gemini key not set
+async function quickAI(systemMsg, userText, maxTokens = 300, temp = 0.5) {
+  if (process.env.GEMINI_API_KEY) {
+    try { const r = await callGemini(systemMsg, [], userText, maxTokens, temp); if (r) return r; } catch (e) { console.log("[MFG_bot] quickAI Gemini err:", e.message); }
+  }
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
+        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "system", content: systemMsg }, { role: "user", content: userText }], max_tokens: maxTokens, temperature: temp })
+      });
+      const d = await resp.json(); return d.choices?.[0]?.message?.content?.trim() || null;
+    } catch (e) { console.log("[MFG_bot] quickAI Groq err:", e.message); }
+  }
+  return null;
+}
+
+// ─── Gemini AI (primary chat) ─────────────────────────────────────────────────
+async function askGemini(userText, jid) {
+  try {
+    const ownerToContact = (userData[jid]?.ownerMessages || []).slice(-25);
+    const globalSamples  = styleSamples.slice(-8);
+    const history        = (convHistory[jid] || []).slice(-10);
+
+    let styleBlock = "";
+    if (ownerToContact.length >= 2) {
+      const allLower = ownerToContact.every(m => m === m.toLowerCase());
+      const noPunct  = ownerToContact.filter(m => /[.!?]$/.test(m.trim())).length < ownerToContact.length * 0.3;
+      const avgLen   = Math.round(ownerToContact.reduce((a,m) => a + m.split(" ").length, 0) / ownerToContact.length);
+      const hasEmoji = ownerToContact.some(m => /\p{Emoji}/u.test(m));
+      styleBlock = `\n\n[STYLE RULES DERIVED FROM OWNER'S ACTUAL MESSAGES TO THIS PERSON]:\n- Capitalisation: ${allLower ? "ALL LOWERCASE — never capitalise anything" : "mixed — follow their pattern"}\n- Punctuation: ${noPunct ? "NO ending punctuation — no full stops, no exclamation marks unless they use them" : "uses punctuation — follow their pattern"}\n- Average reply length: ${avgLen} words — MATCH THIS LENGTH\n- Emojis: ${hasEmoji ? "uses emojis — include them naturally" : "no emojis — don't use any"}\n\n[EXACT MESSAGES OWNER SENT THIS PERSON — CLONE THIS STYLE PERFECTLY]:\n${ownerToContact.map(m => `"${m}"`).join("\n")}`;
+    } else if (globalSamples.length > 0) {
+      styleBlock = `\n\n[OWNER'S GENERAL STYLE — MIRROR THIS]:\n${globalSamples.map(m => `"${m}"`).join("\n")}`;
+    } else {
+      styleBlock = `\n\n[NO STYLE DATA YET]: Be extremely casual. Short. Lowercase. No punctuation. Nigerian vibe.`;
+    }
+
+    let factsBlock = "";
+    const facts = contactFacts[jid]?.facts || [];
+    if (facts.length) factsBlock = `\n\n[LONG-TERM MEMORY — THINGS YOU KNOW ABOUT THIS PERSON]:\n${facts.slice(-15).map(f => `- ${f}`).join("\n")}`;
+
+    let personaBlock = "";
+    const persona = contactPersonas[jid];
+    if (persona) {
+      const sweetNamesStr = (persona.sweetNames || []).join(", ");
+      personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY]:\nYou are texting ${persona.name}. Relationship: ${persona.relationship}. Tone: ${persona.tone || "warm, loving, genuine Nigerian"}.${sweetNamesStr ? ` Pet names: ${sweetNamesStr}.` : ""} Context: ${persona.context}\nNEVER say you are an AI. Stay 100% in character.`;
+    }
+
+    const systemMsg = settings.systemPrompt + personaBlock + styleBlock + factsBlock + moodPrompt();
+    let reply = await callGemini(systemMsg, history, userText, 120, 0.92);
+
+    if (!reply) {
+      const samples = ownerToContact.slice(-15);
+      const softSys = `You are texting AS the owner. Reply in their style — short, casual, lowercase, Nigerian pidgin/English mix. Always respond with at least one short word.${samples.length ? "\n\nExamples:\n" + samples.map(m => `"${m}"`).join("\n") : ""}`;
+      reply = await callGemini(softSys, [], userText, 80, 0.85);
+    }
+    if (!reply) return null;
+
+    if (!convHistory[jid]) convHistory[jid] = [];
+    convHistory[jid].push({ role: "user", content: userText });
+    convHistory[jid].push({ role: "assistant", content: reply });
+    if (convHistory[jid].length > 20) convHistory[jid] = convHistory[jid].slice(-20);
+    setImmediate(() => writeJSON("conv_history.json", convHistory));
+    console.log(`[MFG_bot] Gemini reply len=${reply.length}`);
+    return reply;
+  } catch (e) {
+    console.error("[MFG_bot] Gemini chat error:", e.message);
+    return null;
+  }
+}
+
+// ─── Groq AI (fallback when no GEMINI_API_KEY) ───────────────────────────────
 async function askGroq(userText, jid) {
+  // Prefer Gemini when key is available
+  if (process.env.GEMINI_API_KEY) {
+    const reply = await askGemini(userText, jid);
+    if (reply) return reply;
+  }
   const key = process.env.GROQ_API_KEY;
   if (!key) return null;
   try {
@@ -691,20 +790,9 @@ ${sweetNamesStr ? `- Pet names to use naturally: ${sweetNamesStr}` : ""}
 // Soft retry — fallback if main prompt returns nothing
 async function retryWithSoftPrompt(userText, jid) {
   try {
-    const key = process.env.GROQ_API_KEY;
     const samples = (userData[jid]?.ownerMessages || []).slice(-15);
     const sys = `You are texting AS the owner. Reply in their style — short, casual, lowercase, Nigerian pidgin/English mix. Be playful and slightly cheeky but never refuse to reply. Always respond with at least one short word.${samples.length ? "\n\nExamples of how the owner texts:\n" + samples.map(m => `"${m}"`).join("\n") : ""}`;
-    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [{ role: "system", content: sys }, { role: "user", content: userText }],
-        max_tokens: 80, temperature: 0.85
-      })
-    });
-    const d = await resp.json();
-    const r = d.choices?.[0]?.message?.content?.trim();
+    const r = await quickAI(sys, userText, 80, 0.85);
     console.log(`[MFG_bot] Soft retry replyLen=${r?.length || 0}`);
     return r || null;
   } catch (e) { console.error("[MFG_bot] Soft retry err:", e.message); return null; }
@@ -2559,7 +2647,7 @@ async function connectToWhatsApp() {
           continue;
         }
 
-        // ── AI TRANSLATE (Groq) ───────────────────────────────────────
+        // ── AI TRANSLATE ──────────────────────────────────────────────
         if (cmd === "translate" || cmd === "tr") {
           const lang = args[0];
           const ctx = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
@@ -2568,21 +2656,14 @@ async function connectToWhatsApp() {
           if (!lang || !toTranslate) { await send("🌐 *Translate*\n\n.translate <language> <text>\nor reply to a message: .translate <language>\n\nexamples:\n.translate yoruba hello how are you\n.translate french good morning\n.translate pidgin I want to eat food\n.translate english e don do sha\n.translate spanish I miss you"); continue; }
           await send("🌐 translating...");
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "You are a translator. Translate the user's text to the requested language. Return ONLY the translation — no explanation, no quotes, no labels." },
-                { role: "user", content: `Translate to ${lang}: ${toTranslate}` }
-              ], max_tokens: 500, temperature: 0.3 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("You are a translator. Translate the user's text to the requested language. Return ONLY the translation — no explanation, no quotes, no labels.", `Translate to ${lang}: ${toTranslate}`, 500, 0.3);
             if (!result) throw new Error("empty");
             await send(`🌐 *${lang.charAt(0).toUpperCase()+lang.slice(1)}:*\n${result}`);
           } catch (e) { await send("translation failed — try again later"); }
           continue;
         }
 
-        // ── AI SUMMARIZE (Groq) ───────────────────────────────────────
+        // ── AI SUMMARIZE ──────────────────────────────────────────────
         if (cmd === "summarize" || cmd === "sum" || cmd === "tldr") {
           const ctx = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
           const quoted = ctx?.conversation || ctx?.extendedTextMessage?.text || "";
@@ -2590,113 +2671,71 @@ async function connectToWhatsApp() {
           if (!toSum || toSum.length < 20) { await send("📋 *Summarize*\n\nreply to any long message with .summarize\nor .summarize <paste long text>\n\nalso: .sum or .tldr"); continue; }
           await send("🧠 summarizing...");
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "Summarize in 3 clear, short bullet points. No preamble. Start bullets with •" },
-                { role: "user", content: toSum }
-              ], max_tokens: 300, temperature: 0.3 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("Summarize in 3 clear, short bullet points. No preamble. Start bullets with •", toSum, 300, 0.3);
             if (!result) throw new Error("empty");
             await send(`📋 *Summary:*\n\n${result}`);
           } catch (e) { await send("summarize failed — try again"); }
           continue;
         }
 
-        // ── AI GRAMMAR FIX (Groq) ─────────────────────────────────────
+        // ── AI GRAMMAR FIX ────────────────────────────────────────────
         if (cmd === "fix" || cmd === "grammar" || cmd === "correct") {
           const ctx = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
           const quoted = ctx?.conversation || ctx?.extendedTextMessage?.text || "";
           const toFix = args.join(" ") || quoted;
           if (!toFix) { await send("reply to a message with .fix\nor .fix <text with errors>"); continue; }
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "Fix the grammar and spelling. Keep the same meaning and tone. Respond ONLY with the corrected text — nothing else." },
-                { role: "user", content: toFix }
-              ], max_tokens: 500, temperature: 0.2 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("Fix the grammar and spelling. Keep the same meaning and tone. Respond ONLY with the corrected text — nothing else.", toFix, 500, 0.2);
             if (!result) throw new Error("empty");
             await send(`✅ *Fixed:*\n\n${result}`);
           } catch (e) { await send("grammar fix failed — try again"); }
           continue;
         }
 
-        // ── AI EXPLAIN (Groq) ─────────────────────────────────────────
+        // ── AI EXPLAIN ────────────────────────────────────────────────
         if (cmd === "explain" || cmd === "eli5") {
           const topic = args.join(" ");
           if (!topic) { await send(".explain <anything>\nexamples:\n.explain how wifi works\n.explain blockchain in simple terms\n.explain why the sky is blue\n.explain what is inflation"); continue; }
           await send("🧠 breaking it down...");
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "Explain simply like talking to a smart friend over text. Under 120 words. No jargon. Maybe slightly fun. No intro like 'great question'." },
-                { role: "user", content: `Explain: ${topic}` }
-              ], max_tokens: 250, temperature: 0.6 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("Explain simply like talking to a smart friend over text. Under 120 words. No jargon. Maybe slightly fun. No intro like 'great question'.", `Explain: ${topic}`, 250, 0.6);
             if (!result) throw new Error("empty");
             await send(`💡 *${topic}*\n\n${result}`);
           } catch (e) { await send("explain failed — try again"); }
           continue;
         }
 
-        // ── AI ADVICE (Groq) ──────────────────────────────────────────
+        // ── AI ADVICE ─────────────────────────────────────────────────
         if (cmd === "advice" || cmd === "advise") {
           const problem = args.join(" ");
           if (!problem) { await send(".advice <your situation>\nexamples:\n.advice my boss is stressing me out\n.advice should i invest in crypto now\n.advice how to save money as a student"); continue; }
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "Give honest, practical advice like a wise Nigerian big bro who keeps it real. Short, direct, actionable. No fluff, no lecture." },
-                { role: "user", content: problem }
-              ], max_tokens: 300, temperature: 0.7 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("Give honest, practical advice like a wise Nigerian big bro who keeps it real. Short, direct, actionable. No fluff, no lecture.", problem, 300, 0.7);
             if (!result) throw new Error("empty");
             await send(`🧠 *Real talk:*\n\n${result}`);
           } catch (e) { await send("advice failed — try again"); }
           continue;
         }
 
-        // ── AI STORY (Groq) ───────────────────────────────────────────
+        // ── AI STORY ──────────────────────────────────────────────────
         if (cmd === "story") {
           const topic = args.join(" ");
           if (!topic) { await send(".story <topic or characters>\nexamples:\n.story a broke student who finds a briefcase\n.story two friends arguing over jollof rice\n.story a girl who discovers she has powers"); continue; }
           await send("✍️ writing...");
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "Write a gripping micro-story in exactly 5 sentences. Nigerian flavor welcome. End with a twist or punchline. Make it unforgettable." },
-                { role: "user", content: `Story about: ${topic}` }
-              ], max_tokens: 300, temperature: 0.95 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("Write a gripping micro-story in exactly 5 sentences. Nigerian flavor welcome. End with a twist or punchline. Make it unforgettable.", `Story about: ${topic}`, 300, 0.95);
             if (!result) throw new Error("empty");
             await send(`📖 *${topic}*\n\n${result}`);
           } catch (e) { await send("story gen failed — try again"); }
           continue;
         }
 
-        // ── AI GIFT IDEAS (Groq) ──────────────────────────────────────
+        // ── AI GIFT IDEAS ─────────────────────────────────────────────
         if (cmd === "gift" || cmd === "gifts") {
           const who = args.join(" ");
           if (!who) { await send(".gift <who/occasion>\nexamples:\n.gift girlfriend birthday\n.gift dad who likes football\n.gift colleague going abroad\n.gift bestie 21st birthday"); continue; }
           try {
-            const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-              method: "POST", headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [
-                { role: "system", content: "Give 5 creative, thoughtful gift ideas relevant to Nigeria/Africa where possible. Mix free, affordable and premium options. Be practical and specific. Number them 1-5." },
-                { role: "user", content: `Gift ideas for: ${who}` }
-              ], max_tokens: 400, temperature: 0.8 })
-            });
-            const j = await r.json(); const result = j.choices?.[0]?.message?.content?.trim();
+            const result = await quickAI("Give 5 creative, thoughtful gift ideas relevant to Nigeria/Africa where possible. Mix free, affordable and premium options. Be practical and specific. Number them 1-5.", `Gift ideas for: ${who}`, 400, 0.8);
             if (!result) throw new Error("empty");
             await send(`🎁 *Gift Ideas — ${who}*\n\n${result}`);
           } catch (e) { await send("gift ideas failed — try again"); }
@@ -3478,31 +3517,42 @@ app.get("/api/recent", (req, res) => res.json({
   }
 }));
 
-// Diagnostic — tests if Groq actually works on this backend
+// Diagnostic — tests AI providers (Gemini primary, Groq fallback)
 app.get("/api/diag", async (req, res) => {
   const out = {
+    aiProvider: process.env.GEMINI_API_KEY ? "gemini-2.0-flash" : "groq-llama-3.3-70b (fallback)",
+    hasGeminiKey: !!process.env.GEMINI_API_KEY,
     hasGroqKey: !!process.env.GROQ_API_KEY,
-    groqKeyLen: (process.env.GROQ_API_KEY || "").length,
     aiEnabled: settings.aiEnabled,
     connected: isConnected,
     aiPausedJids: [...aiPaused.keys()],
-    groqTest: null,
-    groqError: null
+    geminiTest: null, geminiError: null,
+    groqTest: null, groqError: null
   };
-  if (!process.env.GROQ_API_KEY) {
-    out.groqError = "GROQ_API_KEY env var is missing on this Railway backend";
-    return res.json(out);
+  // Test Gemini
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const r = await callGemini("You are a helpful assistant.", [], "say hi in one word", 10, 0.5);
+      if (r) out.geminiTest = r; else out.geminiError = "empty response";
+    } catch (e) { out.geminiError = e.message; }
+  } else {
+    out.geminiError = "GEMINI_API_KEY not set";
   }
-  try {
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: "say hi" }], max_tokens: 10 })
-    });
-    const j = await r.json();
-    if (j.error) out.groqError = j.error.message || JSON.stringify(j.error);
-    else out.groqTest = j.choices?.[0]?.message?.content || "empty";
-  } catch (e) { out.groqError = e.message; }
+  // Test Groq
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: "say hi" }], max_tokens: 10 })
+      });
+      const j = await r.json();
+      if (j.error) out.groqError = j.error.message || JSON.stringify(j.error);
+      else out.groqTest = j.choices?.[0]?.message?.content || "empty";
+    } catch (e) { out.groqError = e.message; }
+  } else {
+    out.groqError = "GROQ_API_KEY not set";
+  }
   res.json(out);
 });
 
