@@ -3,6 +3,7 @@ import Dashboard from './components/Dashboard'
 import BotConsole from './components/BotConsole'
 import GuestCallPage from './pages/GuestCallPage'
 import VoiceChangerPage from './pages/VoiceChangerPage'
+import VoiceStudioPage from './pages/VoiceStudioPage'
 import './index.css'
 
 const DEFAULT_BOTS = [
@@ -22,6 +23,11 @@ export default function App() {
   // Guest call page — render standalone, no auth needed
   if (window.location.pathname.startsWith('/guest/')) {
     return <GuestCallPage />
+  }
+
+  // Voice Studio page
+  if (window.location.pathname === '/voice-studio') {
+    return <VoiceStudioPage />
   }
 
   // Standalone voice changer page
