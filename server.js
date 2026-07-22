@@ -44,8 +44,8 @@ app.use((req, res, next) => {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
   } else if (req.path.startsWith('/assets/')) {
-    // Hashed asset filenames — safe to cache for 1 year
-    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    // Fixed filenames (no content hash) — must revalidate on every load
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   }
   next();
 });
