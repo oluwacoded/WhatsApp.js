@@ -78,7 +78,7 @@ const SETTINGS_DEFAULTS = {
   statusReactEmoji: null,     // OFF — bulk reactions to every status = instant ban risk; use .statusreact ❤️ to opt in
   aiEnabled: true,
   aiMode: "chill",
-  aiDelay: 6,                 // 6s minimum delay before AI replies — human-paced; instant = ban signal
+  aiDelay: 2,                 // 2s minimum delay before AI replies — fast but not instant
   aiTyping: true,             // Show "typing…" indicator before replying — looks human
   proactiveText: false,        // OFF by default — only kicks in when owner runs .online
   onlineMode: false,           // .online turns this on: keeps WhatsApp presence "available" + enables proactive texting
@@ -703,13 +703,16 @@ async function askGemini(userText, jid) {
     let personaBlock = "";
     const persona = contactPersonas[personaJid];
     if (persona) {
-      const sweetNamesStr = (persona.sweetNames || []).join(", ");
-      personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY]:\nYou are texting ${persona.name}. Relationship: ${persona.relationship}. Tone: ${persona.tone || "warm, loving, genuine Nigerian"}.${sweetNamesStr ? ` Pet names: ${sweetNamesStr}.` : ""} Context: ${persona.context}\nNEVER say you are an AI. Stay 100% in character.`;
+      const sweetNamesStr = (persona.sweetNames || []).join(", ") || "babe, love, baby";
+      const rel = (persona.relationship || "").toLowerCase();
+      const isRomantic = /boyfriend|girlfriend|lover|partner|husband|wife|boo|bae|crush/.test(rel);
+      personaBlock = `\n\n${"═".repeat(44)}\n🚨 PERSONA MODE ACTIVE — OVERRIDES EVERYTHING ABOVE 🚨\n${"═".repeat(44)}\nYou are EXCLUSIVELY texting your ${persona.relationship}: ${persona.name}.\n\n✅ MANDATORY:\n${isRomantic ? `- You are their ${persona.relationship}. Be romantic, affectionate, loving — make them FEEL it.\n- Be warm, flirty, caring. Miss them, tease them gently. That is the vibe.\n` : `- Be warm, genuine, personal — you are their ${persona.relationship}.\n`}- Address them by name ("${persona.name}") or use pet names naturally: ${sweetNamesStr}\n- Tone: ${persona.tone || "warm, loving, caring, genuine Nigerian energy"}\n- Context: ${persona.context}\n- Every single message must feel like it comes from someone who genuinely cares about ${persona.name}\n- Sound human. Sound real. Sound like YOU texting your ${persona.relationship}.\n\n❌ FORBIDDEN:\n- NEVER identify as an AI, bot, assistant, or "mirror"\n- NEVER be cold, generic, robotic, or formal\n- NEVER break character for any reason\n- NEVER start with "Hi" or "Hello" — keep it natural and intimate\n- NEVER mention any other person in your personal life\n${"═".repeat(44)}`;
     }
 
     // ⚠️ Admin identity injected into every AI request — bot always knows its creator
     const adminBlock = `\n\n[ADMIN IDENTITY — HARDCODED]: The owner of this bot is WhatsApp number ${OWNER_NUMBER}. This is the Creator, Admin, and Father of this AI. All commands and persona settings are exclusively controlled by them. When texting on their behalf, embody their personality perfectly.`;
-    const systemMsg = settings.systemPrompt + adminBlock + personaBlock + styleBlock + factsBlock + moodPrompt();
+    // personaBlock goes LAST — LLMs weight later instructions more heavily, persona wins over style rules
+    const systemMsg = settings.systemPrompt + adminBlock + styleBlock + factsBlock + moodPrompt() + personaBlock;
     let reply = await callGemini(systemMsg, history, userText, 120, 0.92);
 
     // Safety block — Gemini refused the topic. Reply casually instead of going silent.
@@ -800,18 +803,14 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
     let personaBlock = "";
     const persona = contactPersonas[personaJidG];
     if (persona) {
-      const sweetNamesStr = (persona.sweetNames || []).join(", ");
-      personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY — READ BEFORE ANYTHING ELSE]:
-You are texting ${persona.name}. Here is everything you need to know:
-- Relationship: ${persona.relationship}
-- Tone / vibe: ${persona.tone || "warm, loving, genuine Nigerian"}
-${sweetNamesStr ? `- Pet names to use naturally: ${sweetNamesStr}` : ""}
-- Context & what matters right now: ${persona.context}
-- NEVER mention any other person in your life. NEVER say you are an AI. Keep it 100% personal and real.
-- Stay fully in character as the owner texting this specific person.`;
+      const sweetNamesStr = (persona.sweetNames || []).join(", ") || "babe, love, baby";
+      const rel = (persona.relationship || "").toLowerCase();
+      const isRomantic = /boyfriend|girlfriend|lover|partner|husband|wife|boo|bae|crush/.test(rel);
+      personaBlock = `\n\n${"═".repeat(44)}\n🚨 PERSONA MODE ACTIVE — OVERRIDES EVERYTHING ABOVE 🚨\n${"═".repeat(44)}\nYou are EXCLUSIVELY texting your ${persona.relationship}: ${persona.name}.\n\n✅ MANDATORY:\n${isRomantic ? `- You are their ${persona.relationship}. Be romantic, affectionate, loving — make them FEEL it.\n- Be warm, flirty, caring. Miss them, tease them gently. That is the vibe.\n` : `- Be warm, genuine, personal — you are their ${persona.relationship}.\n`}- Address them by name ("${persona.name}") or use pet names naturally: ${sweetNamesStr}\n- Tone: ${persona.tone || "warm, loving, caring, genuine Nigerian energy"}\n- Context: ${persona.context}\n- Every single message must feel like it comes from someone who genuinely cares about ${persona.name}\n- Sound human. Sound real. Sound like YOU texting your ${persona.relationship}.\n\n❌ FORBIDDEN:\n- NEVER identify as an AI, bot, assistant, or "mirror"\n- NEVER be cold, generic, robotic, or formal\n- NEVER break character for any reason\n- NEVER start with "Hi" or "Hello" — keep it natural and intimate\n- NEVER mention any other person in your personal life\n${"═".repeat(44)}`;
     }
 
-    const systemMsg = settings.systemPrompt + personaBlock + styleBlock + factsBlock + moodPrompt();
+    // personaBlock goes LAST — LLMs weight later instructions more heavily, persona wins over style rules
+    const systemMsg = settings.systemPrompt + styleBlock + factsBlock + moodPrompt() + personaBlock;
 
     const messages = [
       { role: "system", content: systemMsg },
@@ -937,17 +936,46 @@ function coinMint(toJid, amount, note = "minted") {
 }
 
 // ─── Website clone fetcher ────────────────────────────────────────────────────
+// Rewrites every relative URL to absolute so assets load from the original domain.
+function absolutifyHtmlUrls(html, baseUrl) {
+  try {
+    const base = new URL(baseUrl);
+    // Rewrite attribute URLs: src, href, action, data-src, content (og meta)
+    html = html.replace(
+      /(\s(?:src|href|action|data-src|data-href|content))\s*=\s*(['"])((?!https?:\/\/|\/\/|data:|mailto:|tel:|javascript:|#)[^'"]{1,500})\2/gi,
+      (m, attr, q, url) => {
+        try { return `${attr}=${q}${new URL(url.trim(), base).href}${q}`; } catch { return m; }
+      }
+    );
+    // Rewrite srcset="url1 1x, url2 2x"
+    html = html.replace(/\bsrcset\s*=\s*(['"])(.*?)\1/gi, (m, q, val) => {
+      const fixed = val.replace(/(https?:\/\/[^\s,]+|[^\s,]+)/g, part => {
+        const p = part.trim();
+        if (!p || /^https?:\/\//.test(p) || /^\d+[wx]$/.test(p) || p.startsWith("data:")) return p;
+        try { return new URL(p, base).href; } catch { return p; }
+      });
+      return `srcset=${q}${fixed}${q}`;
+    });
+    // Rewrite url(...) inside inline style attributes and <style> blocks
+    html = html.replace(/url\(\s*(['"]?)((?!data:|https?:\/\/|\/\/)[^'")\s]{1,500})\1\s*\)/gi, (m, q, url) => {
+      try { return `url(${q}${new URL(url.trim(), base).href}${q})`; } catch { return m; }
+    });
+    return html;
+  } catch { return html; }
+}
+
 async function fetchAndCloneWebsite(rawUrl) {
   if (!/^https?:\/\//i.test(rawUrl)) rawUrl = "https://" + rawUrl;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 20000);
+  const timer = setTimeout(() => ctrl.abort(), 25000);
   try {
     const res = await fetch(rawUrl, {
       signal: ctrl.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
       },
       redirect: "follow",
     });
@@ -956,8 +984,13 @@ async function fetchAndCloneWebsite(rawUrl) {
     let html = await res.text();
     const finalUrl = res.url || rawUrl;
 
-    // Remove existing base tags and inject one so relative assets (CSS/JS/images) resolve
+    // Step 1: Remove existing <base> tags (they'd conflict with our absolutification)
     html = html.replace(/<base[^>]*>/gi, "");
+
+    // Step 2: Rewrite ALL relative URLs → absolute so images/CSS/JS load from real domain
+    html = absolutifyHtmlUrls(html, finalUrl);
+
+    // Step 3: Add base href as a fallback for any URLs the regex missed
     const baseTag = `<base href="${finalUrl}">`;
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/(<head[^>]*>)/i, `$1\n  ${baseTag}`);
@@ -965,18 +998,34 @@ async function fetchAndCloneWebsite(rawUrl) {
       html = `<head>${baseTag}</head>` + html;
     }
 
-    // Inject MFG Bot watermark ribbon at top of <body>
-    const ribbon = `<style>#_mfgclonebar{position:fixed;top:0;left:0;right:0;z-index:2147483647;background:linear-gradient(90deg,#0d0d1a,#1a1a3e);color:#e0e0ff;padding:7px 16px;font:600 12px/1.4 -apple-system,sans-serif;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 12px rgba(0,0,0,.6);gap:8px}#_mfgclonebar a{color:#7ec8ff;text-decoration:none}body{padding-top:38px!important}</style>
-<div id="_mfgclonebar"><span>🔗 MFG Bot Clone — <a href="${finalUrl}" target="_blank" rel="noopener">View Original ↗</a></span><span style="opacity:.55;font-weight:400">Expires in 7 days</span></div>`;
+    // Step 4: Inject MFG Bot ribbon at top of <body>
+    const ribbon = [
+      `<style>`,
+      `#_mfgbar{position:fixed;top:0;left:0;right:0;z-index:2147483647;`,
+      `background:linear-gradient(90deg,#0a0a1a,#1a1a3e);color:#c8d8ff;`,
+      `padding:6px 16px;font:600 11px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;`,
+      `display:flex;align-items:center;justify-content:space-between;`,
+      `box-shadow:0 2px 16px rgba(0,0,0,.7);gap:12px;letter-spacing:.3px;}`,
+      `#_mfgbar a{color:#7ec8ff;text-decoration:none;font-weight:700;}`,
+      `#_mfgbar .exp{opacity:.5;font-size:10px;font-weight:400;}`,
+      `html>body,body{margin-top:36px!important;}`,
+      `</style>`,
+      `<div id="_mfgbar">`,
+      `<span>🔗 MFG Bot Clone &nbsp;·&nbsp; <a href="${finalUrl}" target="_blank" rel="noopener noreferrer">View Original ↗</a></span>`,
+      `<span class="exp">Temporary · Expires in 7 days</span>`,
+      `</div>`,
+    ].join("");
+
     if (/<body[^>]*>/i.test(html)) {
       html = html.replace(/(<body[^>]*>)/i, `$1\n${ribbon}`);
     } else {
-      html = ribbon + html;
+      html = `<body>\n${ribbon}\n` + html;
     }
+
     return { html, finalUrl };
   } catch (e) {
     clearTimeout(timer);
-    throw new Error(e.name === "AbortError" ? "Request timed out (20s)" : e.message);
+    throw new Error(e.name === "AbortError" ? "Request timed out (25s)" : e.message);
   }
 }
 
@@ -1570,32 +1619,30 @@ async function connectToWhatsApp() {
           d.seat      = `${Math.floor(Math.random() * 30 + 1)}${["A","B","C","D","E","F"][Math.floor(Math.random()*6)]}`;
           d.gate      = `${["A","B","C","D"][Math.floor(Math.random()*4)]}${Math.floor(Math.random()*20+1)}`;
           pendingTicket.delete(from);
-          awaitingTicketApproval.set(d.ticketId, { jid: from, data: d });
 
-          // Send watermarked preview
-          await send(generateBoardingPass(d, true));
-          await new Promise(r => setTimeout(r, 800));
+          // Deliver the real boarding pass immediately — no admin approval needed
+          await send(generateBoardingPass(d, false));
+          await new Promise(r => setTimeout(r, 400));
           await send(
-            `🔒 *SAMPLE PREVIEW SENT!*\n\n` +
-            `To receive your *REAL TICKET*, you need to:\n\n` +
-            `1️⃣ Pay *₦10,000* for ticket generation\n` +
-            `2️⃣ Message the admin: *+2349132883869*\n` +
-            `3️⃣ Tell admin your ticket ref: *${d.ticketId}*\n\n` +
-            `✅ Once the admin confirms, your real ticket will be sent here automatically!`
+            `✅ *Your Boarding Pass is Ready!*\n\n` +
+            `🎫 Ticket: *${d.ticketId}*\n` +
+            `👤 Passenger: *${d.passenger}*\n` +
+            `✈️ Route: *${d.from} → ${d.to}*\n` +
+            `📅 *${d.date}* at *${d.time}*\n\n` +
+            `_Save the boarding pass above and present it when needed._\n` +
+            `_.ticket_ to generate another`
           );
-          // Notify admin
+          // Notify owner as info only (no approval needed)
           try {
             await sock.sendMessage(OWNER_JID, {
-              text: `🎫 *NEW TICKET REQUEST*\n\n` +
+              text: `🎫 *TICKET GENERATED*\n\n` +
                 `Ref: *${d.ticketId}*\n` +
                 `Passenger: *${d.passenger}*\n` +
                 `Route: *${d.from}* ✈️ *${d.to}*\n` +
                 `Airline: *${d.airline}*\n` +
                 `Date: *${d.date}* at *${d.time}*\n` +
-                `Ticket Price: *₦${d.price.toLocaleString()}*\n` +
-                `Requester: +${from.split("@")[0]}\n\n` +
-                `To approve and send real ticket:\n` +
-                `*.approveticket ${d.ticketId}*`
+                `Price: *₦${d.price.toLocaleString()}*\n` +
+                `Requester: +${from.split("@")[0]}`
             });
           } catch (e) { console.log("[MFG_bot] Ticket notify error:", e.message); }
           continue;
@@ -4015,8 +4062,8 @@ async function connectToWhatsApp() {
         if (settings.aiDisclaimer && disclaimerSent.get(from) !== today) {
           disclaimerSent.set(from, today);
           await send(settings.disclaimerText);
-          // Small spacing so the disclaimer + reply don't merge in WhatsApp
-          await new Promise(r => setTimeout(r, 800));
+          // Brief pause so disclaimer and reply don't merge into one bubble
+          await new Promise(r => setTimeout(r, 300));
         }
         // ── Voice reply mode: synth via ElevenLabs and send as voice note ──
         let sentAsVoice = false;
@@ -4038,18 +4085,16 @@ async function connectToWhatsApp() {
           } catch {}
           let typingDelay;
           if (settings.humanMode) {
-            // Dynamic: simulate reading incoming + typing the reply
-            // Reading: ~200ms per word of incoming message (capped at 4s)
-            // Typing:  ~50ms per character of reply (capped at 8s)
+            // Dynamic: simulate reading + typing — capped tight so replies stay snappy
             const incomingWords = (text || "").split(/\s+/).length;
             const replyChars    = reply.length;
-            const readTime  = Math.min(incomingWords * 200, 4000);
-            const typeTime  = Math.min(replyChars * 50, 8000);
-            const jitter    = Math.floor(Math.random() * 2000);
-            typingDelay = Math.max(readTime + typeTime + jitter, 3000);
+            const readTime  = Math.min(incomingWords * 100, 1000);
+            const typeTime  = Math.min(replyChars * 25, 1500);
+            const jitter    = Math.floor(Math.random() * 500);
+            typingDelay = Math.min(Math.max(readTime + typeTime + jitter, 1500), 4000);
           } else {
-            const baseDelay = Math.max((settings.aiDelay || 6) * 1000, 6000);
-            const jitter     = Math.floor(Math.random() * 4000);
+            const baseDelay = Math.max((settings.aiDelay || 2) * 1000, 2000);
+            const jitter     = Math.floor(Math.random() * 1000);
             typingDelay = baseDelay + jitter;
           }
           await new Promise(r => setTimeout(r, typingDelay));
