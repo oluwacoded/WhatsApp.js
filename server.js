@@ -3385,6 +3385,9 @@ async function connectToWhatsApp() {
             `🖼 images — i can see them & reply\n` +
             `🌦 *.weather <city>* — current weather\n` +
             `📖 *.define <word>* — dictionary lookup\n` +
+            `🔗 *.clone <url>* — clone any website, get 7-day link\n` +
+            `🪙 *.coin send <num> <amt>* — send MFGC coins\n` +
+            `✈️ *.ticket* — generate a flight boarding pass\n` +
             `🎲 *.joke .fact .quote .truth .dare .8ball*\n` +
             `🧮 *.calc .tip .bmi .password .uuid*\n` +
             `📝 *.note .todo .save* — personal notes\n` +
@@ -3728,7 +3731,7 @@ async function connectToWhatsApp() {
         if (cmd === "menu" || cmd === "help" || cmd === "list" || cmd === "commands" || cmd === "command" || cmd === "work" || cmd === "teddy" || cmd === "allcmd") {
           const p1 = [
             `┌─────────────────────────┐`,
-            `│   🤖 *MFG_BOT v3.0*       │`,
+            `│   🤖 *MFG_BOT v3.1*       │`,
             `│   Powered by Gemini AI  │`,
             `└─────────────────────────┘`,
             ``,
@@ -3769,6 +3772,28 @@ async function connectToWhatsApp() {
             `› .crush <name>  — sweet message`,
             `› .pray  — morning / evening blessing`,
             ``,
+            `*🔗 WEBSITE CLONER*`,
+            `› .clone <url>  — clone any site, get 7-day link`,
+            `› .clones  — list your active clones`,
+            `› .clonedel <id>  — remove a clone early`,
+            ``,
+            `*🪙 MFGC COIN*`,
+            `› .coin balance [num]  — check balance`,
+            `› .coin send <num> <amt>  — transfer coins`,
+            `› .coin wallet set <0x..>  — link Trust Wallet`,
+            `› .coin history  — your transactions`,
+            `› .coin top  — rich list leaderboard`,
+            `› .coin supply  — total supply stats`,
+            `› .coin info  — BEP-20 deploy guide`,
+            `› .mint <num> <amt>  — admin: issue coins`,
+            `› .balance  — quick balance check`,
+            ``,
+            `*✈️ FLIGHT TICKET*`,
+            `› .ticket  — generate boarding pass (7-step wizard)`,
+            `› .ticketcancel  — cancel active ticket wizard`,
+            `› .approveticket <ID>  — admin: approve & send real ticket`,
+            `› .ticketpending  — admin: list pending approvals`,
+            ``,
             `_type .menu2 for Games, Groups & Controls_`
           ].join("\n");
 
@@ -3790,6 +3815,8 @@ async function connectToWhatsApp() {
             `› .joke | .fact | .quote | .fortune`,
             `› .slot | .flip | .roll  — luck games`,
             `› .pickup  — pickup line`,
+            `› .confetti | .celebrate  — 🎉 animations`,
+            `› .fireworks  — 🎆 fireworks effect`,
             ``,
             `*📝 TEXT TOOLS*`,
             `› .upper | .lower | .reverse | .mock`,
@@ -3807,6 +3834,7 @@ async function connectToWhatsApp() {
             `› .transcribe on|off | .vision on|off`,
             `› .mood on|off | .scam on|off`,
             `› .takeover on|off|min <N>`,
+            `› .humanmode on|off  — dynamic typing delay`,
             `› .aiat <num> on|off|list`,
             `› .vip add|remove|list`,
             `› .autorule add <trigger>|<reply>`,
@@ -3826,7 +3854,10 @@ async function connectToWhatsApp() {
             `› .intel <num>  — full contact report`,
             `› .topchats | .digest | .react <emoji>`,
             `› .fakecall | .fc  — fake call room`,
-            `› .bot | .stats | .ping | .uptime`
+            `› .bot | .stats | .ping | .uptime`,
+            `› .clone <url>  — clone & host any website`,
+            `› .mint <num> <amt>  — issue MFGC coins`,
+            `› .approveticket <ID>  — approve flight ticket`
           ].join("\n");
 
           await send(p1);
@@ -3836,7 +3867,6 @@ async function connectToWhatsApp() {
         }
 
         if (cmd === "menu2") {
-          // handled above but let's make menu2 jump straight to part 2
           const p2 = [
             `┌─────────────────────────┐`,
             `│   🎮 *MFG_BOT — PART 2*   │`,
@@ -3849,17 +3879,35 @@ async function connectToWhatsApp() {
             `› .rate <name> | .ship <a> <b> | .match <a> vs <b>`,
             `› .joke | .fact | .quote | .fortune | .pickup`,
             `› .slot | .flip | .roll`,
+            `› .confetti | .celebrate | .fireworks  — 🎉🎆`,
             ``,
             `*📝 TEXT TOOLS*`,
             `› .upper | .lower | .reverse | .mock | .aesthetic | .leet`,
             `› .caesar <N> <text> | .binary | .hex | .base64`,
             `› .count <text> | .password <len> | .uuid`,
             ``,
+            `*🔗 WEBSITE CLONER*`,
+            `› .clone <url>  — clone any website (7-day link)`,
+            `› .clones  — list active clones`,
+            `› .clonedel <id>  — delete a clone`,
+            ``,
+            `*🪙 MFGC COIN*`,
+            `› .coin balance | .coin send <num> <amt>`,
+            `› .coin wallet set <0x..> | .coin history`,
+            `› .coin top | .coin supply | .coin info`,
+            `› .mint <num> <amt>  — admin: issue coins`,
+            ``,
+            `*✈️ FLIGHT TICKET*`,
+            `› .ticket  — boarding pass wizard`,
+            `› .ticketcancel | .ticketpending`,
+            `› .approveticket <ID>  — admin only`,
+            ``,
             `*⚙️ BOT CONTROLS*`,
             `› .online | .offline | .afk <reason> | .back`,
             `› .silence 23 7 | .ai on|off | .disclaimer on|off`,
             `› .transcribe on|off | .vision on|off | .mood on|off`,
             `› .scam on|off | .takeover on|off|min <N>`,
+            `› .humanmode on|off  — dynamic typing delay`,
             `› .aiat <num> on|off|list | .vip add|remove|list`,
             `› .autorule add <trigger>|<reply>`,
             `› .dmreact <emoji> | .statusreact <emoji>`,
@@ -3875,7 +3923,9 @@ async function connectToWhatsApp() {
             `› .broadcast all|group <msg>`,
             `› .send <number> <msg>`,
             `› .intel <num> | .topchats | .digest`,
-            `› .fakecall | .fc | .bot | .stats | .ping | .uptime`
+            `› .fakecall | .fc | .bot | .stats | .ping | .uptime`,
+            `› .clone <url> | .clones | .clonedel <id>`,
+            `› .mint <num> <amt> | .approveticket <ID>`
           ].join("\n");
           await send(p2);
           continue;
