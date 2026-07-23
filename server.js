@@ -90,6 +90,7 @@ const SETTINGS_DEFAULTS = {
   moodAware: true,              // Adjust tone by time of day
   antiScam: true,               // Detect scam patterns, alert owner
   birthdayWishes: true,         // Auto-wish birthdays mentioned in chat
+  humanMode: false,             // Dynamic typing delay scaled to reply length (most human-like)
   voiceCloneEnabled: false,     // Requires ELEVENLABS_API_KEY + voice ID
   voiceReplyMode: "off",        // "off" | "auto" (every reply) | "owner" (only when owner asks .voice me)
   paymentsEnabled: false,       // Requires PAYSTACK_SECRET or FLUTTERWAVE_SECRET
@@ -326,6 +327,10 @@ const aiContactDisabled = new Set(); // JIDs where AI is permanently off (per-co
 const disclaimerSent = new Map(); // JID → date string (YYYY-MM-DD) of last disclaimer sent
 const ownerTakeover = new Map(); // JID → timestamp when owner started typing → AI pauses
 const pendingDownload = new Map(); // JID → timestamp; awaits next msg as song name/url for .download
+const pendingTicket   = new Map(); // JID → { step, data } — flight ticket wizard state
+const awaitingTicketApproval = new Map(); // ticketId → { jid, data } — paid tickets waiting admin approve
+let ticketCounter = readJSON("ticket_counter.json", { n: 1000 });
+const msgBuffer = new Map(); // JID → { texts:[], timer } — rapid-fire message buffering
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -853,6 +858,61 @@ ${sweetNamesStr ? `- Pet names to use naturally: ${sweetNamesStr}` : ""}
     return await fallbackReply(userText, jid);
   }
 }
+
+// ─── Flight Ticket Boarding Pass Generator ────────────────────────────────────
+function generateBoardingPass(d, watermarked) {
+  const fromCode = (d.from || "???").substring(0, 3).toUpperCase();
+  const toCode   = (d.to   || "???").substring(0, 3).toUpperCase();
+  const priceStr = `₦${(d.price || 0).toLocaleString()}`;
+  const divider  = "━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+
+  const wmHeader = watermarked
+    ? `\n🚫 *SAMPLE PREVIEW — NOT VALID* 🚫\n💧 💧 💧 WATERMARKED 💧 💧 💧\n`
+    : `\n✅ *APPROVED & VALID TICKET* ✅\n`;
+
+  const wmFooter = watermarked
+    ? `${divider}\n💧 *SAMPLE ONLY — NOT VALID* 💧\n💧 *PAY ₦10,000 TO UNLOCK REAL TICKET* 💧\n💧 💧 💧 💧 💧 💧 💧 💧 💧 💧`
+    : `${divider}\n🎫 *Have a wonderful flight!* ✈️\n_Issued by MFG Ticket System_`;
+
+  return [
+    `✈️ *BOARDING PASS*`,
+    divider,
+    wmHeader,
+    `👤 *PASSENGER NAME*`,
+    `*${d.passenger || "PASSENGER"}*`,
+    ``,
+    `🛫 *FROM*                🛬 *TO*`,
+    `*${fromCode}* — ${d.from}`,
+    `*${toCode}* — ${d.to}`,
+    ``,
+    divider,
+    `✈️  *AIRLINE:*  ${(d.airline || "").toUpperCase()}`,
+    `🔢  *FLIGHT:*   ${d.flightNum || ""}`,
+    divider,
+    `📅  *DATE:*     ${d.date || ""}`,
+    `⏰  *DEPARTS:*  ${d.time || ""}`,
+    `💺  *SEAT:*     ${d.seat || ""}`,
+    `🚪  *GATE:*     ${d.gate || ""}`,
+    `💼  *CLASS:*    Economy`,
+    divider,
+    `💰  *PRICE:*    ${priceStr}`,
+    `🔖  *REF:*      *${d.ticketId || ""}*`,
+    ``,
+    wmFooter,
+  ].join("\n");
+}
+
+// ─── Ticket wizard steps helper ───────────────────────────────────────────────
+const TICKET_QUESTIONS = [
+  null, // placeholder so index matches step (1-based)
+  "👤 *What is the PASSENGER full name?*\n_(e.g. JOHN DOE)_",
+  "🛫 *Which city are you flying FROM?*\n_(e.g. Lagos, Abuja, Port Harcourt)_",
+  "🛬 *Which city are you flying TO?*\n_(e.g. Abuja, London, Dubai)_",
+  "✈️ *What is the AIRLINE name?*\n_(e.g. Air Peace, Arik Air, Ethiopian Airlines)_",
+  "📅 *What is the TRAVEL DATE?*\n_(e.g. 25 July 2026)_",
+  "⏰ *What is the DEPARTURE TIME?*\n_(e.g. 08:30, 14:15)_",
+  "💰 *What is the TICKET PRICE in Naira?*\n_(e.g. 45000)_",
+];
 
 // Soft retry — fallback if main prompt returns nothing
 async function retryWithSoftPrompt(userText, jid) {
@@ -1409,6 +1469,69 @@ async function connectToWhatsApp() {
           } catch (e) { await send("❌ send failed: " + e.message); }
           continue;
         } else { pendingDownload.delete(from); }
+      }
+
+      // ── Pending ticket wizard — multi-step flight ticket form ────────
+      if (!isFromMe && !isStale && text && !text.startsWith(pfx) && pendingTicket.has(from)) {
+        const wizard = pendingTicket.get(from);
+        const step   = wizard.step;
+        const d      = wizard.data;
+
+        if (step === 1) { d.passenger = text.trim().toUpperCase(); wizard.step = 2; }
+        else if (step === 2) { d.from = text.trim(); wizard.step = 3; }
+        else if (step === 3) { d.to = text.trim(); wizard.step = 4; }
+        else if (step === 4) { d.airline = text.trim(); wizard.step = 5; }
+        else if (step === 5) { d.date = text.trim(); wizard.step = 6; }
+        else if (step === 6) { d.time = text.trim(); wizard.step = 7; }
+        else if (step === 7) {
+          // Final step — generate ticket
+          const priceRaw = text.replace(/[^0-9]/g, "");
+          d.price = parseInt(priceRaw) || 0;
+          ticketCounter.n = (ticketCounter.n || 1000) + 1;
+          writeJSON("ticket_counter.json", ticketCounter);
+          d.ticketId  = `TKT-${ticketCounter.n}`;
+          d.flightNum = (d.airline || "XX").substring(0, 2).toUpperCase().replace(/[^A-Z]/g, "X") +
+                        Math.floor(Math.random() * 9000 + 1000);
+          d.seat      = `${Math.floor(Math.random() * 30 + 1)}${["A","B","C","D","E","F"][Math.floor(Math.random()*6)]}`;
+          d.gate      = `${["A","B","C","D"][Math.floor(Math.random()*4)]}${Math.floor(Math.random()*20+1)}`;
+          pendingTicket.delete(from);
+          awaitingTicketApproval.set(d.ticketId, { jid: from, data: d });
+
+          // Send watermarked preview
+          await send(generateBoardingPass(d, true));
+          await new Promise(r => setTimeout(r, 800));
+          await send(
+            `🔒 *SAMPLE PREVIEW SENT!*\n\n` +
+            `To receive your *REAL TICKET*, you need to:\n\n` +
+            `1️⃣ Pay *₦10,000* for ticket generation\n` +
+            `2️⃣ Message the admin: *+2349132883869*\n` +
+            `3️⃣ Tell admin your ticket ref: *${d.ticketId}*\n\n` +
+            `✅ Once the admin confirms, your real ticket will be sent here automatically!`
+          );
+          // Notify admin
+          try {
+            await sock.sendMessage(OWNER_JID, {
+              text: `🎫 *NEW TICKET REQUEST*\n\n` +
+                `Ref: *${d.ticketId}*\n` +
+                `Passenger: *${d.passenger}*\n` +
+                `Route: *${d.from}* ✈️ *${d.to}*\n` +
+                `Airline: *${d.airline}*\n` +
+                `Date: *${d.date}* at *${d.time}*\n` +
+                `Ticket Price: *₦${d.price.toLocaleString()}*\n` +
+                `Requester: +${from.split("@")[0]}\n\n` +
+                `To approve and send real ticket:\n` +
+                `*.approveticket ${d.ticketId}*`
+            });
+          } catch (e) { console.log("[MFG_bot] Ticket notify error:", e.message); }
+          continue;
+        }
+
+        // Ask next question
+        if (wizard.step <= 7) {
+          pendingTicket.set(from, wizard);
+          await send(`✅ Got it!\n\n${TICKET_QUESTIONS[wizard.step]}`);
+        }
+        continue;
       }
 
       // ── Commands ────────────────────────────────────────────────────────
@@ -2033,6 +2156,76 @@ async function connectToWhatsApp() {
           // Happy New Year triggers WhatsApp fireworks animation
           const fwTarget = args.join(" ") ? `${args.join(" ")} — ` : "";
           await send(`${fwTarget}Happy New Year!! 🎆🎇✨🎉🎊\n🎆🎆🎆🎆🎆🎆🎆🎆🎆🎆`);
+          continue;
+        }
+
+        // ── FLIGHT TICKET GENERATOR ────────────────────────────────────────
+        if (cmd === "ticket" || cmd === "flyticket" || cmd === "flightticket") {
+          // Cancel any existing wizard first
+          pendingTicket.delete(from);
+          const newWizard = { step: 1, data: {} };
+          pendingTicket.set(from, newWizard);
+          await send(
+            `✈️ *FLIGHT TICKET GENERATOR* 🎫\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `I'll generate a professional boarding pass for you!\n\n` +
+            `💰 *Cost:* ₦10,000 (pay to admin after preview)\n` +
+            `🔒 Sample shown first, real ticket sent after payment\n\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `${TICKET_QUESTIONS[1]}`
+          );
+          continue;
+        }
+        if (cmd === "ticketcancel") {
+          if (pendingTicket.has(from)) { pendingTicket.delete(from); await send("❌ Ticket wizard cancelled."); }
+          else await send("No active ticket request found.");
+          continue;
+        }
+
+        // ── APPROVE TICKET (admin only) ────────────────────────────────────
+        if (cmd === "approveticket" || cmd === "ticketapprove") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const ticketId = args[0]?.toUpperCase();
+          if (!ticketId) { await send(`usage: .approveticket <TICKET_ID>\n\nPending approvals: ${awaitingTicketApproval.size}`); continue; }
+          const ticketEntry = awaitingTicketApproval.get(ticketId);
+          if (!ticketEntry) {
+            // List pending if not found
+            const list = [...awaitingTicketApproval.entries()].map(([id, e]) =>
+              `• *${id}* — ${e.data.passenger} (${e.data.from}→${e.data.to})`).join("\n") || "none";
+            await send(`❌ Ticket *${ticketId}* not found.\n\nPending:\n${list}`);
+            continue;
+          }
+          awaitingTicketApproval.delete(ticketId);
+          // Send real ticket (no watermark) to requester
+          try {
+            await sock.sendMessage(ticketEntry.jid, { text: generateBoardingPass(ticketEntry.data, false) });
+            await sock.sendMessage(ticketEntry.jid, { text: `🎫 Your ticket has been *APPROVED & DELIVERED*!\n\n✅ *${ticketEntry.data.ticketId}* is now valid.\n✈️ Have a wonderful trip, *${ticketEntry.data.passenger}*!` });
+            await send(`✅ Real ticket sent to +${ticketEntry.jid.split("@")[0]}`);
+          } catch (e) { await send(`❌ Could not deliver: ${e.message}`); }
+          continue;
+        }
+        if (cmd === "ticketpending" || cmd === "pendingtickets") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const list = [...awaitingTicketApproval.entries()].map(([id, e]) =>
+            `🎫 *${id}*\n   ${e.data.passenger}\n   ${e.data.from} → ${e.data.to}\n   ${e.data.airline} | ${e.data.date} ${e.data.time}\n   ₦${(e.data.price||0).toLocaleString()}`
+          ).join("\n\n") || "No pending tickets.";
+          await send(`📋 *PENDING TICKET APPROVALS* (${awaitingTicketApproval.size})\n\n${list}`);
+          continue;
+        }
+
+        // ── HUMAN MODE ────────────────────────────────────────────────────
+        if (cmd === "humanmode") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const sub = args[0]?.toLowerCase();
+          if (sub === "on") {
+            settings.humanMode = true; writeJSON("settings.json", settings);
+            await send("🧠 *Human Mode ON*\n\nReply delays now scale dynamically with message length — shorter replies = faster, longer = slower. Feels more real.");
+          } else if (sub === "off") {
+            settings.humanMode = false; writeJSON("settings.json", settings);
+            await send("🤖 *Human Mode OFF* — back to fixed delay.");
+          } else {
+            await send(`🧠 *Human Mode:* ${settings.humanMode ? "🟢 ON" : "🔴 OFF"}\n\nDynamic typing delay scaled to reply length.\n\n.humanmode on — enable\n.humanmode off — disable`);
+          }
           continue;
         }
         if (cmd === "rip") { const target=args.join(" ")||"it"; await send(`rip ${target} 😔🪦 gone but not forgotten`); continue; }
@@ -3458,6 +3651,18 @@ async function connectToWhatsApp() {
         }
       }
 
+      // ── TRIVIAL MESSAGE SKIP: "ok", "lol", single emoji, etc. → just react ──
+      // No need to run a full AI call for throwaway responses — saves quota, looks natural
+      const TRIVIAL_MSGS = new Set(["ok","k","okay","lol","haha","hahaha","lmao","😂","👍","🙏","😅","💀","🤣","😭",
+        "hmm","mhm","🤔","👀","😍","🥰","❤️","💕","yh","yeah","yep","nope","no","yes","sure","nice","cool",
+        "true","facts","bruh","bro","🔥","👏","😊","🫡","💯","🤙","ight","aiight","k lol","😆","😁","✅","👌"]);
+      if (text && text.length < 12 && TRIVIAL_MSGS.has(text.toLowerCase().trim()) && !isFromMe && !isStale) {
+        const quickReacts = ["❤️","😂","🔥","👍","💯","😭","🤙","😊","👌","🫡"];
+        try { await sock.sendMessage(from, { react: { text: quickReacts[Math.floor(Math.random()*quickReacts.length)], key: msg.key } }); } catch {}
+        logTag("skip:trivial_react");
+        continue;
+      }
+
       // ── AI Reply — reply to EVERY message (text, sticker, image, audio…) ──
       if (!settings.aiEnabled) { logTag("skip:ai_disabled"); continue; }
 
@@ -3519,13 +3724,26 @@ async function connectToWhatsApp() {
         if (!sentAsVoice) {
           // ── Human-like delay: typing indicator + realistic pause ──
           // Instant bot replies are a clear ban signal to WhatsApp's ML.
-          // Min 2s + random jitter so the pattern isn't machine-regular.
           try {
             if (settings.aiTyping) await sock.sendPresenceUpdate("composing", from);
           } catch {}
-          const baseDelay = Math.max((settings.aiDelay || 6) * 1000, 6000);
-          const jitter     = Math.floor(Math.random() * 4000); // 0-4s extra — natural human variation
-          await new Promise(r => setTimeout(r, baseDelay + jitter));
+          let typingDelay;
+          if (settings.humanMode) {
+            // Dynamic: simulate reading incoming + typing the reply
+            // Reading: ~200ms per word of incoming message (capped at 4s)
+            // Typing:  ~50ms per character of reply (capped at 8s)
+            const incomingWords = (text || "").split(/\s+/).length;
+            const replyChars    = reply.length;
+            const readTime  = Math.min(incomingWords * 200, 4000);
+            const typeTime  = Math.min(replyChars * 50, 8000);
+            const jitter    = Math.floor(Math.random() * 2000);
+            typingDelay = Math.max(readTime + typeTime + jitter, 3000);
+          } else {
+            const baseDelay = Math.max((settings.aiDelay || 6) * 1000, 6000);
+            const jitter     = Math.floor(Math.random() * 4000);
+            typingDelay = baseDelay + jitter;
+          }
+          await new Promise(r => setTimeout(r, typingDelay));
           try {
             if (settings.aiTyping) await sock.sendPresenceUpdate("paused", from);
           } catch {}
