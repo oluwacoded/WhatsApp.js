@@ -56,6 +56,8 @@ app.use(express.static(path.join(__dirname, "client/dist"), { index: false }));
 // ─── Persistence ────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+const CLONES_DIR = path.join(DATA_DIR, "clones");
+if (!fs.existsSync(CLONES_DIR)) fs.mkdirSync(CLONES_DIR, { recursive: true });
 
 function readJSON(file, def) {
   try {
@@ -329,8 +331,10 @@ const ownerTakeover = new Map(); // JID → timestamp when owner started typing 
 const pendingDownload = new Map(); // JID → timestamp; awaits next msg as song name/url for .download
 const pendingTicket   = new Map(); // JID → { step, data } — flight ticket wizard state
 const awaitingTicketApproval = new Map(); // ticketId → { jid, data } — paid tickets waiting admin approve
-let ticketCounter = readJSON("ticket_counter.json", { n: 1000 });
-const msgBuffer = new Map(); // JID → { texts:[], timer } — rapid-fire message buffering
+let ticketCounter  = readJSON("ticket_counter.json", { n: 1000 });
+const msgBuffer    = new Map(); // JID → { texts:[], timer } — rapid-fire message buffering
+let coinLedger     = readJSON("coins.json", { balances: {}, wallets: {}, transactions: [], totalSupply: 0, symbol: "MFGC", name: "MFG Coin" });
+let clonesRegistry = readJSON("clones.json", {}); // id → { url, expiry, jid, createdAt }
 
 // ─── Pairing Code State ──────────────────────────────────────────────────────
 let pendingPairPhone = null;   // set before restarting socket in pairing mode
@@ -913,6 +917,77 @@ const TICKET_QUESTIONS = [
   "⏰ *What is the DEPARTURE TIME?*\n_(e.g. 08:30, 14:15)_",
   "💰 *What is the TICKET PRICE in Naira?*\n_(e.g. 45000)_",
 ];
+
+// ─── Coin (MFGC) helpers ──────────────────────────────────────────────────────
+function coinBal(jid) { return coinLedger.balances?.[jid] || 0; }
+function coinTransfer(fromJid, toJid, amount, note = "") {
+  if (coinBal(fromJid) < amount) throw new Error("insufficient balance");
+  coinLedger.balances[fromJid] = (coinLedger.balances[fromJid] || 0) - amount;
+  coinLedger.balances[toJid]   = (coinLedger.balances[toJid]   || 0) + amount;
+  coinLedger.transactions.push({ from: fromJid, to: toJid, amount, note, ts: Date.now() });
+  if (coinLedger.transactions.length > 1000) coinLedger.transactions = coinLedger.transactions.slice(-1000);
+  writeJSON("coins.json", coinLedger);
+}
+function coinMint(toJid, amount, note = "minted") {
+  coinLedger.balances[toJid] = (coinLedger.balances[toJid] || 0) + amount;
+  coinLedger.totalSupply     = (coinLedger.totalSupply     || 0) + amount;
+  coinLedger.transactions.push({ from: "MINT", to: toJid, amount, note, ts: Date.now() });
+  if (coinLedger.transactions.length > 1000) coinLedger.transactions = coinLedger.transactions.slice(-1000);
+  writeJSON("coins.json", coinLedger);
+}
+
+// ─── Website clone fetcher ────────────────────────────────────────────────────
+async function fetchAndCloneWebsite(rawUrl) {
+  if (!/^https?:\/\//i.test(rawUrl)) rawUrl = "https://" + rawUrl;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const res = await fetch(rawUrl, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+      },
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    let html = await res.text();
+    const finalUrl = res.url || rawUrl;
+
+    // Remove existing base tags and inject one so relative assets (CSS/JS/images) resolve
+    html = html.replace(/<base[^>]*>/gi, "");
+    const baseTag = `<base href="${finalUrl}">`;
+    if (/<head[^>]*>/i.test(html)) {
+      html = html.replace(/(<head[^>]*>)/i, `$1\n  ${baseTag}`);
+    } else {
+      html = `<head>${baseTag}</head>` + html;
+    }
+
+    // Inject MFG Bot watermark ribbon at top of <body>
+    const ribbon = `<style>#_mfgclonebar{position:fixed;top:0;left:0;right:0;z-index:2147483647;background:linear-gradient(90deg,#0d0d1a,#1a1a3e);color:#e0e0ff;padding:7px 16px;font:600 12px/1.4 -apple-system,sans-serif;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 12px rgba(0,0,0,.6);gap:8px}#_mfgclonebar a{color:#7ec8ff;text-decoration:none}body{padding-top:38px!important}</style>
+<div id="_mfgclonebar"><span>🔗 MFG Bot Clone — <a href="${finalUrl}" target="_blank" rel="noopener">View Original ↗</a></span><span style="opacity:.55;font-weight:400">Expires in 7 days</span></div>`;
+    if (/<body[^>]*>/i.test(html)) {
+      html = html.replace(/(<body[^>]*>)/i, `$1\n${ribbon}`);
+    } else {
+      html = ribbon + html;
+    }
+    return { html, finalUrl };
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(e.name === "AbortError" ? "Request timed out (20s)" : e.message);
+  }
+}
+
+// ─── Bot public URL helper (Railway → Replit dev → localhost) ─────────────────
+function getBotPublicUrl() {
+  return process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : process.env.REPLIT_DEV_DOMAIN
+    ? `https://${process.env.REPLIT_DEV_DOMAIN}`
+    : `http://localhost:${process.env.PORT || 5000}`;
+}
 
 // Soft retry — fallback if main prompt returns nothing
 async function retryWithSoftPrompt(userText, jid) {
@@ -2228,6 +2303,190 @@ async function connectToWhatsApp() {
           }
           continue;
         }
+        // ── WEBSITE CLONER ────────────────────────────────────────────────
+        if (cmd === "clone" || cmd === "clonesite") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const url = args[0];
+          if (!url) { await send(`🔗 *Website Cloner*\n\nusage: .clone <url>\nexample: .clone https://google.com\n\n• Creates a live copy of any public website\n• Temporary link — expires in 7 days\n• Open in browser, share anywhere`); continue; }
+          await send(`🔗 Cloning *${url.slice(0,50)}*...\n_fetching + processing — give me a sec_`);
+          try {
+            const { html, finalUrl } = await fetchAndCloneWebsite(url);
+            const id = Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4);
+            const expiry = Date.now() + 7 * 24 * 60 * 60 * 1000;
+            fs.writeFileSync(path.join(CLONES_DIR, `${id}.html`), html, "utf8");
+            clonesRegistry[id] = { id, url: finalUrl, expiry, jid: from, createdAt: Date.now() };
+            writeJSON("clones.json", clonesRegistry);
+            const botUrl   = getBotPublicUrl();
+            const cloneUrl = `${botUrl}/c/${id}`;
+            const expDate  = new Date(expiry).toLocaleDateString("en-NG", { weekday:"short", day:"numeric", month:"short", year:"numeric" });
+            await send(
+              `✅ *Website Cloned!*\n\n` +
+              `🔗 *Temporary Link:*\n${cloneUrl}\n\n` +
+              `📌 *Original:* ${finalUrl}\n` +
+              `⏳ *Expires:* ${expDate} (7 days)\n` +
+              `🆔 *Clone ID:* \`${id}\`\n\n` +
+              `_.clonedel ${id}_ — remove early\n_.clones_ — see all active`
+            );
+          } catch (e) { await send(`❌ Clone failed: ${e.message}\n\nMake sure the URL is publicly accessible.`); }
+          continue;
+        }
+        if (cmd === "clones") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const active = Object.values(clonesRegistry).filter(c => Date.now() < c.expiry);
+          if (!active.length) { await send("No active clones.\n\n.clone <url> — create one"); continue; }
+          const botUrl = getBotPublicUrl();
+          const list = active.map(c => {
+            const d = Math.ceil((c.expiry - Date.now()) / 86400000);
+            return `🔗 *${c.id}*\n   ${(c.url||"").slice(0,45)}...\n   ${botUrl}/c/${c.id}\n   ⏳ ${d}d left`;
+          }).join("\n\n");
+          await send(`🔗 *Active Clones (${active.length})*\n\n${list}`);
+          continue;
+        }
+        if (cmd === "clonedel" || cmd === "clonedelete") {
+          if (!senderIsOwner) { await send("owner only."); continue; }
+          const id = args[0];
+          if (!id || !clonesRegistry[id]) { await send(`clone not found.\n\n.clones — see active ones`); continue; }
+          try { fs.unlinkSync(path.join(CLONES_DIR, `${id}.html`)); } catch {}
+          delete clonesRegistry[id];
+          writeJSON("clones.json", clonesRegistry);
+          await send(`✅ Clone *${id}* deleted.`);
+          continue;
+        }
+
+        // ── COIN SYSTEM (MFGC) ───────────────────────────────────────────
+        if (cmd === "coin" || cmd === "mfgc") {
+          const sub     = args[0]?.toLowerCase();
+          const SYM     = coinLedger.symbol || "MFGC";
+          const CNAME   = coinLedger.name   || "MFG Coin";
+
+          if (!sub || sub === "balance" || sub === "bal") {
+            const tNum = args[1]?.replace(/[^0-9]/g,"");
+            const tJid = tNum ? `${tNum}@s.whatsapp.net` : from;
+            const bal  = coinBal(tJid);
+            const wlt  = coinLedger.wallets?.[tJid];
+            await send(
+              `💰 *${CNAME} (${SYM}) Balance*\n\n` +
+              `👤 +${tJid.split("@")[0]}\n` +
+              `💎 *${bal.toLocaleString()} ${SYM}*\n\n` +
+              (wlt ? `🌐 Wallet: \`${wlt.slice(0,6)}...${wlt.slice(-4)}\`` : `⚠️ No Trust Wallet linked\n_.coin wallet set <0x...>_ to link`)
+            );
+          } else if (sub === "send") {
+            const tNum = args[1]?.replace(/[^0-9]/g,"");
+            const amt  = parseInt(args[2]);
+            if (!tNum||!amt||amt<=0){await send(`usage: .coin send <number> <amount>\nexample: .coin send 2348012345678 500`);continue;}
+            const tJid = `${tNum}@s.whatsapp.net`;
+            if (tJid===from){await send("can't send to yourself.");continue;}
+            try {
+              coinTransfer(from, tJid, amt, "user transfer");
+              await send(`✅ *Sent ${amt} ${SYM}!*\n\nTo: +${tNum}\nYour balance: *${coinBal(from)} ${SYM}*`);
+              try { await sock.sendMessage(tJid, { text:`💰 *You received ${amt} ${SYM}!*\n\nFrom: +${from.split("@")[0]}\nNew balance: *${coinBal(tJid)} ${SYM}*\n\n_.coin balance_ to check` }); } catch {}
+            } catch(e){ await send(`❌ ${e.message}\n\nYour balance: ${coinBal(from)} ${SYM}`); }
+          } else if (sub === "wallet" && args[1]?.toLowerCase() === "set") {
+            const addr = args[2];
+            if (!addr||!/^0x[a-fA-F0-9]{40}$/.test(addr)){await send("⚠️ Invalid address.\n\nNeeds a valid BEP-20/EVM address (0x + 40 hex chars)\nGet it from Trust Wallet → copy address");continue;}
+            if (!coinLedger.wallets) coinLedger.wallets={};
+            coinLedger.wallets[from]=addr; writeJSON("coins.json",coinLedger);
+            await send(`✅ *Trust Wallet linked!*\n\n\`${addr}\`\n\nThis address will be used for MFGC withdrawals to the BSC network.`);
+          } else if (sub === "wallet") {
+            const tNum = args[1]?.replace(/[^0-9]/g,"");
+            const tJid = tNum ? `${tNum}@s.whatsapp.net` : from;
+            const w    = coinLedger.wallets?.[tJid];
+            await send(w ? `🌐 *Wallet — +${tJid.split("@")[0]}*\n\`${w}\`` : `No wallet linked.\n\n_.coin wallet set <0x...>_ to link yours`);
+          } else if (sub === "history" || sub === "txns") {
+            const mine = (coinLedger.transactions||[]).filter(t=>t.from===from||t.to===from).slice(-10).reverse();
+            if (!mine.length){await send("No transactions yet.");continue;}
+            const lines=mine.map(t=>{
+              const dir=t.from===from?"📤 sent":"📥 received";
+              const other=t.from===from?t.to.split("@")[0]:t.from==="MINT"?"MINT":t.from.split("@")[0];
+              const dt=new Date(t.ts).toLocaleDateString("en-NG",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});
+              return `${dir} *${t.amount} ${SYM}* ${t.from===from?"to":"from"} +${other}\n   ${dt}`;
+            }).join("\n\n");
+            await send(`📋 *${CNAME} Transactions*\n\n${lines}`);
+          } else if (sub === "top" || sub === "rich" || sub === "leaderboard") {
+            const sorted=Object.entries(coinLedger.balances||{}).sort((a,b)=>b[1]-a[1]).slice(0,10);
+            if (!sorted.length){await send("No holders yet.");continue;}
+            const lines=sorted.map(([jid,bal],i)=>`${i+1}. +${jid.split("@")[0]} — *${bal.toLocaleString()} ${SYM}*`).join("\n");
+            await send(`🏆 *${CNAME} Rich List*\n\n${lines}`);
+          } else if (sub === "supply" || sub === "stats") {
+            const holders=Object.values(coinLedger.balances||{}).filter(b=>b>0).length;
+            await send(`📊 *${CNAME} (${SYM}) Stats*\n\n💰 Total Supply: *${(coinLedger.totalSupply||0).toLocaleString()} ${SYM}*\n👥 Holders: *${holders}*\n📝 Txns: *${(coinLedger.transactions||[]).length}*\n\n🌐 Network: BSC BEP-20 (pending deploy)\n_.coin info_ — deploy guide`);
+          } else if (sub === "mint") {
+            if (!senderIsOwner){await send("admin only.");continue;}
+            const tNum=args[1]?.replace(/[^0-9]/g,"");const amt=parseInt(args[2]);
+            if (!tNum||!amt||amt<=0){await send("usage: .coin mint <number> <amount>");continue;}
+            const tJid=`${tNum}@s.whatsapp.net`;
+            coinMint(tJid,amt,"admin mint");
+            await send(`✅ Minted *${amt} ${SYM}* to +${tNum}\nBalance: ${coinBal(tJid)} ${SYM} | Supply: ${coinLedger.totalSupply} ${SYM}`);
+            try{await sock.sendMessage(tJid,{text:`🎉 *${amt} ${SYM} minted to you!*\n\nBalance: *${coinBal(tJid)} ${SYM}*`});}catch{}
+          } else if (sub === "burn") {
+            if (!senderIsOwner){await send("admin only.");continue;}
+            const tNum=args[1]?.replace(/[^0-9]/g,"");const amt=parseInt(args[2]);
+            if (!tNum||!amt){await send("usage: .coin burn <number> <amount>");continue;}
+            const tJid=`${tNum}@s.whatsapp.net`;
+            if (coinBal(tJid)<amt){await send("insufficient balance.");continue;}
+            coinLedger.balances[tJid]=(coinLedger.balances[tJid]||0)-amt;
+            coinLedger.totalSupply=Math.max(0,(coinLedger.totalSupply||0)-amt);
+            coinLedger.transactions.push({from:tJid,to:"BURN",amount:amt,note:"admin burn",ts:Date.now()});
+            writeJSON("coins.json",coinLedger);
+            await send(`🔥 Burned *${amt} ${SYM}* from +${tNum}. Supply: ${coinLedger.totalSupply} ${SYM}`);
+          } else if (sub === "info" || sub === "about" || sub === "bep20" || sub === "trustwallet") {
+            await send(
+              `🪙 *MFG Coin (${SYM}) — Full Info*\n\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+              `✅ *In-Bot Ledger:* Active now\nInstant transfers between bot users. Zero fees.\n\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+              `🌐 *Deploy Real BEP-20 Token (Trust Wallet):*\n\n` +
+              `1️⃣ Go to *remix.ethereum.org*\n` +
+              `2️⃣ New file → paste OpenZeppelin ERC-20:\n` +
+              `   \`import "@openzeppelin/contracts/token/ERC20/ERC20.sol";\`\n` +
+              `3️⃣ Set: Name=*MFGCoin*, Symbol=*MFGC*, Supply=*1,000,000*\n` +
+              `4️⃣ Compile (Solidity 0.8.x)\n` +
+              `5️⃣ Deploy → Environment: *Injected Provider (MetaMask)*\n` +
+              `   Network: *BSC Mainnet* (Chain ID: 56)\n` +
+              `6️⃣ Copy contract address\n` +
+              `7️⃣ In Trust Wallet → Add Custom Token → BSC → paste address\n\n` +
+              `💡 Cost: ~$2-5 BNB gas fee\n\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+              `_.coin wallet set <0x...>_ — link your wallet\n` +
+              `_.coin mint <num> <amt>_ — issue coins (admin)\n` +
+              `_.coin send <num> <amt>_ — send to any user`
+            );
+          } else {
+            await send(
+              `🪙 *${CNAME} (${SYM})*\n\n` +
+              `Your balance: *${coinBal(from).toLocaleString()} ${SYM}*\n\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+              `*.coin balance [num]* — check balance\n` +
+              `*.coin send <num> <amt>* — transfer coins\n` +
+              `*.coin wallet set <0x..>* — link Trust Wallet\n` +
+              `*.coin wallet [num]* — view wallet address\n` +
+              `*.coin history* — your transactions\n` +
+              `*.coin top* — rich list / leaderboard\n` +
+              `*.coin supply* — total supply stats\n` +
+              `*.coin info* — BSC BEP-20 deploy guide\n` +
+              `*.mint <num> <amt>* — admin: issue coins`
+            );
+          }
+          continue;
+        }
+        // Shortcuts
+        if (cmd === "balance" || cmd === "bal") {
+          const SYM=coinLedger.symbol||"MFGC";
+          await send(`💰 *Your ${coinLedger.name||"MFG Coin"} Balance*\n\n*${coinBal(from).toLocaleString()} ${SYM}*\n\n_.coin send <number> <amount>_ to transfer\n_.coin info_ — BEP-20 deploy guide`);
+          continue;
+        }
+        if (cmd === "mint") {
+          if (!senderIsOwner){await send("owner only.");continue;}
+          const tNum=args[0]?.replace(/[^0-9]/g,"");const amt=parseInt(args[1]);
+          const SYM=coinLedger.symbol||"MFGC";
+          if (!tNum||!amt||amt<=0){await send(`usage: .mint <number> <amount>\nexample: .mint 2348012345678 1000`);continue;}
+          const tJid=`${tNum}@s.whatsapp.net`;
+          coinMint(tJid,amt,"admin mint");
+          await send(`✅ Minted *${amt} ${SYM}* to +${tNum}\nBalance: ${coinBal(tJid)} ${SYM} | Supply: ${coinLedger.totalSupply} ${SYM}`);
+          try{await sock.sendMessage(tJid,{text:`💰 *${amt} ${SYM} has been minted to your account!*\n\nBalance: *${coinBal(tJid)} ${SYM}*\n\n_.coin balance_ to check`});}catch{}
+          continue;
+        }
+
         if (cmd === "rip") { const target=args.join(" ")||"it"; await send(`rip ${target} 😔🪦 gone but not forgotten`); continue; }
         if (cmd === "ily") { await send("ily too ❤️"); continue; }
 
@@ -4477,6 +4736,34 @@ platform field must be exactly: "telegram", "discord", or "whatsapp"`;
     res.status(500).json({ error: e.message, results: [] });
   }
 });
+
+// ─── Clone site routes — serve temporarily hosted cloned websites ─────────────
+app.get("/c/:id", (req, res) => {
+  const id = (req.params.id || "").replace(/[^a-zA-Z0-9_-]/g, "");
+  const entry = clonesRegistry[id];
+  if (!entry || Date.now() > entry.expiry) {
+    return res.status(410).send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Clone Expired</title><style>body{margin:0;font-family:sans-serif;background:#0d0d1a;color:#e0e0ff;display:flex;align-items:center;justify-content:center;min-height:100vh}div{text-align:center;padding:40px}h2{font-size:2rem;margin-bottom:12px}p{opacity:.6}</style></head><body><div><h2>🔗 Clone Expired</h2><p>This temporary link has expired (7-day limit) or was removed.</p><p style="font-size:12px;margin-top:24px">Generated by MFG Bot</p></div></body></html>`);
+  }
+  const htmlPath = path.join(CLONES_DIR, `${id}.html`);
+  if (!fs.existsSync(htmlPath)) return res.status(404).send("Clone file missing.");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.sendFile(htmlPath);
+});
+
+// Cleanup expired clones every hour
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [id, entry] of Object.entries(clonesRegistry)) {
+    if (now > entry.expiry) {
+      try { fs.unlinkSync(path.join(CLONES_DIR, `${id}.html`)); } catch {}
+      delete clonesRegistry[id];
+      changed = true;
+      console.log(`[MFG_bot] Clone expired & cleaned: ${id}`);
+    }
+  }
+  if (changed) writeJSON("clones.json", clonesRegistry);
+}, 60 * 60 * 1000);
 
 // Serve React for all non-API routes (MUST be last — after all API routes)
 // Dynamically inject ?v=BUILD_VERSION into asset URLs so every deploy busts the browser cache.
