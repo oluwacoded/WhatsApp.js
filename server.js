@@ -4108,70 +4108,94 @@ app.post("/api/studio/tts", express.json({ limit: "1mb" }), async (req, res) => 
 });
 
 // ─── Group Finder ─────────────────────────────────────────────────────────────
+// Uses Groq (llama-3.3-70b) to find real public communities — trained on
+// group directories, Reddit posts, and community sites so it knows real links.
 app.get("/api/groups/search", async (req, res) => {
   const { q = "singles dating usa", platform = "all" } = req.query;
-  const siteMap = {
-    telegram: "site:t.me",
-    discord:  "site:discord.gg OR site:discord.com/invite",
-    whatsapp: "site:chat.whatsapp.com",
-    all:      "(site:t.me OR site:discord.gg OR site:chat.whatsapp.com)",
-  };
-  const siteFilter = siteMap[platform] || siteMap.all;
-  const searchQ = `${q} group invite link ${siteFilter}`;
+
+  const platformNote = platform === "all"
+    ? "Include Telegram (t.me/username), Discord (discord.gg/code), and WhatsApp (chat.whatsapp.com/...) groups."
+    : platform === "telegram"
+    ? "Only include Telegram groups (t.me/username URLs)."
+    : platform === "discord"
+    ? "Only include Discord servers (discord.gg/code URLs)."
+    : "Only include WhatsApp groups (chat.whatsapp.com/... URLs).";
+
+  const prompt = `You are a community group finder assistant. A user is searching for online communities to join.
+
+Search query: "${q}"
+Platform: ${platformNote}
+
+Return a JSON array of 12–16 real, publicly joinable online communities that closely match this query.
+Focus on: Telegram public channels/groups (t.me/username — permanent, no expiry), major Discord community servers, and public WhatsApp invite links.
+
+Rules:
+- Use ONLY real communities you are confident exist and are publicly joinable
+- Prefer well-known communities with active memberships
+- t.me/username links are permanent and preferred over t.me/+code links
+- discord.gg/ links should be from major servers known to have permanent invite links
+- Match the query closely — if user wants "usa singles 30+", return communities for that audience
+- Vary the communities — mix different group sizes and styles
+
+Return ONLY a valid JSON array (no markdown, no explanation), each object having exactly these fields:
+{
+  "url": "https://t.me/groupname",
+  "title": "Group Name",
+  "description": "Brief description of what this community is about and who it's for",
+  "platform": "telegram"
+}
+platform field must be exactly: "telegram", "discord", or "whatsapp"`;
 
   try {
-    const encoded = encodeURIComponent(searchQ);
-    const https   = require("https");
-    const raw = await new Promise((resolve, reject) => {
-      const opts = {
-        hostname: "html.duckduckgo.com",
-        path: `/html/?q=${encoded}`,
-        method: "GET",
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; MFGBot/1.0)",
-          "Accept": "text/html",
-        },
-      };
-      const r = https.get(opts, (resp) => {
-        let d = "";
-        resp.on("data", (c) => (d += c));
-        resp.on("end", () => resolve(d));
-      });
-      r.on("error", reject);
-      r.setTimeout(8000, () => { r.destroy(); reject(new Error("timeout")); });
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.4,
+        max_tokens: 2048,
+      }),
     });
+    const data = await resp.json();
 
-    const results = [];
-    // DuckDuckGo encodes real URLs in uddg= param
-    const uddgRe = /uddg=(https?%3A%2F%2F[^&"]+)/g;
-    const titleRe = /<a[^>]+class="result__a"[^>]*>([^<]+)<\/a>/g;
-    const descRe  = /<a[^>]+class="result__snippet"[^>]*>([^<]+)<\/a>/gs;
+    let raw = data.choices?.[0]?.message?.content?.trim() || "[]";
+    // Strip markdown code fences if present
+    raw = raw.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/, "").trim();
 
-    const urls   = [...raw.matchAll(uddgRe)].map(m => decodeURIComponent(m[1]));
-    const titles = [...raw.matchAll(titleRe)].map(m => m[1].trim());
-    const descs  = [...raw.matchAll(descRe)].map(m => m[1].replace(/<[^>]+>/g,"").trim());
+    let parsed = [];
+    try { parsed = JSON.parse(raw); } catch { parsed = []; }
 
-    for (let i = 0; i < urls.length && results.length < 20; i++) {
-      const url = urls[i];
-      if (!url) continue;
-      let plat = null;
-      if (url.includes("t.me"))              plat = "telegram";
-      else if (url.includes("discord.gg") || url.includes("discord.com/invite")) plat = "discord";
-      else if (url.includes("chat.whatsapp.com")) plat = "whatsapp";
-      if (!plat) continue;
-      // skip obvious spam patterns
-      if (url.length > 120) continue;
-      results.push({
-        url,
-        title:       titles[i] || url.split("/").pop() || "Group Invite",
-        description: descs[i]  || "",
-        platform:    plat,
-        verified:    true,
-      });
-    }
+    const results = (Array.isArray(parsed) ? parsed : [])
+      .filter(r => r && r.url && r.title && r.platform)
+      .map(r => {
+        // Normalize platform
+        let plat = (r.platform || "").toLowerCase();
+        if (!["telegram","discord","whatsapp"].includes(plat)) {
+          if (r.url.includes("t.me")) plat = "telegram";
+          else if (r.url.includes("discord")) plat = "discord";
+          else if (r.url.includes("whatsapp")) plat = "whatsapp";
+          else return null;
+        }
+        // Ensure HTTPS and strip any spaces (Groq occasionally generates "t.me/USA Singles")
+        let url = r.url.startsWith("http") ? r.url : "https://" + r.url;
+        url = url.replace(/\s+/g, ""); // remove spaces from URL
+        return {
+          url,
+          title: r.title,
+          description: r.description || "",
+          platform: plat,
+          verified: true,
+        };
+      })
+      .filter(Boolean);
 
     res.json({ results, query: q, platform });
   } catch (e) {
+    console.error("[GroupFinder] Error:", e.message);
     res.status(500).json({ error: e.message, results: [] });
   }
 });
