@@ -657,9 +657,22 @@ async function quickAI(systemMsg, userText, maxTokens = 300, temp = 0.5) {
 // ─── Gemini AI (primary chat) ─────────────────────────────────────────────────
 async function askGemini(userText, jid) {
   try {
-    const ownerToContact = (userData[jid]?.ownerMessages || []).slice(-25);
+    // ── JID normalisation: personas/userData are keyed by @s.whatsapp.net but messages
+    // can arrive as @lid on newer WhatsApp. Fall back to digit-match so persona never misses.
+    const resolveJidKey = (rawJid, store) => {
+      if (store[rawJid]) return rawJid;
+      const digits = rawJid.replace(/[^0-9]/g, "");
+      const match = Object.keys(store).find(k => k.replace(/[^0-9]/g, "") === digits);
+      return match || rawJid;
+    };
+    const dataJid    = resolveJidKey(jid, userData);
+    const personaJid = resolveJidKey(jid, contactPersonas);
+    const factsJid   = resolveJidKey(jid, contactFacts);
+    const histJid    = resolveJidKey(jid, convHistory);
+
+    const ownerToContact = (userData[dataJid]?.ownerMessages || []).slice(-25);
     const globalSamples  = styleSamples.slice(-8);
-    const history        = (convHistory[jid] || []).slice(-10);
+    const history        = (convHistory[histJid] || []).slice(-10);
 
     let styleBlock = "";
     if (ownerToContact.length >= 2) {
@@ -675,11 +688,11 @@ async function askGemini(userText, jid) {
     }
 
     let factsBlock = "";
-    const facts = contactFacts[jid]?.facts || [];
+    const facts = contactFacts[factsJid]?.facts || [];
     if (facts.length) factsBlock = `\n\n[LONG-TERM MEMORY — THINGS YOU KNOW ABOUT THIS PERSON]:\n${facts.slice(-15).map(f => `- ${f}`).join("\n")}`;
 
     let personaBlock = "";
-    const persona = contactPersonas[jid];
+    const persona = contactPersonas[personaJid];
     if (persona) {
       const sweetNamesStr = (persona.sweetNames || []).join(", ");
       personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY]:\nYou are texting ${persona.name}. Relationship: ${persona.relationship}. Tone: ${persona.tone || "warm, loving, genuine Nigerian"}.${sweetNamesStr ? ` Pet names: ${sweetNamesStr}.` : ""} Context: ${persona.context}\nNEVER say you are an AI. Stay 100% in character.`;
@@ -726,9 +739,22 @@ async function askGroq(userText, jid) {
   const key = process.env.GROQ_API_KEY;
   if (!key) return null;
   try {
-    const ownerToContact = (userData[jid]?.ownerMessages || []).slice(-25);
+    // ── JID normalisation: personas/userData are keyed by @s.whatsapp.net but messages
+    // can arrive as @lid on newer WhatsApp. Fall back to digit-match so persona never misses.
+    const resolveJidKeyG = (rawJid, store) => {
+      if (store[rawJid]) return rawJid;
+      const digits = rawJid.replace(/[^0-9]/g, "");
+      const match = Object.keys(store).find(k => k.replace(/[^0-9]/g, "") === digits);
+      return match || rawJid;
+    };
+    const dataJidG    = resolveJidKeyG(jid, userData);
+    const personaJidG = resolveJidKeyG(jid, contactPersonas);
+    const factsJidG   = resolveJidKeyG(jid, contactFacts);
+    const histJidG    = resolveJidKeyG(jid, convHistory);
+
+    const ownerToContact = (userData[dataJidG]?.ownerMessages || []).slice(-25);
     const globalSamples = styleSamples.slice(-8);
-    const history = (convHistory[jid] || []).slice(-10);
+    const history = (convHistory[histJidG] || []).slice(-10);
 
     // Build a detailed style fingerprint
     let styleBlock = "";
@@ -755,7 +781,7 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
 
     // Long-term memory facts about this contact (knows things from weeks ago)
     let factsBlock = "";
-    const facts = contactFacts[jid]?.facts || [];
+    const facts = contactFacts[factsJidG]?.facts || [];
     if (facts.length) {
       factsBlock = `\n\n[LONG-TERM MEMORY — THINGS YOU KNOW ABOUT THIS PERSON]:\n${facts.slice(-15).map(f => `- ${f}`).join("\n")}`;
     }
@@ -763,7 +789,7 @@ ${globalSamples.map(m => `"${m}"`).join("\n")}`;
     // Per-contact persona — highest priority context block
     // Overrides generic tone; tells AI exactly who this person is and how to talk to them
     let personaBlock = "";
-    const persona = contactPersonas[jid];
+    const persona = contactPersonas[personaJidG];
     if (persona) {
       const sweetNamesStr = (persona.sweetNames || []).join(", ");
       personaBlock = `\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY — READ BEFORE ANYTHING ELSE]:
@@ -1995,6 +2021,20 @@ async function connectToWhatsApp() {
         if (cmd === "bow") { await send("🙇 bowing down"); continue; }
         if (cmd === "cheer") { await send("🎉 cheers! 🥂"); continue; }
         if (cmd === "congrats") { const target=args.join(" ")||"you"; await send(`🏆 congrats ${target}! that's W behavior`); continue; }
+        if (cmd === "confetti" || cmd === "celebrate") {
+          // WhatsApp triggers built-in confetti animation on the receiver's screen
+          // when it detects celebration emojis + keywords together
+          const celebTarget = args.join(" ") || "";
+          const celebLine = celebTarget ? `${celebTarget}!! 🎊🎉🥳` : "🎊🎉🥳";
+          await send(`${celebLine}\n\nCongratulations 🎉🎊\n🎊🎊🎊🎊🎊🎊🎊🎊🎊🎊`);
+          continue;
+        }
+        if (cmd === "fireworks") {
+          // Happy New Year triggers WhatsApp fireworks animation
+          const fwTarget = args.join(" ") ? `${args.join(" ")} — ` : "";
+          await send(`${fwTarget}Happy New Year!! 🎆🎇✨🎉🎊\n🎆🎆🎆🎆🎆🎆🎆🎆🎆🎆`);
+          continue;
+        }
         if (cmd === "rip") { const target=args.join(" ")||"it"; await send(`rip ${target} 😔🪦 gone but not forgotten`); continue; }
         if (cmd === "ily") { await send("ily too ❤️"); continue; }
 
@@ -3570,14 +3610,27 @@ function scheduleRandomText() {
         return;
       }
       const target = eligible[Math.floor(Math.random() * eligible.length)];
-      const openers = [
-        "wetin dey happen","omo i just remember you","how body","yo what's good","you dey?",
-        "i just dey think about something","abeg gist me something","what you dey do",
-        "yo","bro something just happen","guy how far","e don do sha","long time no talk",
-        "you see that thing wey happen","bro check this out","omo you won't believe",
-        "i dey bored fr","guy talk to me","abeg how e dey","omo nawa o"
-      ];
-      const msg = openers[Math.floor(Math.random() * openers.length)];
+      // If this contact has a persona, use AI to craft the opener in the right tone
+      // Otherwise fall back to the hardcoded casual openers
+      const proactivePersonaDigits = target.id.replace(/[^0-9]/g, "");
+      const proactivePersona = contactPersonas[target.id] ||
+        Object.entries(contactPersonas).find(([k]) => k.replace(/[^0-9]/g, "") === proactivePersonaDigits)?.[1];
+      let msg;
+      if (proactivePersona) {
+        const sweetNamesStr = (proactivePersona.sweetNames || []).join(", ");
+        const proactiveSys = `${settings.systemPrompt}\n\n[⚠️ PERSONA OVERRIDE — TOP PRIORITY]:\nYou are texting ${proactivePersona.name}. Relationship: ${proactivePersona.relationship}. Tone: ${proactivePersona.tone || "warm, loving, genuine Nigerian"}.${sweetNamesStr ? ` Pet names: ${sweetNamesStr}.` : ""} Context: ${proactivePersona.context}\nNEVER say you are an AI. Stay 100% in character.\n\n${moodPrompt()}`;
+        const aiOpener = await askGemini(`[SYSTEM: You are initiating a conversation with ${proactivePersona.name} (${proactivePersona.relationship}). Send ONE casual, natural opening message — no more than 10 words. Don't ask multiple questions. Just reach out naturally as the owner would based on the persona and relationship.]`, target.id).catch(() => null);
+        msg = aiOpener || `hey ${(proactivePersona.sweetNames || [])[0] || proactivePersona.name.split(" ")[0].toLowerCase()} 🤍`;
+      } else {
+        const openers = [
+          "wetin dey happen","omo i just remember you","how body","yo what's good","you dey?",
+          "i just dey think about something","abeg gist me something","what you dey do",
+          "yo","bro something just happen","guy how far","e don do sha","long time no talk",
+          "you see that thing wey happen","bro check this out","omo you won't believe",
+          "i dey bored fr","guy talk to me","abeg how e dey","omo nawa o"
+        ];
+        msg = openers[Math.floor(Math.random() * openers.length)];
+      }
       await sock.sendMessage(target.id, { text: msg });
       lastProactiveTo.set(target.id, now);
       lastProactiveLog = `${new Date().toISOString().slice(11,19)} → ${target.id.slice(-15)}: "${msg}"`;
