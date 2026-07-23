@@ -4948,6 +4948,7 @@ io.on("connection", (socket) => {
 const server = httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[MFG_bot] Server running on port ${PORT}`);
   connectToWhatsApp();
+  spawnSignalBot(); // no-op if SIGNAL_NUMBER not set
 });
 
 server.on("error", (err) => {
@@ -4958,4 +4959,52 @@ server.on("error", (err) => {
     console.error("[MFG_bot] Server error:", err);
     process.exit(1);
   }
+});
+
+// ─── Signal Bot child process ─────────────────────────────────────────────────
+// Spawns signal-bot.js as a separate process when SIGNAL_NUMBER is configured.
+// The child inherits all env vars (GEMINI_API_KEY, GROQ_API_KEY, etc.) and
+// shares the data/ directory, so persona + settings changes from WhatsApp apply
+// to Signal too within 30 s.
+const { spawn: spawnProc } = require("child_process");
+let signalBotProcess = null;
+let signalBotStatus  = { running: false, pid: null, restarts: 0, lastStart: null, error: null };
+
+function spawnSignalBot() {
+  if (!process.env.SIGNAL_NUMBER) {
+    console.log("[MFG_bot] SIGNAL_NUMBER not set — Signal bot not started");
+    return;
+  }
+  console.log("[MFG_bot] Spawning Signal bot process...");
+  const child = spawnProc(process.execPath, [path.join(__dirname, "signal-bot.js")], {
+    env: { ...process.env },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  signalBotProcess = child;
+  signalBotStatus  = { running: true, pid: child.pid, restarts: signalBotStatus.restarts, lastStart: new Date().toISOString(), error: null };
+
+  child.stdout.on("data", (d) => process.stdout.write(d));
+  child.stderr.on("data", (d) => process.stderr.write(d));
+
+  child.on("exit", (code, signal) => {
+    signalBotStatus.running = false;
+    signalBotStatus.pid     = null;
+    signalBotStatus.error   = `exited with code ${code} / signal ${signal}`;
+    console.log(`[MFG_bot] Signal bot exited (code ${code}). Restarting in 15s...`);
+    // Auto-restart unless it quit immediately (bad config, not a transient error)
+    if (code !== 0) {
+      signalBotStatus.restarts++;
+      setTimeout(spawnSignalBot, 15000);
+    }
+  });
+}
+
+// REST: GET /api/signal/status — check Signal bot health from the dashboard
+app.get("/api/signal/status", (req, res) => {
+  res.json({
+    configured: !!process.env.SIGNAL_NUMBER,
+    number:     process.env.SIGNAL_NUMBER || null,
+    cliUrl:     process.env.SIGNAL_CLI_URL || "http://localhost:8080",
+    ...signalBotStatus
+  });
 });
