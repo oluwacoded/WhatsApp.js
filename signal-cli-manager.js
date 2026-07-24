@@ -464,7 +464,8 @@ async function linkDevice(deviceName = "MFG Bot") {
 
     const tryResolveUri = (line) => {
       line = line.trim();
-      if (line.startsWith("tsdevice:/") && !resolved) {
+      // URI format: "tsdevice://" (old) or "sgnl://linkdevice?" (new v0.14.x)
+      if ((line.startsWith("tsdevice:/") || line.startsWith("sgnl://")) && !resolved) {
         resolved = true;
         clearTimeout(failTimeout);
         linkState.uri   = line;
