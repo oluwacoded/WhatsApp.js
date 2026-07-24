@@ -1,5 +1,7 @@
 node_modules
+client/node_modules
+auth_info_baileys
+.env
+*.log
 .wwebjs_auth
 .wwebjs_cache
-.env
-youtube-cookies.txt
