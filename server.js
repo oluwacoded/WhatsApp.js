@@ -5045,3 +5045,36 @@ app.post("/api/signal/verify", async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// POST /api/signal/campaign — bulk-send a message to a list of Signal contacts
+// Body: { contacts: ["+123...", "+456..."], message: "Hello!", delay: 2500 }
+// Sends sequentially with a delay between each to avoid Signal rate-limits.
+app.post("/api/signal/campaign", async (req, res) => {
+  const { contacts, message, delay = 2500 } = req.body || {};
+  if (!Array.isArray(contacts) || contacts.length === 0)
+    return res.status(400).json({ ok: false, error: "contacts array required" });
+  if (!message?.trim())
+    return res.status(400).json({ ok: false, error: "message required" });
+
+  const MAX = 200; // safety cap
+  const list = contacts.slice(0, MAX).map(c => (c || "").trim()).filter(Boolean);
+  let sent = 0, failed = 0;
+  const errors = [];
+
+  for (let i = 0; i < list.length; i++) {
+    const num = list[i];
+    try {
+      await signalManager.sendMessage(num, message.trim());
+      sent++;
+      console.log(`[Signal] Campaign ${i + 1}/${list.length} → ${num.slice(-7)}`);
+    } catch (e) {
+      failed++;
+      errors.push(`${num}: ${e.message}`);
+      console.log(`[Signal] Campaign failed for ${num}: ${e.message}`);
+    }
+    // Delay between sends (skip after last)
+    if (i < list.length - 1) await new Promise(r => setTimeout(r, delay));
+  }
+
+  res.json({ ok: true, sent, failed, total: list.length, errors });
+});

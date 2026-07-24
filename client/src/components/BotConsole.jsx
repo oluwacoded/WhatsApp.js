@@ -614,8 +614,296 @@ function FakeCallTab() {
   )
 }
 
+// ─── Signal Tab ───────────────────────────────────────────────────────────────
+function SignalTab({ bot }) {
+  const { get, post } = useBotApi(bot)
+  const [view, setView] = useState('connect')
+
+  // Connect state
+  const [signalStatus, setSignalStatus] = useState(null)
+  const [statusLoading, setStatusLoading] = useState(true)
+  const [number, setNumber] = useState('')
+  const [code, setCode] = useState('')
+  const [regStep, setRegStep] = useState('idle') // idle | registering | waiting_code | verifying | done
+  const [regMsg, setRegMsg] = useState('')
+  const [regError, setRegError] = useState('')
+
+  // Campaign state
+  const [contacts, setContacts] = useState('')
+  const [message, setMessage] = useState('')
+  const [sending, setSending] = useState(false)
+  const [campaignResult, setCampaignResult] = useState(null)
+  const [campaignError, setCampaignError] = useState('')
+  const [progress, setProgress] = useState(null)
+
+  const fetchStatus = useCallback(async () => {
+    try { const d = await get('/api/signal/status'); setSignalStatus(d) }
+    catch { setSignalStatus(null) }
+    finally { setStatusLoading(false) }
+  }, [get])
+
+  useEffect(() => { fetchStatus() }, [fetchStatus])
+  useEffect(() => { const iv = setInterval(fetchStatus, 5000); return () => clearInterval(iv) }, [fetchStatus])
+
+  const handleRegister = async () => {
+    const num = number.trim()
+    if (!num) return setRegError('Enter your Signal number (e.g. +12025551234)')
+    setRegStep('registering'); setRegError(''); setRegMsg('')
+    try {
+      await post('/api/signal/register', { number: num })
+      setRegStep('waiting_code')
+      setRegMsg('SMS sent! Enter the 6-digit code you received.')
+    } catch (e) { setRegError(e.message); setRegStep('idle') }
+  }
+
+  const handleVerify = async () => {
+    const c = code.trim().replace(/-/g, '')
+    if (!c) return setRegError('Enter the verification code')
+    setRegStep('verifying'); setRegError('')
+    try {
+      await post('/api/signal/verify', { number: number.trim(), code: c })
+      setRegStep('done')
+      setRegMsg('✅ Verified! Signal bot is connecting…')
+      setTimeout(fetchStatus, 3000)
+    } catch (e) { setRegError(e.message); setRegStep('waiting_code') }
+  }
+
+  const contactLines = contacts.split('\n').map(l => l.trim()).filter(l => l.length > 6)
+
+  const handleCampaign = async () => {
+    if (!contactLines.length) return setCampaignError('Add at least one phone number')
+    if (!message.trim()) return setCampaignError('Write a message first')
+    setSending(true); setCampaignError(''); setCampaignResult(null)
+    setProgress({ current: 0, total: contactLines.length })
+    try {
+      // Simulate progress ticking while waiting (server processes sequentially)
+      let tick = 0
+      const iv = setInterval(() => {
+        tick = Math.min(tick + 1, contactLines.length - 1)
+        setProgress({ current: tick, total: contactLines.length })
+      }, 2800)
+      const result = await post('/api/signal/campaign', { contacts: contactLines, message: message.trim() }, { timeoutMs: contactLines.length * 4000 + 15000 })
+      clearInterval(iv)
+      setProgress({ current: contactLines.length, total: contactLines.length })
+      setTimeout(() => { setCampaignResult(result); setProgress(null) }, 400)
+    } catch (e) { setCampaignError(e.message); setProgress(null) }
+    finally { setSending(false) }
+  }
+
+  const phase = signalStatus?.manager?.phase
+  const isReady = phase === 'ready'
+  const configured = signalStatus?.configured
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className={`w-2 h-2 rounded-full ${isReady ? 'bg-emerald-400' : configured ? 'bg-yellow-400 animate-pulse' : 'bg-slate-600'}`} />
+        <span className="text-sm font-medium text-slate-200">
+          {statusLoading ? 'Checking Signal…' : isReady ? 'Signal Connected' : configured ? `Signal: ${phase || 'starting'}…` : 'Signal Not Configured'}
+        </span>
+        {signalStatus?.number && <span className="text-xs text-slate-500 font-mono">{signalStatus.number}</span>}
+        <button onClick={fetchStatus} className="ml-auto text-slate-500 hover:text-slate-300 transition-colors"><RefreshCw size={13} /></button>
+      </div>
+
+      {/* Sub-nav */}
+      <div className="flex items-center gap-1 p-1 bg-slate-800 rounded-lg w-fit">
+        {[['connect', 'Connect'], ['campaign', 'Campaign 📢']].map(([v, label]) => (
+          <button key={v} onClick={() => setView(v)}
+            className={`text-xs px-3 py-1.5 rounded-md font-medium transition-all ${view === v ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Connect ── */}
+      {view === 'connect' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: 'Phase', value: phase || '—', color: isReady ? 'text-emerald-400' : 'text-yellow-400' },
+              { label: 'Number', value: signalStatus?.number || 'Not set', color: 'text-slate-100' },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="bg-slate-800/60 rounded-xl p-4">
+                <p className="text-xs text-slate-500 mb-1">{label}</p>
+                <p className={`text-sm font-bold font-mono ${color}`}>{value}</p>
+              </div>
+            ))}
+          </div>
+
+          {isReady ? (
+            <div className="bg-emerald-400/5 border border-emerald-400/20 rounded-xl p-4 flex items-center gap-3">
+              <Radio size={18} className="text-emerald-400 shrink-0" />
+              <div>
+                <p className="text-sm font-medium text-emerald-400">Signal is live</p>
+                <p className="text-xs text-slate-400 mt-0.5">Receiving and replying to Signal messages</p>
+              </div>
+            </div>
+          ) : !configured ? (
+            <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 space-y-3">
+              <p className="text-sm font-semibold text-slate-200">Step 1 — Set SIGNAL_NUMBER on Railway</p>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Add this env var to your Railway service, then redeploy. Come back here to register once it's running.
+              </p>
+              <div className="bg-slate-900 rounded-lg p-3 text-xs font-mono text-emerald-300 border border-slate-700">
+                SIGNAL_NUMBER = +12025551234
+              </div>
+              <p className="text-xs text-slate-500">Need a free number? Try <strong className="text-slate-300">Google Voice</strong> (voice.google.com) or <strong className="text-slate-300">TextNow</strong></p>
+            </div>
+          ) : (
+            <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 space-y-4">
+              <div>
+                <p className="text-sm font-semibold text-slate-200 mb-1">Register your Signal number</p>
+                <p className="text-xs text-slate-400">One-time setup. Signal will SMS you a 6-digit code.</p>
+              </div>
+
+              {(regStep === 'idle' || regStep === 'registering') && (
+                <div className="space-y-2">
+                  <label className="text-xs text-slate-400">Phone number (with + and country code)</label>
+                  <div className="flex gap-2">
+                    <input value={number} onChange={e => { setNumber(e.target.value); setRegError('') }}
+                      placeholder="+12025551234" disabled={regStep === 'registering'}
+                      className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50" />
+                    <button onClick={handleRegister} disabled={regStep === 'registering' || !number.trim()}
+                      className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
+                      {regStep === 'registering' ? <><Loader size={13} className="animate-spin" /> Sending…</> : 'Send Code'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {(regStep === 'waiting_code' || regStep === 'verifying') && (
+                <div className="space-y-3">
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-4 py-3">
+                    <p className="text-xs text-blue-300">{regMsg}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs text-slate-400">Verification code from SMS</label>
+                    <div className="flex gap-2">
+                      <input value={code} onChange={e => { setCode(e.target.value); setRegError('') }}
+                        placeholder="123456" disabled={regStep === 'verifying'}
+                        className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-center tracking-[0.3em] text-lg disabled:opacity-50" />
+                      <button onClick={handleVerify} disabled={regStep === 'verifying' || !code.trim()}
+                        className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
+                        {regStep === 'verifying' ? <><Loader size={13} className="animate-spin" /> Verifying…</> : '✓ Verify'}
+                      </button>
+                    </div>
+                  </div>
+                  <button onClick={() => { setRegStep('idle'); setRegError('') }} className="text-xs text-slate-500 hover:text-slate-300 underline">
+                    ← Wrong number?
+                  </button>
+                </div>
+              )}
+
+              {regStep === 'done' && (
+                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-3">
+                  <p className="text-sm text-emerald-400">{regMsg}</p>
+                </div>
+              )}
+
+              {regError && (
+                <div className="flex items-start gap-2 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+                  <AlertCircle size={13} className="text-red-400 mt-0.5 shrink-0" />
+                  <p className="text-xs text-red-400">{regError}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Campaign ── */}
+      {view === 'campaign' && (
+        <div className="space-y-4">
+          {!isReady && (
+            <div className="bg-yellow-400/10 border border-yellow-400/20 rounded-lg px-4 py-3 flex items-center gap-2">
+              <AlertCircle size={14} className="text-yellow-400 shrink-0" />
+              <p className="text-xs text-yellow-300">Signal must be connected before sending campaigns. Set it up in the Connect tab.</p>
+            </div>
+          )}
+
+          <div className="space-y-3">
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs text-slate-400">Contacts — one number per line, international format</label>
+                <span className="text-xs text-slate-500">{contactLines.length} contacts</span>
+              </div>
+              <textarea value={contacts} onChange={e => { setContacts(e.target.value); setCampaignError('') }}
+                rows={7} placeholder={"+12025551234\n+2348012345678\n+447911123456\n..."}
+                disabled={sending}
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors resize-none font-mono disabled:opacity-50" />
+              <p className="text-xs text-slate-600 mt-1">Paste from a spreadsheet — one number per row with country code (e.g. +234…)</p>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs text-slate-400">Message</label>
+                <span className="text-xs text-slate-600">{message.length} chars</span>
+              </div>
+              <textarea value={message} onChange={e => { setMessage(e.target.value); setCampaignError('') }}
+                rows={4} placeholder="Hey! Just wanted to reach out and..."
+                disabled={sending}
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors resize-none disabled:opacity-50" />
+            </div>
+          </div>
+
+          {campaignError && (
+            <div className="flex items-start gap-2 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+              <AlertCircle size={13} className="text-red-400 mt-0.5 shrink-0" />
+              <p className="text-xs text-red-400">{campaignError}</p>
+            </div>
+          )}
+
+          {sending && progress && (
+            <div className="bg-slate-800/60 border border-slate-700 rounded-xl px-4 py-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Loader size={13} className="animate-spin text-blue-400" />
+                  <p className="text-xs text-slate-300 font-medium">Sending campaign…</p>
+                </div>
+                <p className="text-xs text-slate-500 font-mono">{progress.current}/{progress.total}</p>
+              </div>
+              <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div className="h-full bg-blue-500 rounded-full transition-all duration-700"
+                  style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} />
+              </div>
+              <p className="text-xs text-slate-500">Small delay between messages to avoid spam filters — ~3s each</p>
+            </div>
+          )}
+
+          {campaignResult && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-4 space-y-3">
+              <p className="text-sm font-semibold text-emerald-400">Campaign complete!</p>
+              <div className="flex gap-6">
+                <div><p className="text-xs text-slate-500 mb-1">Sent</p><p className="text-3xl font-bold text-emerald-400">{campaignResult.sent}</p></div>
+                <div><p className="text-xs text-slate-500 mb-1">Failed</p><p className="text-3xl font-bold text-red-400">{campaignResult.failed}</p></div>
+              </div>
+              {campaignResult.errors?.length > 0 && (
+                <details>
+                  <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-300">View errors ({campaignResult.errors.length})</summary>
+                  <div className="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                    {campaignResult.errors.map((e, i) => <p key={i} className="text-xs text-red-400 font-mono">{e}</p>)}
+                  </div>
+                </details>
+              )}
+              <button onClick={() => setCampaignResult(null)} className="text-xs text-slate-500 hover:text-slate-300 underline">Start new campaign</button>
+            </div>
+          )}
+
+          <button onClick={handleCampaign}
+            disabled={sending || !isReady || !contacts.trim() || !message.trim()}
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
+            {sending ? <><Loader size={14} className="animate-spin" /> Sending…</> : <><Send size={14} /> Send Campaign</>}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const TABS = [
-  { id: 'connectivity', label: 'Connectivity', icon: Link },
+  { id: 'connectivity', label: 'WhatsApp', icon: Link },
+  { id: 'signal', label: 'Signal', icon: Radio },
   { id: 'personality', label: 'Personality', icon: Zap },
   { id: 'commands', label: 'Commands', icon: BookOpen },
   { id: 'settings', label: 'Settings', icon: Settings },
@@ -674,6 +962,7 @@ export default function BotConsole({ bot, onBack }) {
       {/* Content */}
       <main className="max-w-4xl mx-auto px-6 py-6">
         {tab === 'connectivity' && <ConnectivityTab bot={bot} />}
+        {tab === 'signal' && <SignalTab bot={bot} />}
         {tab === 'personality' && <PersonalityTab bot={bot} />}
         {tab === 'commands' && <CommandsTab />}
         {tab === 'settings' && <SettingsTab bot={bot} />}
