@@ -388,6 +388,97 @@ async function startDaemon(number) {
   }
 }
 
+// ─── 3b. Link existing Signal account ────────────────────────────────────────
+// Uses "signal-cli link" which outputs a tsdevice:// URI for the user to scan
+// in their existing Signal app → Settings → Linked Devices → Link a Device.
+// No separate phone number or SMS needed.
+
+let linkProc   = null;
+const linkState = { state: "idle", uri: null, error: null, number: null };
+// state: idle | linking | waiting_scan | linked | error
+
+async function linkDevice(deviceName = "MFG Bot") {
+  await ensureSignalCli();
+  if (!fs.existsSync(SIGNAL_DATA_DIR)) fs.mkdirSync(SIGNAL_DATA_DIR, { recursive: true });
+
+  // Kill any previous link attempt
+  if (linkProc) { try { linkProc.kill(); } catch {} linkProc = null; }
+  Object.assign(linkState, { state: "linking", uri: null, error: null, number: null });
+
+  return new Promise((resolve, reject) => {
+    linkProc = spawn(signalCliExe, [
+      "--config", SIGNAL_DATA_DIR,
+      "link",
+      "--name", deviceName,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+
+    let resolved = false;
+
+    const failTimeout = setTimeout(() => {
+      if (!resolved) {
+        try { linkProc?.kill(); } catch {}
+        linkState.state = "error";
+        linkState.error = "Timed out waiting for link URI";
+        reject(new Error(linkState.error));
+      }
+    }, 30000);
+
+    const tryResolveUri = (line) => {
+      line = line.trim();
+      if (line.startsWith("tsdevice:/") && !resolved) {
+        resolved = true;
+        clearTimeout(failTimeout);
+        linkState.uri   = line;
+        linkState.state = "waiting_scan";
+        log("Link QR URI ready — waiting for user to scan...");
+        resolve({ uri: line });
+      }
+    };
+
+    linkProc.stdout.on("data", d => tryResolveUri(d.toString()));
+    linkProc.stderr.on("data", d => {
+      const s = d.toString().trim();
+      if (s) tryResolveUri(s);   // URI sometimes comes on stderr
+    });
+
+    linkProc.on("close", async (code) => {
+      linkProc = null;
+      if (code === 0) {
+        linkState.state = "linked";
+        log("✅ Device linked! Discovering linked number...");
+        try {
+          const out = await runCliCommand(["listAccounts"], 10000).catch(() => "");
+          const match = out.match(/(\+\d{7,15})/);
+          if (match) { linkState.number = match[1]; log("Linked as:", match[1]); }
+        } catch {}
+        emitter.emit("linked", linkState.number);
+      } else if (!resolved) {
+        linkState.state = "error";
+        linkState.error = `Link exited with code ${code}`;
+        reject(new Error(linkState.error));
+      } else {
+        // User didn't scan in time or cancelled
+        linkState.state = code === 0 ? "linked" : "error";
+      }
+    });
+
+    linkProc.on("error", e => {
+      clearTimeout(failTimeout);
+      linkState.state = "error";
+      linkState.error = e.message;
+      if (!resolved) reject(e);
+    });
+  });
+}
+
+function getLinkStatus() {
+  return { ...linkState };
+}
+
+function onLinked(cb) {
+  emitter.once("linked", cb);
+}
+
 // ─── 4. Public API ────────────────────────────────────────────────────────────
 async function sendMessage(to, text) {
   try {
@@ -416,6 +507,9 @@ module.exports = {
   ensureSignalCli,
   registerNumber,
   verifyNumber,
+  linkDevice,
+  getLinkStatus,
+  onLinked,
   startDaemon,
   sendMessage,
   onMessage,

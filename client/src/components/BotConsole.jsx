@@ -618,13 +618,21 @@ function FakeCallTab() {
 function SignalTab({ bot }) {
   const { get, post } = useBotApi(bot)
   const [view, setView] = useState('connect')
+  const [connectMode, setConnectMode] = useState('link') // 'link' | 'register'
 
-  // Connect state
+  // Status
   const [signalStatus, setSignalStatus] = useState(null)
   const [statusLoading, setStatusLoading] = useState(true)
+
+  // Link-device state (QR scan with existing Signal account)
+  const [linkUri, setLinkUri] = useState(null)
+  const [linkStep, setLinkStep] = useState('idle') // idle | loading | scanning | linked | error
+  const [linkError, setLinkError] = useState('')
+
+  // Register-new-number state
   const [number, setNumber] = useState('')
   const [code, setCode] = useState('')
-  const [regStep, setRegStep] = useState('idle') // idle | registering | waiting_code | verifying | done
+  const [regStep, setRegStep] = useState('idle')
   const [regMsg, setRegMsg] = useState('')
   const [regError, setRegError] = useState('')
 
@@ -638,21 +646,54 @@ function SignalTab({ bot }) {
 
   const fetchStatus = useCallback(async () => {
     try { const d = await get('/api/signal/status'); setSignalStatus(d) }
-    catch { setSignalStatus(null) }
+    catch { /* keep previous value — don't clear on transient failure */ }
     finally { setStatusLoading(false) }
   }, [get])
 
   useEffect(() => { fetchStatus() }, [fetchStatus])
   useEffect(() => { const iv = setInterval(fetchStatus, 5000); return () => clearInterval(iv) }, [fetchStatus])
 
+  // Poll link status while QR is showing
+  useEffect(() => {
+    if (linkStep !== 'scanning') return
+    const iv = setInterval(async () => {
+      try {
+        const d = await get('/api/signal/link-status')
+        if (d.state === 'linked') {
+          setLinkStep('linked')
+          clearInterval(iv)
+          setTimeout(fetchStatus, 2000)
+        } else if (d.state === 'error') {
+          setLinkStep('error')
+          setLinkError(d.error || 'Link failed')
+          clearInterval(iv)
+        }
+      } catch {}
+    }, 3000)
+    return () => clearInterval(iv)
+  }, [linkStep, get, fetchStatus])
+
+  // ── Link existing account ──
+  const handleLinkDevice = async () => {
+    setLinkStep('loading'); setLinkError(''); setLinkUri(null)
+    try {
+      const d = await post('/api/signal/link-device', {}, { timeoutMs: 35000 })
+      setLinkUri(d.uri)
+      setLinkStep('scanning')
+    } catch (e) {
+      setLinkError(e.message)
+      setLinkStep('error')
+    }
+  }
+
+  // ── Register new number ──
   const handleRegister = async () => {
     const num = number.trim()
     if (!num) return setRegError('Enter your Signal number (e.g. +12025551234)')
-    setRegStep('registering'); setRegError(''); setRegMsg('')
+    setRegStep('registering'); setRegError('')
     try {
       await post('/api/signal/register', { number: num })
-      setRegStep('waiting_code')
-      setRegMsg('SMS sent! Enter the 6-digit code you received.')
+      setRegStep('waiting_code'); setRegMsg('SMS sent! Enter the 6-digit code.')
     } catch (e) { setRegError(e.message); setRegStep('idle') }
   }
 
@@ -662,12 +703,12 @@ function SignalTab({ bot }) {
     setRegStep('verifying'); setRegError('')
     try {
       await post('/api/signal/verify', { number: number.trim(), code: c })
-      setRegStep('done')
-      setRegMsg('✅ Verified! Signal bot is connecting…')
+      setRegStep('done'); setRegMsg('✅ Verified! Signal bot is connecting…')
       setTimeout(fetchStatus, 3000)
     } catch (e) { setRegError(e.message); setRegStep('waiting_code') }
   }
 
+  // ── Campaign ──
   const contactLines = contacts.split('\n').map(l => l.trim()).filter(l => l.length > 6)
 
   const handleCampaign = async () => {
@@ -676,12 +717,8 @@ function SignalTab({ bot }) {
     setSending(true); setCampaignError(''); setCampaignResult(null)
     setProgress({ current: 0, total: contactLines.length })
     try {
-      // Simulate progress ticking while waiting (server processes sequentially)
       let tick = 0
-      const iv = setInterval(() => {
-        tick = Math.min(tick + 1, contactLines.length - 1)
-        setProgress({ current: tick, total: contactLines.length })
-      }, 2800)
+      const iv = setInterval(() => { tick = Math.min(tick + 1, contactLines.length - 1); setProgress({ current: tick, total: contactLines.length }) }, 2800)
       const result = await post('/api/signal/campaign', { contacts: contactLines, message: message.trim() }, { timeoutMs: contactLines.length * 4000 + 15000 })
       clearInterval(iv)
       setProgress({ current: contactLines.length, total: contactLines.length })
@@ -692,21 +729,20 @@ function SignalTab({ bot }) {
 
   const phase = signalStatus?.manager?.phase
   const isReady = phase === 'ready'
-  const configured = signalStatus?.configured
 
   return (
     <div className="space-y-4">
-      {/* Header */}
+      {/* Header status */}
       <div className="flex items-center gap-3">
-        <div className={`w-2 h-2 rounded-full ${isReady ? 'bg-emerald-400' : configured ? 'bg-yellow-400 animate-pulse' : 'bg-slate-600'}`} />
+        <div className={`w-2 h-2 rounded-full ${isReady ? 'bg-emerald-400' : statusLoading ? 'bg-slate-600 animate-pulse' : signalStatus ? 'bg-yellow-400 animate-pulse' : 'bg-slate-600'}`} />
         <span className="text-sm font-medium text-slate-200">
-          {statusLoading ? 'Checking Signal…' : isReady ? 'Signal Connected' : configured ? `Signal: ${phase || 'starting'}…` : 'Signal Not Configured'}
+          {statusLoading ? 'Checking…' : isReady ? 'Signal Connected' : signalStatus?.configured ? `Signal: ${phase || 'starting'}…` : 'Signal — Setup Required'}
         </span>
         {signalStatus?.number && <span className="text-xs text-slate-500 font-mono">{signalStatus.number}</span>}
         <button onClick={fetchStatus} className="ml-auto text-slate-500 hover:text-slate-300 transition-colors"><RefreshCw size={13} /></button>
       </div>
 
-      {/* Sub-nav */}
+      {/* Sub-nav: Connect | Campaign */}
       <div className="flex items-center gap-1 p-1 bg-slate-800 rounded-lg w-fit">
         {[['connect', 'Connect'], ['campaign', 'Campaign 📢']].map(([v, label]) => (
           <button key={v} onClick={() => setView(v)}
@@ -716,109 +752,178 @@ function SignalTab({ bot }) {
         ))}
       </div>
 
-      {/* ── Connect ── */}
+      {/* ── CONNECT VIEW ── */}
       {view === 'connect' && (
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            {[
-              { label: 'Phase', value: phase || '—', color: isReady ? 'text-emerald-400' : 'text-yellow-400' },
-              { label: 'Number', value: signalStatus?.number || 'Not set', color: 'text-slate-100' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="bg-slate-800/60 rounded-xl p-4">
-                <p className="text-xs text-slate-500 mb-1">{label}</p>
-                <p className={`text-sm font-bold font-mono ${color}`}>{value}</p>
-              </div>
-            ))}
-          </div>
 
-          {isReady ? (
+          {/* Already live */}
+          {isReady && (
             <div className="bg-emerald-400/5 border border-emerald-400/20 rounded-xl p-4 flex items-center gap-3">
               <Radio size={18} className="text-emerald-400 shrink-0" />
               <div>
                 <p className="text-sm font-medium text-emerald-400">Signal is live</p>
-                <p className="text-xs text-slate-400 mt-0.5">Receiving and replying to Signal messages</p>
+                <p className="text-xs text-slate-400 mt-0.5">Receiving and replying on {signalStatus?.number || 'your Signal account'}</p>
               </div>
             </div>
-          ) : !configured ? (
-            <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 space-y-3">
-              <p className="text-sm font-semibold text-slate-200">Step 1 — Set SIGNAL_NUMBER on Railway</p>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Add this env var to your Railway service, then redeploy. Come back here to register once it's running.
-              </p>
-              <div className="bg-slate-900 rounded-lg p-3 text-xs font-mono text-emerald-300 border border-slate-700">
-                SIGNAL_NUMBER = +12025551234
-              </div>
-              <p className="text-xs text-slate-500">Need a free number? Try <strong className="text-slate-300">Google Voice</strong> (voice.google.com) or <strong className="text-slate-300">TextNow</strong></p>
-            </div>
-          ) : (
-            <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-5 space-y-4">
-              <div>
-                <p className="text-sm font-semibold text-slate-200 mb-1">Register your Signal number</p>
-                <p className="text-xs text-slate-400">One-time setup. Signal will SMS you a 6-digit code.</p>
-              </div>
+          )}
 
-              {(regStep === 'idle' || regStep === 'registering') && (
-                <div className="space-y-2">
-                  <label className="text-xs text-slate-400">Phone number (with + and country code)</label>
-                  <div className="flex gap-2">
-                    <input value={number} onChange={e => { setNumber(e.target.value); setRegError('') }}
-                      placeholder="+12025551234" disabled={regStep === 'registering'}
-                      className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50" />
-                    <button onClick={handleRegister} disabled={regStep === 'registering' || !number.trim()}
-                      className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
-                      {regStep === 'registering' ? <><Loader size={13} className="animate-spin" /> Sending…</> : 'Send Code'}
-                    </button>
-                  </div>
-                </div>
-              )}
+          {/* Setup card — always show unless ready */}
+          {!isReady && (
+            <div className="bg-slate-800/40 border border-slate-700 rounded-xl overflow-hidden">
 
-              {(regStep === 'waiting_code' || regStep === 'verifying') && (
-                <div className="space-y-3">
-                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-4 py-3">
-                    <p className="text-xs text-blue-300">{regMsg}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs text-slate-400">Verification code from SMS</label>
-                    <div className="flex gap-2">
-                      <input value={code} onChange={e => { setCode(e.target.value); setRegError('') }}
-                        placeholder="123456" disabled={regStep === 'verifying'}
-                        className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-center tracking-[0.3em] text-lg disabled:opacity-50" />
-                      <button onClick={handleVerify} disabled={regStep === 'verifying' || !code.trim()}
-                        className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
-                        {regStep === 'verifying' ? <><Loader size={13} className="animate-spin" /> Verifying…</> : '✓ Verify'}
-                      </button>
-                    </div>
-                  </div>
-                  <button onClick={() => { setRegStep('idle'); setRegError('') }} className="text-xs text-slate-500 hover:text-slate-300 underline">
-                    ← Wrong number?
+              {/* Mode toggle: Link Account vs Register New */}
+              <div className="flex border-b border-slate-700">
+                {[['link', '📱 Link Existing Account'], ['register', '➕ Register New Number']].map(([m, label]) => (
+                  <button key={m} onClick={() => setConnectMode(m)}
+                    className={`flex-1 text-xs py-3 font-medium transition-colors ${connectMode === m ? 'bg-blue-600/20 text-blue-300 border-b-2 border-blue-500' : 'text-slate-400 hover:text-slate-200'}`}>
+                    {label}
                   </button>
-                </div>
-              )}
+                ))}
+              </div>
 
-              {regStep === 'done' && (
-                <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-3">
-                  <p className="text-sm text-emerald-400">{regMsg}</p>
-                </div>
-              )}
+              <div className="p-5 space-y-4">
 
-              {regError && (
-                <div className="flex items-start gap-2 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
-                  <AlertCircle size={13} className="text-red-400 mt-0.5 shrink-0" />
-                  <p className="text-xs text-red-400">{regError}</p>
-                </div>
-              )}
+                {/* ── LINK MODE (default — like WhatsApp QR) ── */}
+                {connectMode === 'link' && (
+                  <>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200 mb-1">Link your existing Signal account</p>
+                      <p className="text-xs text-slate-400 leading-relaxed">Works exactly like WhatsApp — scan a QR code in your Signal app and the bot connects instantly. No new number needed.</p>
+                    </div>
+
+                    {linkStep === 'idle' && (
+                      <button onClick={handleLinkDevice}
+                        className="w-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-3 rounded-xl transition-colors flex items-center justify-center gap-2">
+                        <Radio size={15} /> Generate QR Code
+                      </button>
+                    )}
+
+                    {linkStep === 'loading' && (
+                      <div className="flex items-center justify-center gap-3 py-8 text-slate-400">
+                        <Loader size={18} className="animate-spin text-blue-400" />
+                        <p className="text-sm">Generating QR code… (~5s)</p>
+                      </div>
+                    )}
+
+                    {linkStep === 'scanning' && linkUri && (
+                      <div className="space-y-4">
+                        <div className="flex justify-center">
+                          <div className="bg-white p-4 rounded-2xl shadow-lg">
+                            <QRCodeSVG value={linkUri} size={200} />
+                          </div>
+                        </div>
+                        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 space-y-1.5">
+                          <p className="text-xs font-semibold text-blue-300">Scan this in your Signal app:</p>
+                          <p className="text-xs text-slate-400">1️⃣ Open <strong className="text-slate-200">Signal</strong> on your phone</p>
+                          <p className="text-xs text-slate-400">2️⃣ Tap your <strong className="text-slate-200">profile picture</strong> (top left)</p>
+                          <p className="text-xs text-slate-400">3️⃣ Tap <strong className="text-slate-200">Linked Devices</strong></p>
+                          <p className="text-xs text-slate-400">4️⃣ Tap <strong className="text-slate-200">Link New Device</strong> → scan the QR above</p>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-slate-500">
+                          <Loader size={11} className="animate-spin text-blue-400 shrink-0" />
+                          Waiting for scan… this page will update automatically
+                        </div>
+                        <button onClick={() => { setLinkStep('idle'); setLinkUri(null) }} className="text-xs text-slate-500 hover:text-slate-300 underline">
+                          Generate new QR
+                        </button>
+                      </div>
+                    )}
+
+                    {linkStep === 'linked' && (
+                      <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-4 text-center space-y-1">
+                        <p className="text-base font-bold text-emerald-400">✅ Linked!</p>
+                        <p className="text-xs text-slate-400">Signal bot is connecting — status will update in a few seconds</p>
+                      </div>
+                    )}
+
+                    {linkStep === 'error' && (
+                      <div className="space-y-3">
+                        <div className="flex items-start gap-2 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+                          <AlertCircle size={13} className="text-red-400 mt-0.5 shrink-0" />
+                          <p className="text-xs text-red-400">{linkError}</p>
+                        </div>
+                        <button onClick={() => setLinkStep('idle')} className="text-xs text-blue-400 hover:underline">Try again</button>
+                      </div>
+                    )}
+
+                    {/* First-time note */}
+                    {linkStep === 'idle' && (
+                      <p className="text-xs text-slate-600 text-center">
+                        First time: Railway will download signal-cli (~90MB). The QR may take 60–90s to appear — be patient.
+                        {!signalStatus?.configured && <span className="block mt-1 text-yellow-500/80">⚠️ Also set <code className="bg-slate-700 px-1 rounded">SIGNAL_NUMBER</code> = your own number on Railway so the bot knows which account to use after linking.</span>}
+                      </p>
+                    )}
+                  </>
+                )}
+
+                {/* ── REGISTER MODE (new number) ── */}
+                {connectMode === 'register' && (
+                  <>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200 mb-1">Register a separate Signal number</p>
+                      <p className="text-xs text-slate-400">Use this if you want a dedicated Signal number for the bot (Google Voice, TextNow, etc.)</p>
+                    </div>
+
+                    {(regStep === 'idle' || regStep === 'registering') && (
+                      <div className="space-y-2">
+                        <label className="text-xs text-slate-400">Phone number (with + and country code)</label>
+                        <div className="flex gap-2">
+                          <input value={number} onChange={e => { setNumber(e.target.value); setRegError('') }}
+                            placeholder="+12025551234" disabled={regStep === 'registering'}
+                            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50" />
+                          <button onClick={handleRegister} disabled={regStep === 'registering' || !number.trim()}
+                            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
+                            {regStep === 'registering' ? <><Loader size={13} className="animate-spin" /> Sending…</> : 'Send Code'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {(regStep === 'waiting_code' || regStep === 'verifying') && (
+                      <div className="space-y-3">
+                        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg px-4 py-3">
+                          <p className="text-xs text-blue-300">{regMsg}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <input value={code} onChange={e => { setCode(e.target.value); setRegError('') }}
+                            placeholder="123456" disabled={regStep === 'verifying'}
+                            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-center tracking-[0.3em] text-lg disabled:opacity-50" />
+                          <button onClick={handleVerify} disabled={regStep === 'verifying' || !code.trim()}
+                            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
+                            {regStep === 'verifying' ? <><Loader size={13} className="animate-spin" /> Verifying…</> : '✓ Verify'}
+                          </button>
+                        </div>
+                        <button onClick={() => { setRegStep('idle'); setRegError('') }} className="text-xs text-slate-500 hover:text-slate-300 underline">← Wrong number?</button>
+                      </div>
+                    )}
+
+                    {regStep === 'done' && (
+                      <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-3">
+                        <p className="text-sm text-emerald-400">{regMsg}</p>
+                      </div>
+                    )}
+
+                    {regError && (
+                      <div className="flex items-start gap-2 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+                        <AlertCircle size={13} className="text-red-400 mt-0.5 shrink-0" />
+                        <p className="text-xs text-red-400">{regError}</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* ── Campaign ── */}
+      {/* ── CAMPAIGN VIEW ── */}
       {view === 'campaign' && (
         <div className="space-y-4">
           {!isReady && (
             <div className="bg-yellow-400/10 border border-yellow-400/20 rounded-lg px-4 py-3 flex items-center gap-2">
               <AlertCircle size={14} className="text-yellow-400 shrink-0" />
-              <p className="text-xs text-yellow-300">Signal must be connected before sending campaigns. Set it up in the Connect tab.</p>
+              <p className="text-xs text-yellow-300">Connect Signal first (Connect tab), then come back to send campaigns.</p>
             </div>
           )}
 
@@ -834,7 +939,6 @@ function SignalTab({ bot }) {
                 className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors resize-none font-mono disabled:opacity-50" />
               <p className="text-xs text-slate-600 mt-1">Paste from a spreadsheet — one number per row with country code (e.g. +234…)</p>
             </div>
-
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-xs text-slate-400">Message</label>
@@ -864,10 +968,9 @@ function SignalTab({ bot }) {
                 <p className="text-xs text-slate-500 font-mono">{progress.current}/{progress.total}</p>
               </div>
               <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                <div className="h-full bg-blue-500 rounded-full transition-all duration-700"
-                  style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} />
+                <div className="h-full bg-blue-500 rounded-full transition-all duration-700" style={{ width: `${progress.total ? (progress.current / progress.total) * 100 : 0}%` }} />
               </div>
-              <p className="text-xs text-slate-500">Small delay between messages to avoid spam filters — ~3s each</p>
+              <p className="text-xs text-slate-500">~3s delay between messages to avoid spam filters</p>
             </div>
           )}
 

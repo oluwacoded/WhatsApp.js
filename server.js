@@ -5046,6 +5046,29 @@ app.post("/api/signal/verify", async (req, res) => {
   }
 });
 
+// POST /api/signal/link-device — generate a tsdevice:// QR URI so the user can
+// link their existing Signal account (no new number or SMS needed).
+// Works just like WhatsApp's "Link a Device" QR scan.
+app.post("/api/signal/link-device", async (req, res) => {
+  try {
+    const result = await signalManager.linkDevice("MFG Bot");
+    res.json({ ok: true, uri: result.uri });
+    // When the user scans and link completes, restart the signal bot
+    signalManager.onLinked((number) => {
+      const num = number || process.env.SIGNAL_NUMBER;
+      console.log(`[MFG_bot] Signal linked as ${num} — restarting signal-bot.js...`);
+      if (signalBotProcess) signalBotProcess.kill("SIGTERM");
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/signal/link-status — poll this to know when the user has scanned
+app.get("/api/signal/link-status", (req, res) => {
+  res.json(signalManager.getLinkStatus());
+});
+
 // POST /api/signal/campaign — bulk-send a message to a list of Signal contacts
 // Body: { contacts: ["+123...", "+456..."], message: "Hello!", delay: 2500 }
 // Sends sequentially with a delay between each to avoid Signal rate-limits.
