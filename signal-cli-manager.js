@@ -124,13 +124,16 @@ async function ensureSignalCli() {
   if (signalCliExe && fs.existsSync(signalCliExe)) return signalCliExe;
 
   // Check persisted state from a previous run
-  if (fs.existsSync(VERSION_FILE) && fs.existsSync(SIGNAL_CLI_BIN)) {
+  if (fs.existsSync(VERSION_FILE)) {
     try {
-      const { version } = JSON.parse(fs.readFileSync(VERSION_FILE, "utf8"));
-      signalCliExe = SIGNAL_CLI_BIN;
-      status.version = version;
-      log(`Using cached binary v${version}`);
-      return signalCliExe;
+      const { version, exe } = JSON.parse(fs.readFileSync(VERSION_FILE, "utf8"));
+      const binPath = exe || SIGNAL_CLI_BIN; // exe field added in newer versions
+      if (fs.existsSync(binPath)) {
+        signalCliExe = binPath;
+        status.version = version;
+        log(`Using cached binary v${version} (${binPath})`);
+        return signalCliExe;
+      }
     } catch {}
   }
 
@@ -165,9 +168,17 @@ async function ensureSignalCli() {
   log("Download complete. Extracting...");
 
   // ── Extract ────────────────────────────────────────────────────────────────
-  if (!fs.existsSync(SIGNAL_CLI_DIR)) fs.mkdirSync(SIGNAL_CLI_DIR, { recursive: true });
+  // Clean up any partial/stale extraction before re-extracting
+  if (fs.existsSync(SIGNAL_CLI_DIR)) {
+    try { fs.rmSync(SIGNAL_CLI_DIR, { recursive: true, force: true }); } catch {}
+  }
+  fs.mkdirSync(SIGNAL_CLI_DIR, { recursive: true });
+
+  // Extract WITHOUT --strip-components so we handle both formats:
+  //   Old (≤0.13.x): tarball has signal-cli-X.X.X/bin/signal-cli inside
+  //   New (≥0.14.x): tarball is a single flat binary called signal-cli-client
   await new Promise((resolve, reject) => {
-    const proc = spawn("tar", ["-xzf", tarPath, "-C", SIGNAL_CLI_DIR, "--strip-components=1"], {
+    const proc = spawn("tar", ["-xzf", tarPath, "-C", SIGNAL_CLI_DIR], {
       stdio: ["ignore", "pipe", "pipe"]
     });
     proc.on("close", code => code === 0 ? resolve() : reject(new Error(`tar exited ${code}`)));
@@ -177,14 +188,38 @@ async function ensureSignalCli() {
   // Cleanup tar
   try { fs.unlinkSync(tarPath); } catch {}
 
-  if (!fs.existsSync(SIGNAL_CLI_BIN)) {
-    throw new Error(`Binary not found after extraction: ${SIGNAL_CLI_BIN}`);
-  }
-  fs.chmodSync(SIGNAL_CLI_BIN, "755");
+  // ── Find the binary wherever it landed ─────────────────────────────────────
+  let foundBin = null;
 
-  // Persist state
-  fs.writeFileSync(VERSION_FILE, JSON.stringify({ version, exe: SIGNAL_CLI_BIN }));
-  signalCliExe = SIGNAL_CLI_BIN;
+  // New format (v0.14.x): single file "signal-cli-client" at root of SIGNAL_CLI_DIR
+  const clientBin = path.join(SIGNAL_CLI_DIR, "signal-cli-client");
+  if (fs.existsSync(clientBin)) foundBin = clientBin;
+
+  // New format variant: just "signal-cli" at root
+  if (!foundBin) {
+    const rootBin = path.join(SIGNAL_CLI_DIR, "signal-cli");
+    if (fs.existsSync(rootBin)) foundBin = rootBin;
+  }
+
+  // Old format: versioned subdirectory containing bin/signal-cli
+  if (!foundBin) {
+    for (const entry of fs.readdirSync(SIGNAL_CLI_DIR)) {
+      const candidate = path.join(SIGNAL_CLI_DIR, entry, "bin", "signal-cli");
+      if (fs.existsSync(candidate)) { foundBin = candidate; break; }
+    }
+  }
+
+  if (!foundBin) {
+    const contents = fs.readdirSync(SIGNAL_CLI_DIR).join(", ") || "(empty)";
+    throw new Error(`Binary not found after extraction. Dir contents: ${contents}`);
+  }
+
+  fs.chmodSync(foundBin, "755");
+  log(`Binary found at: ${foundBin}`);
+
+  // Persist state — store the actual binary path for future runs
+  fs.writeFileSync(VERSION_FILE, JSON.stringify({ version, exe: foundBin }));
+  signalCliExe = foundBin;
   status.version = version;
   log(`✅ signal-cli v${version} ready`);
   return signalCliExe;
