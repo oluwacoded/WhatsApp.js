@@ -141,18 +141,21 @@ async function ensureSignalCli() {
   log("Fetching latest signal-cli release info...");
   status.phase = "downloading";
   let version = FALLBACK_VER;
-  // Asset name changed in v0.14.x: Linux-x86_64 → Linux-client
-  let downloadUrl = `https://github.com/AsamK/signal-cli/releases/download/v${FALLBACK_VER}/signal-cli-${FALLBACK_VER}-Linux-client.tar.gz`;
+  // Linux-native = full GraalVM standalone binary (supports link/register/daemon)
+  // Linux-client = JSON-RPC client only (needs a running daemon — NOT what we want)
+  // Linux-x86_64 = old name for the bundled-JRE tarball (pre-v0.14)
+  let downloadUrl = `https://github.com/AsamK/signal-cli/releases/download/v${FALLBACK_VER}/signal-cli-${FALLBACK_VER}-Linux-native.tar.gz`;
 
   try {
     const releaseJson = await httpsRequest(GITHUB_LATEST);
     const release = JSON.parse(releaseJson);
     version = (release.tag_name || `v${FALLBACK_VER}`).replace(/^v/, "");
-    // Try new naming first (Linux-client), fall back to old (Linux-x86_64)
-    const asset = (release.assets || []).find(a => a.name.includes("Linux-client") && a.name.endsWith(".tar.gz"))
-                || (release.assets || []).find(a => a.name.includes("Linux-x86_64") && a.name.endsWith(".tar.gz"));
+    const assets = release.assets || [];
+    // Prefer: Linux-native > Linux-x86_64 (old bundled-JRE) — never use Linux-client
+    const asset = assets.find(a => a.name.includes("Linux-native") && a.name.endsWith(".tar.gz"))
+                || assets.find(a => a.name.includes("Linux-x86_64") && a.name.endsWith(".tar.gz"));
     if (asset) downloadUrl = asset.browser_download_url;
-    log(`Latest release: v${version}`);
+    log(`Latest release: v${version} — ${downloadUrl.split("/").pop()}`);
   } catch (e) {
     warn(`GitHub API unreachable (${e.message}), using fallback v${FALLBACK_VER}`);
   }
