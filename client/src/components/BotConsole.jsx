@@ -788,43 +788,55 @@ function SignalTab({ bot }) {
                   <>
                     <div>
                       <p className="text-sm font-semibold text-slate-200 mb-1">Link your existing Signal account</p>
-                      <p className="text-xs text-slate-400 leading-relaxed">Works exactly like WhatsApp — scan a QR code in your Signal app and the bot connects instantly. No new number needed.</p>
+                      <p className="text-xs text-slate-400 leading-relaxed">No second phone needed — tap the button below and Signal opens automatically to confirm.</p>
                     </div>
 
                     {linkStep === 'idle' && (
                       <button onClick={handleLinkDevice}
                         className="w-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-3 rounded-xl transition-colors flex items-center justify-center gap-2">
-                        <Radio size={15} /> Generate QR Code
+                        <Radio size={15} /> Generate Link
                       </button>
                     )}
 
                     {linkStep === 'loading' && (
                       <div className="flex items-center justify-center gap-3 py-8 text-slate-400">
                         <Loader size={18} className="animate-spin text-blue-400" />
-                        <p className="text-sm">Generating QR code… (~5s)</p>
+                        <p className="text-sm">Generating link… (~5s)</p>
                       </div>
                     )}
 
                     {linkStep === 'scanning' && linkUri && (
                       <div className="space-y-4">
-                        <div className="flex justify-center">
-                          <div className="bg-white p-4 rounded-2xl shadow-lg">
-                            <QRCodeSVG value={linkUri} size={200} />
+
+                        {/* PRIMARY: deep link button — works on same phone, no QR scan */}
+                        <a href={linkUri}
+                          className="w-full bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-sm font-bold py-4 rounded-xl transition-colors flex items-center justify-center gap-2 no-underline"
+                          style={{ display: 'flex', textDecoration: 'none' }}>
+                          <Radio size={16} /> Open in Signal
+                        </a>
+                        <p className="text-xs text-slate-400 text-center -mt-2">
+                          Tap above → Signal opens → tap <strong className="text-slate-200">Link</strong> to confirm
+                        </p>
+
+                        {/* SECONDARY: QR code for desktop users */}
+                        <details className="mt-2">
+                          <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-300 text-center">On desktop? Scan QR instead ▾</summary>
+                          <div className="mt-3 space-y-3">
+                            <div className="flex justify-center">
+                              <div className="bg-white p-4 rounded-2xl shadow-lg">
+                                <QRCodeSVG value={linkUri} size={180} />
+                              </div>
+                            </div>
+                            <p className="text-xs text-slate-500 text-center">Signal → Profile → Linked Devices → Link New Device → scan</p>
                           </div>
-                        </div>
-                        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 space-y-1.5">
-                          <p className="text-xs font-semibold text-blue-300">Scan this in your Signal app:</p>
-                          <p className="text-xs text-slate-400">1️⃣ Open <strong className="text-slate-200">Signal</strong> on your phone</p>
-                          <p className="text-xs text-slate-400">2️⃣ Tap your <strong className="text-slate-200">profile picture</strong> (top left)</p>
-                          <p className="text-xs text-slate-400">3️⃣ Tap <strong className="text-slate-200">Linked Devices</strong></p>
-                          <p className="text-xs text-slate-400">4️⃣ Tap <strong className="text-slate-200">Link New Device</strong> → scan the QR above</p>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-slate-500">
+                        </details>
+
+                        <div className="flex items-center gap-2 text-xs text-slate-500 justify-center pt-1">
                           <Loader size={11} className="animate-spin text-blue-400 shrink-0" />
-                          Waiting for scan… this page will update automatically
+                          Waiting… page updates automatically after you confirm
                         </div>
-                        <button onClick={() => { setLinkStep('idle'); setLinkUri(null) }} className="text-xs text-slate-500 hover:text-slate-300 underline">
-                          Generate new QR
+                        <button onClick={() => { setLinkStep('idle'); setLinkUri(null) }} className="text-xs text-slate-500 hover:text-slate-300 underline w-full text-center">
+                          Generate new link
                         </button>
                       </div>
                     )}
