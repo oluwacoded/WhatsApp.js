@@ -5014,6 +5014,92 @@ app.get("/api/signal/status", (req, res) => {
   });
 });
 
+// ── Signal captcha intercept page ────────────────────────────────────────────
+// Stores the token POSTed by /captcha page so the dashboard can poll for it
+let _pendingCaptcha = null;
+let _pendingCaptchaExpiry = 0;
+
+// Serve the captcha solving page (hCaptcha widget, auto-posts token back)
+app.get("/captcha", (req, res) => {
+  res.setHeader("Content-Type", "text/html");
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Signal Captcha</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:20px}
+    .card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:28px;max-width:420px;width:100%;text-align:center}
+    h1{font-size:1.15rem;font-weight:700;margin-bottom:10px}
+    p{font-size:.85rem;color:#94a3b8;line-height:1.55;margin-bottom:16px}
+    .captcha-wrap{display:flex;justify-content:center;margin:18px 0}
+    .status{padding:14px 18px;border-radius:10px;font-size:.85rem;font-weight:600;line-height:1.5;margin-top:8px;display:none}
+    .success{background:#052e16;border:1px solid #166534;color:#4ade80}
+    .error{background:#1c0a0a;border:1px solid #7f1d1d;color:#f87171}
+    .spinner{display:none;align-items:center;justify-content:center;gap:10px;color:#94a3b8;font-size:.85rem;margin-top:12px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .spin{animation:spin 1s linear infinite;display:inline-block}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔐 Signal Captcha</h1>
+    <p>Solve the captcha — the token is sent to the dashboard automatically. You can close this tab when done.</p>
+    <div class="captcha-wrap"><div id="hc"></div></div>
+    <div class="spinner" id="spin">
+      <span class="spin">⟳</span> Sending to dashboard…
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+  <script>
+    const SITEKEY='5fad97ac-7d06-4e44-b18a-b950b20148ff';
+    window.onSolved=async function(token){
+      document.getElementById('spin').style.display='flex';
+      const uri='signalcaptcha://signal-hcaptcha.'+SITEKEY+'.registration.'+token;
+      try{
+        const r=await fetch('/api/signal/store-captcha',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:uri})});
+        document.getElementById('spin').style.display='none';
+        const el=document.getElementById('status');
+        el.style.display='block';
+        if(r.ok){el.className='status success';el.textContent='✅ Done! Go back to the dashboard — it detected the token automatically.';}
+        else{el.className='status error';el.textContent='Server error. Copy this token manually:\\n'+uri;}
+      }catch(e){
+        document.getElementById('spin').style.display='none';
+        const el=document.getElementById('status');el.style.display='block';
+        el.className='status error';el.textContent='Network error — copy this token:\\n'+uri;
+      }
+    };
+    window.onHcLoad=function(){hcaptcha.render('hc',{sitekey:SITEKEY,callback:'onSolved',theme:'dark'});};
+    const s=document.createElement('script');
+    s.src='https://js.hcaptcha.com/1/api.js?onload=onHcLoad&render=explicit';
+    s.async=true;document.head.appendChild(s);
+  </script>
+</body>
+</html>`);
+});
+
+// POST /api/signal/store-captcha — called by the /captcha page after solving
+app.post("/api/signal/store-captcha", (req, res) => {
+  const token = (req.body?.token || "").trim();
+  if (!token.startsWith("signalcaptcha://")) return res.status(400).json({ ok: false, error: "invalid token" });
+  _pendingCaptcha = token;
+  _pendingCaptchaExpiry = Date.now() + 5 * 60 * 1000; // 5-min TTL
+  res.json({ ok: true });
+});
+
+// GET /api/signal/get-captcha — dashboard polls this to auto-fill the token
+app.get("/api/signal/get-captcha", (req, res) => {
+  if (_pendingCaptcha && Date.now() < _pendingCaptchaExpiry) {
+    const token = _pendingCaptcha;
+    _pendingCaptcha = null; // consume once
+    return res.json({ ok: true, token });
+  }
+  res.json({ ok: false });
+});
+
 // POST /api/signal/register — triggers "signal-cli register -a NUMBER [--captcha TOKEN]"
 // Body: { number: "+12345678901", captcha: "signalcaptcha://..." }
 app.post("/api/signal/register", async (req, res) => {

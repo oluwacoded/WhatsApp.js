@@ -654,6 +654,21 @@ function SignalTab({ bot }) {
   useEffect(() => { fetchStatus() }, [fetchStatus])
   useEffect(() => { const iv = setInterval(fetchStatus, 5000); return () => clearInterval(iv) }, [fetchStatus])
 
+  // Poll for captcha token auto-filled by /captcha page
+  useEffect(() => {
+    if (connectMode !== 'register' || captchaToken) return
+    const iv = setInterval(async () => {
+      try {
+        const data = await get('/api/signal/get-captcha')
+        if (data?.ok && data?.token) {
+          setCaptchaToken(data.token)
+          clearInterval(iv)
+        }
+      } catch {}
+    }, 2000)
+    return () => clearInterval(iv)
+  }, [connectMode, captchaToken, get])
+
   // Poll link status while QR is showing
   useEffect(() => {
     if (linkStep !== 'scanning') return
@@ -904,23 +919,26 @@ function SignalTab({ bot }) {
                           {/* Step-by-step */}
                           <div className="space-y-2">
                             <p className="text-xs text-slate-400">1️⃣ Tap the button below — a captcha page opens</p>
-                            <a href="https://signalcaptchas.org/registration/generate.html" target="_blank" rel="noopener noreferrer"
-                              className="flex items-center justify-center gap-2 w-full bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium py-2.5 rounded-lg transition-colors no-underline"
+                            <a href="/captcha" target="_blank" rel="noopener noreferrer"
+                              className="flex items-center justify-center gap-2 w-full bg-blue-700 hover:bg-blue-600 text-white text-sm font-semibold py-3 rounded-lg transition-colors no-underline"
                               style={{ textDecoration: 'none' }}>
                               Open Captcha Page ↗
                             </a>
-                            <p className="text-xs text-slate-400">2️⃣ Solve the checkbox captcha on that page</p>
-                            <p className="text-xs text-slate-400">3️⃣ Your browser will show an alert saying it can't open <span className="font-mono text-slate-300">signalcaptcha://…</span> — <strong className="text-slate-200">copy that full URL</strong> from the alert</p>
-                            <p className="text-xs text-slate-500 italic">On iPhone: the alert shows "Safari cannot open the page because the address is invalid" — the URL is shown below the message. Long-press it to copy.</p>
+                            <p className="text-xs text-slate-400">2️⃣ Solve the captcha — the token is sent back here <strong className="text-slate-200">automatically</strong></p>
                           </div>
 
-                          <div>
-                            <label className="text-xs text-slate-400 mb-1.5 block">4️⃣ Paste the full <span className="font-mono">signalcaptcha://…</span> URL here</label>
-                            <textarea value={captchaToken} onChange={e => { setCaptchaToken(e.target.value); setRegError('') }}
-                              rows={2} placeholder="signalcaptcha://signal-recaptcha-v2.ABC123..."
-                              disabled={regStep === 'registering'}
-                              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono resize-none disabled:opacity-50" />
-                          </div>
+                          {/* Auto-fill status */}
+                          {captchaToken ? (
+                            <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
+                              <span className="text-emerald-400 text-base">✅</span>
+                              <p className="text-xs text-emerald-300 font-medium">Captcha received! Hit Send Verification SMS.</p>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 text-xs text-slate-500">
+                              <span className="animate-pulse text-blue-400">●</span>
+                              Waiting for captcha solve…
+                            </div>
+                          )}
                         </div>
 
                         <button onClick={handleRegister}
