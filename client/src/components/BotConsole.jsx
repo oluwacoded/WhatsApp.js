@@ -932,16 +932,30 @@ function SignalTab({ bot }) {
                             <p className="text-xs text-slate-400">2️⃣ Solve the captcha — the token is sent back here <strong className="text-slate-200">automatically</strong></p>
                           </div>
 
-                          {/* Auto-fill status */}
+                          {/* Manual paste field — always visible */}
+                          <div>
+                            <label className="text-xs text-slate-400 mb-1.5 block">
+                              Or paste the token here if auto-fill didn't work:
+                            </label>
+                            <textarea
+                              value={captchaToken}
+                              onChange={e => { setCaptchaToken(e.target.value.trim()); setRegError('') }}
+                              rows={3}
+                              placeholder="signalcaptcha://signal-hcaptcha.5fad97ac…"
+                              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono resize-none"
+                            />
+                          </div>
+
+                          {/* Status indicator */}
                           {captchaToken ? (
                             <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
-                              <span className="text-emerald-400 text-base">✅</span>
-                              <p className="text-xs text-emerald-300 font-medium">Captcha received! Hit Send Verification SMS.</p>
+                              <span className="text-emerald-400">✅</span>
+                              <p className="text-xs text-emerald-300 font-medium">Token ready — hit Send Verification SMS.</p>
                             </div>
                           ) : (
                             <div className="flex items-center gap-2 text-xs text-slate-500">
                               <span className="animate-pulse text-blue-400">●</span>
-                              Waiting for captcha solve…
+                              Waiting for token…
                             </div>
                           )}
                         </div>
