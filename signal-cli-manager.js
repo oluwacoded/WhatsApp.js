@@ -24,7 +24,7 @@ const SIGNAL_CLI_BIN = path.join(SIGNAL_CLI_DIR, "bin", "signal-cli");
 // ─── Constants ────────────────────────────────────────────────────────────────
 const DAEMON_PORT    = 7583;   // internal TCP port for JSON-RPC (not 8080 to avoid conflicts)
 const GITHUB_LATEST  = "https://api.github.com/repos/AsamK/signal-cli/releases/latest";
-const FALLBACK_VER   = "0.13.16"; // used if GitHub API is unreachable
+const FALLBACK_VER   = "0.14.6"; // used if GitHub API is unreachable
 
 // ─── State ────────────────────────────────────────────────────────────────────
 const emitter = new EventEmitter();
@@ -138,15 +138,16 @@ async function ensureSignalCli() {
   log("Fetching latest signal-cli release info...");
   status.phase = "downloading";
   let version = FALLBACK_VER;
-  let downloadUrl = `https://github.com/AsamK/signal-cli/releases/download/v${FALLBACK_VER}/signal-cli-${FALLBACK_VER}-Linux-x86_64.tar.gz`;
+  // Asset name changed in v0.14.x: Linux-x86_64 → Linux-client
+  let downloadUrl = `https://github.com/AsamK/signal-cli/releases/download/v${FALLBACK_VER}/signal-cli-${FALLBACK_VER}-Linux-client.tar.gz`;
 
   try {
     const releaseJson = await httpsRequest(GITHUB_LATEST);
     const release = JSON.parse(releaseJson);
     version = (release.tag_name || `v${FALLBACK_VER}`).replace(/^v/, "");
-    const asset = (release.assets || []).find(a =>
-      a.name.includes("Linux-x86_64") && a.name.endsWith(".tar.gz")
-    );
+    // Try new naming first (Linux-client), fall back to old (Linux-x86_64)
+    const asset = (release.assets || []).find(a => a.name.includes("Linux-client") && a.name.endsWith(".tar.gz"))
+                || (release.assets || []).find(a => a.name.includes("Linux-x86_64") && a.name.endsWith(".tar.gz"));
     if (asset) downloadUrl = asset.browser_download_url;
     log(`Latest release: v${version}`);
   } catch (e) {
