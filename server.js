@@ -4894,6 +4894,11 @@ app.get("/captcha", (req, res) => {
     <p>Solve the captcha — the token is sent to the dashboard automatically. You can close this tab when done.</p>
     <div class="captcha-wrap"><div id="hc"></div></div>
     <div class="spinner" id="spin"><span class="spin">⟳</span> Sending to dashboard…</div>
+    <div id="tokenbox" style="display:none;margin-top:12px;text-align:left">
+      <p style="font-size:.75rem;color:#94a3b8;margin-bottom:6px">⚠️ Wait for ✅ below — if it fails, copy this token and paste it in the dashboard manually:</p>
+      <textarea id="tokentext" rows="3" readonly onclick="this.select()"
+        style="width:100%;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:8px;font-size:.7rem;color:#e2e8f0;font-family:monospace;resize:none;word-break:break-all"></textarea>
+    </div>
     <div class="status" id="status"></div>
   </div>
   <script>
@@ -4901,16 +4906,20 @@ app.get("/captcha", (req, res) => {
     window.onSolved=async function(token){
       document.getElementById('spin').style.display='flex';
       const uri='signalcaptcha://signal-hcaptcha.'+SITEKEY+'.registration.'+token;
+      // Always show the token text so user has a manual fallback
+      const box=document.getElementById('tokenbox');
+      box.style.display='block';
+      document.getElementById('tokentext').value=uri;
       try{
         const r=await fetch('/api/signal/store-captcha',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:uri})});
         document.getElementById('spin').style.display='none';
         const el=document.getElementById('status');el.style.display='block';
-        if(r.ok){el.className='status success';el.textContent='\\u2705 Done! Go back to the dashboard \\u2014 it detected the token automatically.';}
-        else{el.className='status error';el.textContent='Server error. Copy token: '+uri;}
+        if(r.ok){el.className='status success';el.innerHTML='\\u2705 <strong>Token sent to dashboard!</strong> Go back — it filled automatically.';}
+        else{el.className='status error';el.textContent='Auto-send failed. Paste the token above manually.';}
       }catch(e){
         document.getElementById('spin').style.display='none';
         const el=document.getElementById('status');el.style.display='block';
-        el.className='status error';el.textContent='Network error. Copy token: '+uri;
+        el.className='status error';el.textContent='Auto-send failed. Paste the token above manually.';
       }
     };
     window.onHcLoad=function(){hcaptcha.render('hc',{sitekey:SITEKEY,callback:'onSolved',theme:'dark'});};
