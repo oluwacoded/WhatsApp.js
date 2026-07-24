@@ -654,19 +654,24 @@ function SignalTab({ bot }) {
   useEffect(() => { fetchStatus() }, [fetchStatus])
   useEffect(() => { const iv = setInterval(fetchStatus, 5000); return () => clearInterval(iv) }, [fetchStatus])
 
-  // Poll for captcha token auto-filled by /captcha page
+  // Poll for captcha token — runs every 2s AND immediately when this tab becomes visible
   useEffect(() => {
     if (connectMode !== 'register' || captchaToken) return
-    const iv = setInterval(async () => {
+    let cancelled = false
+    const poll = async () => {
+      if (cancelled) return
       try {
         const data = await get('/api/signal/get-captcha')
-        if (data?.ok && data?.token) {
-          setCaptchaToken(data.token)
-          clearInterval(iv)
-        }
+        if (data?.ok && data?.token) setCaptchaToken(data.token)
       } catch {}
-    }, 2000)
-    return () => clearInterval(iv)
+    }
+    // Immediate check + interval
+    poll()
+    const iv = setInterval(poll, 2000)
+    // Also fire instantly when user switches back to this tab (Safari JS pause fix)
+    const onVisible = () => { if (!document.hidden) poll() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { cancelled = true; clearInterval(iv); document.removeEventListener('visibilitychange', onVisible) }
   }, [connectMode, captchaToken, get])
 
   // Poll link status while QR is showing
