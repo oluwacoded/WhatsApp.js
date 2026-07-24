@@ -919,11 +919,11 @@ function SignalTab({ bot }) {
                           {/* Step-by-step */}
                           <div className="space-y-2">
                             <p className="text-xs text-slate-400">1️⃣ Tap the button below — a captcha page opens</p>
-                            <a href="/captcha" target="_blank" rel="noopener noreferrer"
-                              className="flex items-center justify-center gap-2 w-full bg-blue-700 hover:bg-blue-600 text-white text-sm font-semibold py-3 rounded-lg transition-colors no-underline"
-                              style={{ textDecoration: 'none' }}>
+                            <button
+                              onClick={() => window.open('/captcha', '_blank')}
+                              className="flex items-center justify-center gap-2 w-full bg-blue-700 hover:bg-blue-600 active:bg-blue-800 text-white text-sm font-semibold py-3 rounded-lg transition-colors">
                               Open Captcha Page ↗
-                            </a>
+                            </button>
                             <p className="text-xs text-slate-400">2️⃣ Solve the captcha — the token is sent back here <strong className="text-slate-200">automatically</strong></p>
                           </div>
 
