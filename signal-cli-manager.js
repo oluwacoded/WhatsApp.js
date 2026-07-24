@@ -484,11 +484,20 @@ async function linkDevice(deviceName = "MFG Bot") {
       if (code === 0) {
         linkState.state = "linked";
         log("✅ Device linked! Discovering linked number...");
+        // Strategy 1: listAccounts command
         try {
           const out = await runCliCommand(["listAccounts"], 10000).catch(() => "");
           const match = out.match(/(\+\d{7,15})/);
           if (match) { linkState.number = match[1]; log("Linked as:", match[1]); }
         } catch {}
+        // Strategy 2: scan signal-data directory for +number folders
+        if (!linkState.number && fs.existsSync(SIGNAL_DATA_DIR)) {
+          const dirs = fs.readdirSync(SIGNAL_DATA_DIR).filter(f => /^\+\d/.test(f));
+          if (dirs.length > 0) {
+            linkState.number = dirs[0];
+            log("Discovered number from data dir:", linkState.number);
+          }
+        }
         emitter.emit("linked", linkState.number);
       } else if (!resolved) {
         linkState.state = "error";

@@ -760,7 +760,8 @@ function SignalTab({ bot }) {
   }
 
   const phase = signalStatus?.manager?.phase
-  const isReady = phase === 'ready'
+  // isReady: signal-bot child process is running (daemon lives inside it, not in server.js)
+  const isReady = signalStatus?.running === true
 
   return (
     <div className="space-y-4">
@@ -768,7 +769,7 @@ function SignalTab({ bot }) {
       <div className="flex items-center gap-3">
         <div className={`w-2 h-2 rounded-full ${isReady ? 'bg-emerald-400' : statusLoading ? 'bg-slate-600 animate-pulse' : signalStatus ? 'bg-yellow-400 animate-pulse' : 'bg-slate-600'}`} />
         <span className="text-sm font-medium text-slate-200">
-          {statusLoading ? 'Checking…' : isReady ? 'Signal Connected' : signalStatus?.configured ? `Signal: ${phase || 'starting'}…` : 'Signal — Setup Required'}
+          {statusLoading ? 'Checking…' : isReady ? 'Signal Connected' : signalStatus?.number ? `Signal: ${phase || 'starting'}…` : 'Signal — Setup Required'}
         </span>
         {signalStatus?.number && <span className="text-xs text-slate-500 font-mono">{signalStatus.number}</span>}
         <button onClick={fetchStatus} className="ml-auto text-slate-500 hover:text-slate-300 transition-colors"><RefreshCw size={13} /></button>

@@ -5071,6 +5071,17 @@ function spawnSignalBot() {
         console.log(`[MFG_bot] Auto-discovered Signal number from data: ${discovered}`);
       }
     }
+    // Strategy 3: read saved file from previous link/register
+    if (!discovered) {
+      const savedFile = path.join(__dirname, "data", "signal-linked-number.txt");
+      if (fs.existsSync(savedFile)) {
+        discovered = fs.readFileSync(savedFile, "utf8").trim();
+        if (discovered) {
+          process.env.SIGNAL_NUMBER = discovered;
+          console.log(`[MFG_bot] Loaded Signal number from saved file: ${discovered}`);
+        }
+      }
+    }
     if (!discovered) {
       console.log("[MFG_bot] SIGNAL_NUMBER not set and no linked account found — Signal bot not started");
       return;
@@ -5158,14 +5169,16 @@ app.post("/api/signal/link-device", async (req, res) => {
     // When the user scans and link completes, restart the signal bot
     signalManager.onLinked((number) => {
       const num = number || process.env.SIGNAL_NUMBER;
-      console.log(`[MFG_bot] Signal linked as ${num} — starting signal-bot.js...`);
-      // Persist the number so spawnSignalBot can use it even without SIGNAL_NUMBER env var
-      if (num && !process.env.SIGNAL_NUMBER) process.env.SIGNAL_NUMBER = num;
+      console.log(`[MFG_bot] Signal linked as ${num || "(number unknown)"} — starting signal-bot.js...`);
+      // Persist number to disk so it survives Railway restarts
+      if (num) {
+        try { fs.writeFileSync(path.join(__dirname, "data", "signal-linked-number.txt"), num, "utf8"); } catch {}
+        if (!process.env.SIGNAL_NUMBER) process.env.SIGNAL_NUMBER = num;
+      }
       if (signalBotProcess) {
-        signalBotProcess.kill("SIGTERM");
+        signalBotProcess.kill("SIGTERM"); // exit handler will call spawnSignalBot after 15s
       } else {
-        // No existing process — spawn fresh
-        spawnSignalBot();
+        spawnSignalBot(); // no existing process — spawn fresh now
       }
     });
   } catch (e) {
