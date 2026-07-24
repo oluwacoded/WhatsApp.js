@@ -5060,8 +5060,21 @@ let signalBotStatus  = { running: false, pid: null, restarts: 0, lastStart: null
 
 function spawnSignalBot() {
   if (!process.env.SIGNAL_NUMBER) {
-    console.log("[MFG_bot] SIGNAL_NUMBER not set — Signal bot not started");
-    return;
+    // Try to discover the number from signal-data (from a previous link/register)
+    const signalDataDir = path.join(__dirname, "data", "signal-data");
+    let discovered = null;
+    if (fs.existsSync(signalDataDir)) {
+      const entries = fs.readdirSync(signalDataDir).filter(f => /^\+/.test(f));
+      if (entries.length > 0) {
+        discovered = entries[0];
+        process.env.SIGNAL_NUMBER = discovered;
+        console.log(`[MFG_bot] Auto-discovered Signal number from data: ${discovered}`);
+      }
+    }
+    if (!discovered) {
+      console.log("[MFG_bot] SIGNAL_NUMBER not set and no linked account found — Signal bot not started");
+      return;
+    }
   }
   console.log("[MFG_bot] Spawning Signal bot process...");
   const child = spawnProc(process.execPath, [path.join(__dirname, "signal-bot.js")], {
@@ -5145,8 +5158,15 @@ app.post("/api/signal/link-device", async (req, res) => {
     // When the user scans and link completes, restart the signal bot
     signalManager.onLinked((number) => {
       const num = number || process.env.SIGNAL_NUMBER;
-      console.log(`[MFG_bot] Signal linked as ${num} — restarting signal-bot.js...`);
-      if (signalBotProcess) signalBotProcess.kill("SIGTERM");
+      console.log(`[MFG_bot] Signal linked as ${num} — starting signal-bot.js...`);
+      // Persist the number so spawnSignalBot can use it even without SIGNAL_NUMBER env var
+      if (num && !process.env.SIGNAL_NUMBER) process.env.SIGNAL_NUMBER = num;
+      if (signalBotProcess) {
+        signalBotProcess.kill("SIGTERM");
+      } else {
+        // No existing process — spawn fresh
+        spawnSignalBot();
+      }
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
