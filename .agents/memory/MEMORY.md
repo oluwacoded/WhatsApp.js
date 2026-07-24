@@ -1,0 +1,3 @@
+- [MFG Hub Architecture](mfg-hub-arch.md) — mfg-hub at `/` connects 3 bots; Signal runs locally in api-server; WhatsApp proxies to remote URL; Telegram uses gramjs in api-server.
+- [Signal Fix](signal-fix.md) — TCP timeout 12s→45s, exponential backoff reconnect, 30s keepalive ping, 8s daemon init wait, 8 retry attempts.
+- [Baileys Blocked](baileys-blocked.md) — Replit package firewall blocks baileys; WhatsApp bot must run on Railway; api-server proxies via WHATSAPP_BACKEND_URL env var.

@@ -3,20 +3,25 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: MFG Bot Hub API — WhatsApp, Telegram, and Signal bot control
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: whatsapp
+    description: WhatsApp bot operations
+  - name: signal
+    description: Signal bot operations
+  - name: telegram
+    description: Telegram bot operations
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +29,261 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /status:
+    get:
+      operationId: getWhatsappStatus
+      tags: [whatsapp]
+      summary: Get WhatsApp bot status
+      responses:
+        "200":
+          description: WhatsApp status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsappStatus"
+
+  /qr:
+    get:
+      operationId: getQr
+      tags: [whatsapp]
+      summary: Get WhatsApp QR code
+      responses:
+        "200":
+          description: QR data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QrData"
+
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [whatsapp]
+      summary: Get bot settings
+      responses:
+        "200":
+          description: Settings object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotSettings"
+    post:
+      operationId: updateSettings
+      tags: [whatsapp]
+      summary: Update bot settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsInput"
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotSettings"
+
+  /set-system-prompt:
+    post:
+      operationId: setSystemPrompt
+      tags: [whatsapp]
+      summary: Set AI system prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SystemPromptInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /logout:
+    post:
+      operationId: logoutWhatsapp
+      tags: [whatsapp]
+      summary: Logout WhatsApp session
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /pair:
+    post:
+      operationId: pairWhatsapp
+      tags: [whatsapp]
+      summary: Pair WhatsApp via phone number
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PairInput"
+      responses:
+        "200":
+          description: Pair code
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PairResult"
+
+  /signal/status:
+    get:
+      operationId: getSignalStatus
+      tags: [signal]
+      summary: Get Signal bot status
+      responses:
+        "200":
+          description: Signal status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalStatus"
+
+  /signal/register:
+    post:
+      operationId: registerSignal
+      tags: [signal]
+      summary: Register Signal number
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalRegisterInput"
+      responses:
+        "200":
+          description: Registration result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /signal/verify:
+    post:
+      operationId: verifySignal
+      tags: [signal]
+      summary: Verify Signal number with SMS code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalVerifyInput"
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /signal/link-device:
+    post:
+      operationId: linkSignalDevice
+      tags: [signal]
+      summary: Link Signal via existing account QR
+      responses:
+        "200":
+          description: Link URI
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalLinkResult"
+
+  /signal/link-status:
+    get:
+      operationId: getSignalLinkStatus
+      tags: [signal]
+      summary: Get Signal device link status
+      responses:
+        "200":
+          description: Link status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalLinkStatus"
+
+  /telegram/status:
+    get:
+      operationId: getTelegramStatus
+      tags: [telegram]
+      summary: Get Telegram bot status
+      responses:
+        "200":
+          description: Telegram status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TelegramStatus"
+
+  /telegram/connect:
+    post:
+      operationId: connectTelegram
+      tags: [telegram]
+      summary: Start Telegram connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelegramConnectInput"
+      responses:
+        "200":
+          description: Connection result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /telegram/code:
+    post:
+      operationId: submitTelegramCode
+      tags: [telegram]
+      summary: Submit Telegram login code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelegramCodeInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
+  /telegram/setup:
+    post:
+      operationId: setupTelegram
+      tags: [telegram]
+      summary: Set Telegram API credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelegramSetupInput"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -31,6 +291,182 @@ components:
       properties:
         status:
           type: string
-      required:
-        - status
+      required: [status]
 
+    OkResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: ["string", "null"]
+      required: [ok]
+
+    WhatsappStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        hasQr:
+          type: boolean
+        uptime:
+          type: ["number", "null"]
+        messageCount:
+          type: ["number", "null"]
+        chatCount:
+          type: ["number", "null"]
+        aiEnabled:
+          type: ["boolean", "null"]
+      required: [connected, hasQr]
+
+    QrData:
+      type: object
+      properties:
+        qr:
+          type: ["string", "null"]
+      required: [qr]
+
+    BotSettings:
+      type: object
+      properties:
+        aiEnabled:
+          type: boolean
+        systemPrompt:
+          type: string
+        prefix:
+          type: string
+        aiDelay:
+          type: number
+        aiTyping:
+          type: boolean
+      required: [aiEnabled, systemPrompt, prefix]
+
+    SettingsInput:
+      type: object
+      properties:
+        aiEnabled:
+          type: boolean
+        aiDelay:
+          type: number
+        aiTyping:
+          type: boolean
+
+    SystemPromptInput:
+      type: object
+      properties:
+        prompt:
+          type: string
+      required: [prompt]
+
+    PairInput:
+      type: object
+      properties:
+        phone:
+          type: string
+      required: [phone]
+
+    PairResult:
+      type: object
+      properties:
+        code:
+          type: ["string", "null"]
+        ok:
+          type: boolean
+      required: [ok]
+
+    SignalStatus:
+      type: object
+      properties:
+        phase:
+          type: string
+        ready:
+          type: boolean
+        registered:
+          type: boolean
+        version:
+          type: ["string", "null"]
+        restarts:
+          type: number
+        error:
+          type: ["string", "null"]
+        number:
+          type: ["string", "null"]
+      required: [phase, ready, registered, restarts]
+
+    SignalRegisterInput:
+      type: object
+      properties:
+        number:
+          type: string
+        captcha:
+          type: ["string", "null"]
+      required: [number]
+
+    SignalVerifyInput:
+      type: object
+      properties:
+        number:
+          type: string
+        code:
+          type: string
+      required: [number, code]
+
+    SignalLinkResult:
+      type: object
+      properties:
+        uri:
+          type: ["string", "null"]
+        ok:
+          type: boolean
+      required: [ok]
+
+    SignalLinkStatus:
+      type: object
+      properties:
+        state:
+          type: string
+        uri:
+          type: ["string", "null"]
+        number:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
+      required: [state]
+
+    TelegramStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        hasCredentials:
+          type: boolean
+        username:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+      required: [connected, hasCredentials]
+
+    TelegramConnectInput:
+      type: object
+      properties:
+        phone:
+          type: string
+      required: [phone]
+
+    TelegramCodeInput:
+      type: object
+      properties:
+        code:
+          type: string
+        type:
+          type: string
+      required: [code, type]
+
+    TelegramSetupInput:
+      type: object
+      properties:
+        apiId:
+          type: string
+        apiHash:
+          type: string
+      required: [apiId, apiHash]
