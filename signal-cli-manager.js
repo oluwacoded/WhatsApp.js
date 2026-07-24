@@ -229,24 +229,22 @@ async function ensureSignalCli() {
 }
 
 // ─── 2. Registration ──────────────────────────────────────────────────────────
-async function registerNumber(number) {
+async function registerNumber(number, captchaToken = null) {
   await ensureSignalCli();
   if (!fs.existsSync(SIGNAL_DATA_DIR)) fs.mkdirSync(SIGNAL_DATA_DIR, { recursive: true });
-  log(`Registering ${number} with Signal...`);
+  log(`Registering ${number} with Signal...${captchaToken ? " (with captcha)" : ""}`);
+  const args = ["-a", number, "register"];
+  if (captchaToken) args.push("--captcha", captchaToken.trim());
   try {
-    await runCliCommand(["-a", number, "register", "--no-device-name"], 45000);
+    await runCliCommand(args, 45000);
     log("✅ Registration SMS sent");
     return { ok: true, message: "Verification SMS sent to your number" };
   } catch (e) {
-    // Some builds use different flags — try without the flag
-    try {
-      await runCliCommand(["-a", number, "register"], 45000);
-      log("✅ Registration SMS sent");
-      return { ok: true, message: "Verification SMS sent" };
-    } catch (e2) {
-      warn("Register error:", e2.message);
-      throw new Error(e2.message.includes("captcha") ? "Signal requires captcha — see SIGNAL_SETUP.md for the captcha bypass" : e2.message);
+    warn("Register error:", e.message);
+    if (e.message.includes("captcha")) {
+      throw new Error("CAPTCHA_REQUIRED");
     }
+    throw e;
   }
 }
 

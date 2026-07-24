@@ -5014,13 +5014,14 @@ app.get("/api/signal/status", (req, res) => {
   });
 });
 
-// POST /api/signal/register — triggers "signal-cli register -a NUMBER"
-// Body: { number: "+12345678901" }  (optional — falls back to SIGNAL_NUMBER env)
+// POST /api/signal/register — triggers "signal-cli register -a NUMBER [--captcha TOKEN]"
+// Body: { number: "+12345678901", captcha: "signalcaptcha://..." }
 app.post("/api/signal/register", async (req, res) => {
-  const number = (req.body?.number || process.env.SIGNAL_NUMBER || "").trim();
+  const number  = (req.body?.number  || process.env.SIGNAL_NUMBER || "").trim();
+  const captcha = (req.body?.captcha || "").trim() || null;
   if (!number) return res.status(400).json({ ok: false, error: "number required (or set SIGNAL_NUMBER env var)" });
   try {
-    const result = await signalManager.registerNumber(number);
+    const result = await signalManager.registerNumber(number, captcha);
     res.json(result);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

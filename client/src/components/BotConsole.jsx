@@ -632,6 +632,7 @@ function SignalTab({ bot }) {
   // Register-new-number state
   const [number, setNumber] = useState('')
   const [code, setCode] = useState('')
+  const [captchaToken, setCaptchaToken] = useState('')
   const [regStep, setRegStep] = useState('idle')
   const [regMsg, setRegMsg] = useState('')
   const [regError, setRegError] = useState('')
@@ -689,12 +690,23 @@ function SignalTab({ bot }) {
   // ── Register new number ──
   const handleRegister = async () => {
     const num = number.trim()
-    if (!num) return setRegError('Enter your Signal number (e.g. +12025551234)')
+    if (!num) return setRegError('Enter your phone number (e.g. +2349132883869)')
     setRegStep('registering'); setRegError('')
     try {
-      await post('/api/signal/register', { number: num })
-      setRegStep('waiting_code'); setRegMsg('SMS sent! Enter the 6-digit code.')
-    } catch (e) { setRegError(e.message); setRegStep('idle') }
+      const body = { number: num }
+      const tok = captchaToken.trim()
+      if (tok) body.captcha = tok
+      await post('/api/signal/register', body)
+      setRegStep('waiting_code'); setRegMsg('SMS sent! Enter the 6-digit code below.')
+    } catch (e) {
+      const msg = e.message || ''
+      if (msg.includes('CAPTCHA_REQUIRED') || msg.includes('captcha')) {
+        setRegError('Captcha required — follow the steps above to get your token, then try again.')
+        setRegStep('idle')
+      } else {
+        setRegError(msg); setRegStep('idle')
+      }
+    }
   }
 
   const handleVerify = async () => {
@@ -868,26 +880,54 @@ function SignalTab({ bot }) {
                   </>
                 )}
 
-                {/* ── REGISTER MODE (new number) ── */}
+                {/* ── REGISTER MODE ── */}
                 {connectMode === 'register' && (
                   <>
                     <div>
-                      <p className="text-sm font-semibold text-slate-200 mb-1">Register a separate Signal number</p>
-                      <p className="text-xs text-slate-400">Use this if you want a dedicated Signal number for the bot (Google Voice, TextNow, etc.)</p>
+                      <p className="text-sm font-semibold text-slate-200 mb-1">Register a Signal number for the bot</p>
+                      <p className="text-xs text-slate-400">You can use your own number or any number that can receive an SMS.</p>
                     </div>
 
-                    {(regStep === 'idle' || regStep === 'registering') && (
-                      <div className="space-y-2">
-                        <label className="text-xs text-slate-400">Phone number (with + and country code)</label>
-                        <div className="flex gap-2">
+                    {(regStep === 'idle' || regStep === 'need_captcha' || regStep === 'registering') && (
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-xs text-slate-400 mb-1.5 block">Phone number (with + and country code)</label>
                           <input value={number} onChange={e => { setNumber(e.target.value); setRegError('') }}
-                            placeholder="+12025551234" disabled={regStep === 'registering'}
-                            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50" />
-                          <button onClick={handleRegister} disabled={regStep === 'registering' || !number.trim()}
-                            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap">
-                            {regStep === 'registering' ? <><Loader size={13} className="animate-spin" /> Sending…</> : 'Send Code'}
-                          </button>
+                            placeholder="+2349132883869" disabled={regStep === 'registering'}
+                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50" />
                         </div>
+
+                        {/* Captcha section — shown after first attempt fails, or proactively */}
+                        <div className="bg-slate-900 border border-slate-600 rounded-xl p-4 space-y-3">
+                          <p className="text-xs font-semibold text-slate-200">Captcha token <span className="text-slate-500 font-normal">(required for cloud servers)</span></p>
+
+                          {/* Step-by-step */}
+                          <div className="space-y-2">
+                            <p className="text-xs text-slate-400">1️⃣ Tap the button below — a captcha page opens</p>
+                            <a href="https://signalcaptchas.org/registration/generate.html" target="_blank" rel="noopener noreferrer"
+                              className="flex items-center justify-center gap-2 w-full bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium py-2.5 rounded-lg transition-colors no-underline"
+                              style={{ textDecoration: 'none' }}>
+                              Open Captcha Page ↗
+                            </a>
+                            <p className="text-xs text-slate-400">2️⃣ Solve the checkbox captcha on that page</p>
+                            <p className="text-xs text-slate-400">3️⃣ Your browser will show an alert saying it can't open <span className="font-mono text-slate-300">signalcaptcha://…</span> — <strong className="text-slate-200">copy that full URL</strong> from the alert</p>
+                            <p className="text-xs text-slate-500 italic">On iPhone: the alert shows "Safari cannot open the page because the address is invalid" — the URL is shown below the message. Long-press it to copy.</p>
+                          </div>
+
+                          <div>
+                            <label className="text-xs text-slate-400 mb-1.5 block">4️⃣ Paste the full <span className="font-mono">signalcaptcha://…</span> URL here</label>
+                            <textarea value={captchaToken} onChange={e => { setCaptchaToken(e.target.value); setRegError('') }}
+                              rows={2} placeholder="signalcaptcha://signal-recaptcha-v2.ABC123..."
+                              disabled={regStep === 'registering'}
+                              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono resize-none disabled:opacity-50" />
+                          </div>
+                        </div>
+
+                        <button onClick={handleRegister}
+                          disabled={regStep === 'registering' || !number.trim()}
+                          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2">
+                          {regStep === 'registering' ? <><Loader size={13} className="animate-spin" /> Sending SMS…</> : 'Send Verification SMS'}
+                        </button>
                       </div>
                     )}
 
@@ -905,7 +945,7 @@ function SignalTab({ bot }) {
                             {regStep === 'verifying' ? <><Loader size={13} className="animate-spin" /> Verifying…</> : '✓ Verify'}
                           </button>
                         </div>
-                        <button onClick={() => { setRegStep('idle'); setRegError('') }} className="text-xs text-slate-500 hover:text-slate-300 underline">← Wrong number?</button>
+                        <button onClick={() => { setRegStep('idle'); setRegError('') }} className="text-xs text-slate-500 hover:text-slate-300 underline">← Back</button>
                       </div>
                     )}
 
