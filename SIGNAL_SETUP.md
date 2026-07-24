@@ -1,137 +1,145 @@
 # MFG Signal Bot — Setup Guide
 
-The Signal bot runs alongside your WhatsApp bot on Railway. It needs:
-1. signal-cli-rest-api (a separate Railway service)
-2. A phone number registered with Signal
+The Signal bot runs **inside your existing Railway service** alongside the WhatsApp bot.
+No second service. No Docker. No Java to install. The bot downloads everything itself.
 
 ---
 
 ## Step 1 — Get a phone number for Signal
 
-You need a number that Signal can SMS a verification code to.
+You need a number Signal can send a one-time SMS verification code to.
 
 | Option | Cost | How |
 |--------|------|-----|
-| Google Voice | Free | voice.google.com — get a US number |
-| TextNow | Free | textnow.com — virtual number |
-| Second SIM | Varies | Any Nigerian SIM works |
+| **Google Voice** | Free | [voice.google.com](https://voice.google.com) — sign in with Google, pick any US number |
+| **TextNow** | Free | [textnow.com](https://textnow.com) — free virtual US number |
+| **Second SIM** | Varies | Any Nigerian SIM or other country number works |
 
-The number format must include country code: `+12345678901` or `+2348012345678`
-
----
-
-## Step 2 — Deploy signal-cli-rest-api on Railway
-
-1. Go to [railway.app](https://railway.app) → New Project
-2. Click **Deploy from Docker image**
-3. Enter: `bbernhard/signal-cli-rest-api:latest`
-4. Set environment variable in that service:
-   ```
-   MODE=normal
-   ```
-5. The service exposes port `8080` — note the Railway internal URL (e.g. `signal-cli.railway.internal:8080`)
-
-> **Note:** If both services are in the same Railway project, use the internal hostname. Otherwise use the public URL.
+Format: always use full international format with `+` — e.g. `+12025551234` or `+2348012345678`
 
 ---
 
-## Step 3 — Register your Signal number with signal-cli
+## Step 2 — Set one environment variable on Railway
 
-Once signal-cli-rest-api is running, register your number:
+In your existing Railway service (the one running `server.js`):
 
-**Option A: Via captcha (recommended)**
+```
+SIGNAL_NUMBER = +12025551234
+```
+
+That's the **only** env var needed. `SIGNAL_CLI_URL` is no longer required.
+
+---
+
+## Step 3 — Redeploy
+
+Push to GitHub → Railway auto-deploys.
+
+On the **first deploy with SIGNAL_NUMBER set**, the bot will:
+1. Download signal-cli (~90MB, self-contained binary with Java bundled) — takes ~60–90s
+2. Start it as a local daemon inside the same service
+3. Log: `[Signal-CLI] ✅ signal-cli vX.X.X ready`
+
+Subsequent deploys reuse the cached binary (instant).
+
+> **Check logs for:** `[Signal-CLI] ✅ signal-cli vX.X.X ready` then `[Signal-CLI] Starting daemon...`
+
+---
+
+## Step 4 — Register your Signal number (one-time)
+
+Once the bot is deployed, register your number by calling the API.
+
+Replace `YOUR_RAILWAY_URL` with your Railway service URL (e.g. `https://your-bot.up.railway.app`):
+
+**Step 4a — Request SMS code:**
 ```bash
-# Request registration (replace with your number)
-curl -X POST "https://YOUR_SIGNAL_CLI_URL/v1/register/+12345678901" \
+curl -X POST "https://YOUR_RAILWAY_URL/api/signal/register" \
   -H "Content-Type: application/json" \
-  -d '{"use_voice": false}'
+  -d '{"number": "+12025551234"}'
 ```
 
-Signal will send an SMS verification code. Then verify:
-```bash
-curl -X POST "https://YOUR_SIGNAL_CLI_URL/v1/register/+12345678901/verify/123456" \
-  -H "Content-Type: application/json"
-```
-Replace `123456` with the code you received.
+Signal will send an SMS to your number with a 6-digit code.
 
-**Option B: Link existing Signal account**
-If you already have Signal on a phone and want to link it as a second device:
+**Step 4b — Verify with the code:**
 ```bash
-curl "https://YOUR_SIGNAL_CLI_URL/v1/qrcodelink?device_name=MFGBot"
-# Scan the returned QR code in Signal app → Settings → Linked Devices → Link a Device
+curl -X POST "https://YOUR_RAILWAY_URL/api/signal/verify" \
+  -H "Content-Type: application/json" \
+  -d '{"number": "+12025551234", "code": "123456"}'
 ```
+
+Replace `123456` with the actual code you received.
+
+After verification, the Signal bot restarts automatically and is ready to receive messages.
 
 ---
 
-## Step 4 — Set environment variables in your main Railway service
+## Step 5 — Test it
 
-Add these to your existing Railway service (where server.js runs):
+Open Signal on your phone, send a message to your new Signal number.
 
-```
-SIGNAL_NUMBER=+12345678901
-SIGNAL_CLI_URL=http://signal-cli.railway.internal:8080
-```
-
-Or if signal-cli is on a different project:
-```
-SIGNAL_CLI_URL=https://your-signal-cli-service.up.railway.app
-```
-
----
-
-## Step 5 — Redeploy
-
-Push the code to GitHub. Railway will redeploy automatically.
-
-The Signal bot starts automatically when `SIGNAL_NUMBER` is set. You'll see in logs:
-```
-[Signal] MFG Signal Bot starting
-[Signal] Number:  +12345678901
-[Signal] CLI URL: http://...
-[Signal] ✅ WebSocket connected — receiving live messages
-```
+The bot will reply with the same AI persona and commands as WhatsApp. 🎉
 
 ---
 
 ## Commands available on Signal
 
-All work the same as WhatsApp:
-
 ```
-.menu          — full command list
-.joke          — random joke
-.fact          — random fact
-.quote         — motivational quote
-.truth | .dare — party games
-.8ball <q>     — magic 8-ball
-.roast <name>  — savage roast
-.flip | .roll | .slot — luck games
-.riddle        — riddle game
+.menu           — full command list
+.ai on|off      — toggle AI replies for this chat
 .weather <city> — live weather
-.define <word> — dictionary
-.translate <lang> <text> — translation
-.explain <topic> — simple explanation
-.coin balance  — MFGC balance
-.ticket        — boarding pass generator
-.ai on|off     — toggle AI for this chat
-.time | .date  — current time/date
-.ping          — check bot is alive
+.define <word>  — dictionary
+.translate <lang> <text>
+.explain <topic>
+.summarize <text>
+.joke | .fact | .quote
+.truth | .dare
+.8ball <question>
+.roast <name> | .compliment <name>
+.flip | .roll | .slot
+.riddle | .answer
+.ship <a> and <b>
+.coin balance   — MFGC balance
+.ticket         — flight boarding pass generator
+.time | .date
+.ping | .uptime
 ```
+
+---
+
+## Check Signal bot status
+
+```bash
+curl "https://YOUR_RAILWAY_URL/api/signal/status"
+```
+
+Returns: phase (idle/downloading/starting/ready/error), version, daemon PID, etc.
 
 ---
 
 ## Troubleshooting
 
-**Bot not responding:**
-- Check `SIGNAL_NUMBER` and `SIGNAL_CLI_URL` are set in Railway env vars
-- Check Railway logs for `[Signal]` prefix entries
-- Verify signal-cli-rest-api service is running on Railway
+**"Number not registered" — daemon exits immediately:**
+- Complete Step 4 first — the number must be registered/verified before the daemon will run
 
-**"Registration required" errors:**
-- Complete Step 3 — number must be registered/linked before messages can be sent
+**Registration fails with "captcha required":**
+- Signal sometimes requires a captcha token for new registrations, especially on cloud IPs
+- Solution: link an existing Signal account instead of registering fresh:
+  ```bash
+  # This returns a QR code URL — scan it in Signal app
+  # Settings → Linked Devices → Link a Device
+  curl "https://YOUR_RAILWAY_URL/api/signal/link-device"
+  ```
+  *(Task #7 — admin command registration — will make this easier)*
 
-**Bot responds on WhatsApp but not Signal:**
-- The Signal bot runs as a child process — check for `[Signal] MFG Signal Bot starting` in your main service logs
+**Bot not responding on Signal but WhatsApp works:**
+- Check Railway logs for `[Signal]` prefix lines
+- Look for `[Signal-CLI] ✅ Subscribed — Signal bot is live!`
+- If you see `[signal-cli]` errors, the number may need re-registration
 
-**Messages from wrong number:**
-- Signal uses the international format (e.g. `+2348012345678`) — make sure `SIGNAL_NUMBER` exactly matches the registered number including the `+` prefix
+**Download takes too long:**
+- First deploy only — subsequent deploys skip the download (binary cached in `data/signal-cli/`)
+- If Railway volume is not configured, binary re-downloads on every deploy
+
+**Messages from `SIGNAL_NUMBER` env var not matching:**
+- Use exact international format: `+12025551234` (not `12025551234`)

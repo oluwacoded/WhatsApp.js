@@ -4999,12 +4999,49 @@ function spawnSignalBot() {
   });
 }
 
-// REST: GET /api/signal/status — check Signal bot health from the dashboard
+// ─── Signal registration API (one-time setup) ─────────────────────────────────
+// These endpoints let the owner register/verify the Signal number without using
+// a terminal — just call them once after first deploy.
+const signalManager = require("./signal-cli-manager");
+
+// GET /api/signal/status — health check (existing + manager status)
 app.get("/api/signal/status", (req, res) => {
   res.json({
     configured: !!process.env.SIGNAL_NUMBER,
     number:     process.env.SIGNAL_NUMBER || null,
-    cliUrl:     process.env.SIGNAL_CLI_URL || "http://localhost:8080",
-    ...signalBotStatus
+    manager:    signalManager.getStatus(),
+    ...signalBotStatus,
   });
+});
+
+// POST /api/signal/register — triggers "signal-cli register -a NUMBER"
+// Body: { number: "+12345678901" }  (optional — falls back to SIGNAL_NUMBER env)
+app.post("/api/signal/register", async (req, res) => {
+  const number = (req.body?.number || process.env.SIGNAL_NUMBER || "").trim();
+  if (!number) return res.status(400).json({ ok: false, error: "number required (or set SIGNAL_NUMBER env var)" });
+  try {
+    const result = await signalManager.registerNumber(number);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// POST /api/signal/verify — submits the SMS code to complete registration
+// Body: { number: "+12345678901", code: "123456" }
+app.post("/api/signal/verify", async (req, res) => {
+  const number = (req.body?.number || process.env.SIGNAL_NUMBER || "").trim();
+  const code   = (req.body?.code || "").trim();
+  if (!number || !code) return res.status(400).json({ ok: false, error: "number and code required" });
+  try {
+    const result = await signalManager.verifyNumber(number, code);
+    // After successful verification, restart the signal bot so it picks up the registered account
+    if (signalBotProcess) {
+      console.log("[MFG_bot] Signal verified — restarting signal-bot.js...");
+      signalBotProcess.kill("SIGTERM");
+    }
+    res.json({ ...result, message: "Verified! Signal bot restarting..." });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });

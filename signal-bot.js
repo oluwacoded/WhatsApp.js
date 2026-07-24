@@ -1,15 +1,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // MFG Signal Bot — signal-bot.js
-// Runs alongside the WhatsApp bot as a separate process.
-// Requires signal-cli-rest-api running at SIGNAL_CLI_URL.
+// Runs as a child process spawned by server.js.
+// Uses signal-cli-manager.js to auto-download signal-cli and run it locally —
+// no separate Railway service needed.
 //
 // Env vars needed:
-//   SIGNAL_NUMBER    — the Signal phone number this bot is registered to
-//                      (e.g. "+12015551234" — must be registered with signal-cli first)
-//   SIGNAL_CLI_URL   — URL of the signal-cli REST API service
-//                      (default: http://localhost:8080)
-//   GEMINI_API_KEY   — same as WhatsApp bot
-//   GROQ_API_KEY     — same as WhatsApp bot
+//   SIGNAL_NUMBER  — the Signal phone number (e.g. "+12015551234")
+//   GEMINI_API_KEY — same as WhatsApp bot
+//   GROQ_API_KEY   — same as WhatsApp bot
 // ─────────────────────────────────────────────────────────────────────────────
 
 "use strict";
@@ -22,10 +20,12 @@ const fs   = require("fs");
 const path = require("path");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const SIGNAL_NUMBER  = process.env.SIGNAL_NUMBER;
-const SIGNAL_CLI_URL = (process.env.SIGNAL_CLI_URL || "http://localhost:8080").replace(/\/$/, "");
-const OWNER_NUMBER   = "2349132883869";
-const DATA_DIR       = path.join(__dirname, "data");
+const SIGNAL_NUMBER = process.env.SIGNAL_NUMBER;
+const OWNER_NUMBER  = "2349132883869";
+const DATA_DIR      = path.join(__dirname, "data");
+
+// ─── Signal-CLI manager (handles download + daemon + JSON-RPC) ────────────────
+const manager = require("./signal-cli-manager");
 
 if (!SIGNAL_NUMBER) {
   console.log("[Signal] SIGNAL_NUMBER env var not set — exiting");
@@ -148,21 +148,10 @@ async function callAI(userText, from) {
   return null;
 }
 
-// ─── Signal API helpers ───────────────────────────────────────────────────────
+// ─── Send via signal-cli-manager (JSON-RPC → local daemon) ───────────────────
 async function sendSignalMessage(to, message) {
-  try {
-    const r = await fetch(`${SIGNAL_CLI_URL}/v2/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, number: SIGNAL_NUMBER, recipients: [to] })
-    });
-    if (!r.ok) {
-      const err = await r.text().catch(() => "");
-      console.log("[Signal] Send failed:", r.status, err.slice(0, 100));
-    } else {
-      console.log(`[Signal] → +${to.replace(/[^0-9]/g,"").slice(-7)}: ${message.slice(0, 50)}`);
-    }
-  } catch (e) { console.log("[Signal] Send error:", e.message); }
+  await manager.sendMessage(to, message);
+  console.log(`[Signal] → +${to.replace(/[^0-9]/g,"").slice(-7)}: ${message.slice(0, 50)}`);
 }
 
 // ─── Weather helper ───────────────────────────────────────────────────────────
@@ -532,62 +521,24 @@ async function processSignalMessage(envelope) {
   } catch (e) { console.log("[Signal] processMessage err:", e.message); }
 }
 
-// ─── Signal receive — WebSocket with polling fallback ─────────────────────────
-async function startReceiving() {
-  // Try WebSocket first (signal-cli-rest-api supports it)
-  try {
-    const ws = require("ws"); // available as transitive dep via baileys
-    const wsUrl = `${SIGNAL_CLI_URL.replace(/^http/, "ws")}/v1/receive/${encodeURIComponent(SIGNAL_NUMBER)}`;
-    console.log("[Signal] Connecting WebSocket:", wsUrl);
+// ─── Start — wire manager → message handler ───────────────────────────────────
+async function main() {
+  console.log(`[Signal] ═══════════════════════════════════`);
+  console.log(`[Signal] MFG Signal Bot starting`);
+  console.log(`[Signal] Number: ${SIGNAL_NUMBER}`);
+  console.log(`[Signal] ═══════════════════════════════════`);
 
-    const connect = () => {
-      const socket = new ws.WebSocket(wsUrl);
-      socket.on("open", () => console.log("[Signal] ✅ WebSocket connected — receiving live messages"));
-      socket.on("message", (data) => {
-        try {
-          const parsed = JSON.parse(data.toString());
-          processSignalMessage(parsed.envelope || parsed);
-        } catch {}
-      });
-      socket.on("close", (code) => {
-        console.log(`[Signal] WebSocket closed (${code}), retrying in 15s...`);
-        setTimeout(connect, 15000);
-      });
-      socket.on("error", (e) => {
-        console.log("[Signal] WebSocket error:", e.message, "— falling back to polling");
-        socket.terminate();
-        startPolling();
-      });
-    };
-    connect();
-  } catch (wsErr) {
-    console.log("[Signal] ws module not available, using polling:", wsErr.message);
-    startPolling();
+  // Register message handler BEFORE starting the daemon so no messages are missed
+  manager.onMessage(processSignalMessage);
+
+  // startDaemon handles: download binary (once), spawn daemon, TCP JSON-RPC subscribe
+  // It auto-restarts on crash and reconnects on TCP drop.
+  try {
+    await manager.startDaemon(SIGNAL_NUMBER);
+  } catch (e) {
+    console.log("[Signal] Daemon start error:", e.message);
+    console.log("[Signal] If the number is not yet registered, run .signalreg from WhatsApp");
   }
 }
 
-async function startPolling() {
-  console.log("[Signal] 📡 Starting polling loop (every 3s)...");
-  const poll = async () => {
-    try {
-      const r = await fetch(`${SIGNAL_CLI_URL}/v1/receive/${encodeURIComponent(SIGNAL_NUMBER)}`, {
-        signal: AbortSignal.timeout(5000)
-      });
-      if (r.ok) {
-        const msgs = await r.json();
-        const list = Array.isArray(msgs) ? msgs : [];
-        for (const m of list) await processSignalMessage(m.envelope || m);
-      }
-    } catch { /* signal-cli not reachable yet — silent */ }
-    setTimeout(poll, 3000);
-  };
-  poll();
-}
-
-// ─── Start ────────────────────────────────────────────────────────────────────
-console.log(`[Signal] ═══════════════════════════════════`);
-console.log(`[Signal] MFG Signal Bot starting`);
-console.log(`[Signal] Number:  ${SIGNAL_NUMBER}`);
-console.log(`[Signal] CLI URL: ${SIGNAL_CLI_URL}`);
-console.log(`[Signal] ═══════════════════════════════════`);
-startReceiving();
+main();
