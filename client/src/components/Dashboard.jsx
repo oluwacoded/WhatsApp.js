@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, X, Wifi, WifiOff, Loader, Bot, Zap, Mic, Heart, ChevronRight, Terminal, Shield, Activity } from 'lucide-react'
+import { Plus, X, Wifi, WifiOff, Loader, Bot, Zap, Mic, Heart, ChevronRight, Terminal, Shield, Activity, Send, Lock, MessageSquare, Globe, Cpu, Eye, Radio, Crosshair } from 'lucide-react'
 import { useBotStatus } from '../hooks/useBotApi'
 
 function StatusBadge({ loading, error, isOnline, hasQr }) {
@@ -135,9 +135,24 @@ function AddBotModal({ onAdd, onClose }) {
 }
 
 const TOOLS = [
-  { href:'/voice-studio', icon: Mic,      color:'purple', label:'Voice Studio',  sub:'Generate audio · ElevenLabs TTS',  glow:'glow-purple', border:'hover:border-purple-600/50', bg:'bg-purple-950/30',  iconBg:'bg-purple-950/60 border-purple-700/40',  iconColor:'text-purple-400' },
-  { href:'/voice-changer',icon: Zap,      color:'cyan',   label:'Voice Changer', sub:'Real-time pitch shift · live calls', glow:'glow-cyan',   border:'hover:border-cyan-600/50',   bg:'bg-cyan-950/30',    iconBg:'bg-cyan-950/60 border-cyan-700/40',      iconColor:'text-cyan-400' },
-  { href:'/group-finder', icon: Heart,    color:'pink',   label:'Group Finder',  sub:'Find dating & social groups · USA',  glow:'glow-pink',   border:'hover:border-pink-600/50',   bg:'bg-pink-950/30',    iconBg:'bg-pink-950/60 border-pink-700/40',      iconColor:'text-pink-400' },
+  { href:'/voice-studio', icon: Mic,      label:'Voice Studio',  sub:'Generate audio · ElevenLabs TTS',   border:'hover:border-purple-600/50', iconBg:'bg-purple-950/60 border-purple-700/40', iconColor:'text-purple-400' },
+  { href:'/voice-changer',icon: Zap,      label:'Voice Changer', sub:'Real-time pitch shift · live calls', border:'hover:border-cyan-600/50',   iconBg:'bg-cyan-950/60 border-cyan-700/40',     iconColor:'text-cyan-400' },
+  { href:'/group-finder', icon: Heart,    label:'Group Finder',  sub:'Find dating & social groups · USA',  border:'hover:border-pink-600/50',   iconBg:'bg-pink-950/60 border-pink-700/40',     iconColor:'text-pink-400' },
+]
+
+const BOTS = [
+  { href:'/whatsapp', icon: MessageSquare, label:'WhatsApp Bot', sub:'Multi-device · AI replies · commands', border:'hover:border-green-600/50',  iconBg:'bg-green-950/60 border-green-700/40',  iconColor:'text-green-400' },
+  { href:'/signal',   icon: Lock,          label:'Signal Bot',   sub:'Register · link device · secure chat',  border:'hover:border-blue-600/50',   iconBg:'bg-blue-950/60 border-blue-700/40',    iconColor:'text-blue-400' },
+  { href:'/telegram', icon: Send,          label:'Telegram Bot',  sub:'BotFather token · commands · send',    border:'hover:border-sky-600/50',    iconBg:'bg-sky-950/60 border-sky-700/40',      iconColor:'text-sky-400' },
+]
+
+const SECURITY = [
+  { href:'/tools/geolocation', icon: Globe,      label:'Geolocation',      sub:'IP / domain · ISP · ASN lookup',           border:'hover:border-emerald-600/50', iconBg:'bg-emerald-950/60 border-emerald-700/40', iconColor:'text-emerald-400' },
+  { href:'/tools/aimap',       icon: Cpu,         label:'AI Attack Surface', sub:'Expose Ollama · vLLM · MCP servers',        border:'hover:border-orange-600/50',  iconBg:'bg-orange-950/60 border-orange-700/40',   iconColor:'text-orange-400' },
+  { href:'/tools/voidaccess',  icon: Eye,         label:'VoidAccess OSINT',  sub:'CVE · IOC · threat intel · Groq AI',        border:'hover:border-violet-600/50',  iconBg:'bg-violet-950/60 border-violet-700/40',   iconColor:'text-violet-400' },
+  { href:'/tools/metatron',    icon: Radio,       label:'Metatron Pentest',  sub:'DNS recon · HTTP headers · AI analysis',    border:'hover:border-red-600/50',     iconBg:'bg-red-950/60 border-red-700/40',         iconColor:'text-red-400' },
+  { href:'/tools/nuclei',      icon: Crosshair,   label:'Nuclei Scanner',    sub:'CVE · misconfigs · template scanning',      border:'hover:border-yellow-600/50',  iconBg:'bg-yellow-950/60 border-yellow-700/40',   iconColor:'text-yellow-400' },
+  { href:'/tools/garak',       icon: Shield,      label:'Garak LLM Probe',   sub:'Jailbreak · injection · red-team AI',       border:'hover:border-rose-600/50',    iconBg:'bg-rose-950/60 border-rose-700/40',       iconColor:'text-rose-400' },
 ]
 
 export default function Dashboard({ bots, onOpenBot, onAddBot, onRemoveBot }) {
@@ -207,21 +222,19 @@ export default function Dashboard({ bots, onOpenBot, onAddBot, onRemoveBot }) {
             <div className="h-px flex-1 bg-gradient-to-l from-purple-500/30 to-transparent" />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {TOOLS.map(t => (
-              <a key={t.href} href={t.href}
-                className={`card-cyber bg-slate-900/50 backdrop-blur-sm border border-slate-800/60 ${t.border} rounded-xl p-5 flex items-center gap-4 transition-all group no-underline`}>
-                <div className={`w-11 h-11 ${t.iconBg} border rounded-xl flex items-center justify-center flex-shrink-0 transition-colors group-hover:${t.glow}`}>
-                  <t.icon size={18} className={t.iconColor} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-bold ${t.iconColor} font-mono tracking-wide`}>{t.label}</p>
-                  <p className="text-[11px] text-slate-500 mt-0.5 truncate">{t.sub}</p>
-                </div>
-                <ChevronRight size={14} className="text-slate-700 group-hover:text-slate-400 transition-colors flex-shrink-0" />
-              </a>
-            ))}
-          </div>
+          <ToolGrid items={TOOLS} />
+        </section>
+
+        {/* Bots & Comms */}
+        <section>
+          <SectionHeader icon={MessageSquare} color="green" label="BOTS & COMMS" />
+          <ToolGrid items={BOTS} />
+        </section>
+
+        {/* Security Toolkit */}
+        <section>
+          <SectionHeader icon={Shield} color="red" label="SECURITY TOOLKIT" />
+          <ToolGrid items={SECURITY} />
         </section>
 
         {/* Footer */}
