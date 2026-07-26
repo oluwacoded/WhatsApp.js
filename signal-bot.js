@@ -538,6 +538,8 @@ async function main() {
   } catch (e) {
     console.log("[Signal] Daemon start error:", e.message);
     console.log("[Signal] If the number is not yet registered, run .signalreg from WhatsApp");
+    // Exit with code 1 so the parent process auto-restarts us in 15s
+    process.exit(1);
   }
 }
 

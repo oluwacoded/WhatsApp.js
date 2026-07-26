@@ -1,0 +1,4 @@
+- [Signal crash fix](signal-crash-fix.md) — signal-bot exits code 0 on daemon failure; must exit(1) so parent restarts it
+- [Socket.io install workaround](socketio-install.md) — npm blocked by Replit firewall (baileys); install socket.io in /tmp isolation then cp to node_modules
+- [Frontend build setup](frontend-build.md) — client uses vite 4.x via node_modules/.bin/vite build (not global vite); tone package needed for VoiceChangerPage
+- [Security toolkit routes](security-toolkit.md) — 6 tool API endpoints added to end of server.js; nuclei binary at bin/nuclei v3.11.0

@@ -5,6 +5,16 @@ import GuestCallPage from './pages/GuestCallPage'
 import VoiceChangerPage from './pages/VoiceChangerPage'
 import VoiceStudioPage from './pages/VoiceStudioPage'
 import GroupFinderPage from './pages/GroupFinderPage'
+import ToolsHubPage from './pages/ToolsHubPage'
+import GeolocationPage from './pages/GeolocationPage'
+import AimapPage from './pages/AimapPage'
+import VoidAccessPage from './pages/VoidAccessPage'
+import MetatronPage from './pages/MetatronPage'
+import NucleiPage from './pages/NucleiPage'
+import GarakPage from './pages/GarakPage'
+import WhatsAppPage from './pages/WhatsAppPage'
+import SignalPage from './pages/SignalPage'
+import TelegramPage from './pages/TelegramPage'
 import './index.css'
 
 const DEFAULT_BOTS = [
@@ -21,23 +31,19 @@ const REMOVED_URLS = new Set([
 ])
 
 export default function App() {
+  const path = window.location.pathname
+
   // Guest call page — render standalone, no auth needed
-  if (window.location.pathname.startsWith('/guest/')) {
-    return <GuestCallPage />
-  }
+  if (path.startsWith('/guest/')) return <GuestCallPage />
 
   // Voice Studio page
-  if (window.location.pathname === '/voice-studio') {
-    return <VoiceStudioPage />
-  }
+  if (path === '/voice-studio') return <VoiceStudioPage />
 
   // Group finder page
-  if (window.location.pathname === '/group-finder') {
-    return <GroupFinderPage />
-  }
+  if (path === '/group-finder') return <GroupFinderPage />
 
   // Standalone voice changer page
-  if (window.location.pathname === '/voice-changer') {
+  if (path === '/voice-changer') {
     return (
       <div className="min-h-screen bg-slate-950 p-4 md:p-8">
         <div className="max-w-2xl mx-auto">
@@ -50,6 +56,22 @@ export default function App() {
       </div>
     )
   }
+
+  // Tools hub
+  if (path === '/tools') return <ToolsHubPage />
+
+  // Security tools
+  if (path === '/tools/geolocation') return <GeolocationPage />
+  if (path === '/tools/aimap')       return <AimapPage />
+  if (path === '/tools/voidaccess')  return <VoidAccessPage />
+  if (path === '/tools/metatron')    return <MetatronPage />
+  if (path === '/tools/nuclei')      return <NucleiPage />
+  if (path === '/tools/garak')       return <GarakPage />
+
+  // Bot platform pages
+  if (path === '/whatsapp')  return <WhatsAppPage />
+  if (path === '/signal')    return <SignalPage />
+  if (path === '/telegram')  return <TelegramPage />
 
   return <MainApp />
 }
