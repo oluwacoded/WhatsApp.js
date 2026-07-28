@@ -541,6 +541,14 @@ async function main() {
     // Exit with code 1 so the parent process auto-restarts us in 15s
     process.exit(1);
   }
+
+  // ── Keep-alive: log status every 30s so the daemon TCP connection stays active
+  setInterval(() => {
+    try {
+      const s = manager.getStatus();
+      if (s.phase !== "subscribed") console.log("[Signal] keepAlive — phase:", s.phase);
+    } catch {}
+  }, 30000);
 }
 
 main();

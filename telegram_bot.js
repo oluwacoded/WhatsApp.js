@@ -296,4 +296,5 @@ module.exports = {
   saveConfig,
   resolveCode, resolve2FA,
   startCampaign, stopCampaign, getCampaignStatus, parseVCF,
+  _getClient: () => tgClient,
 };

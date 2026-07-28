@@ -210,6 +210,7 @@ let contactPersonas = { ...PERSONAS_DEFAULTS, ...readJSON("personas.json", {}) }
 // ─── Bot State ───────────────────────────────────────────────────────────────
 let sock = null, currentQr = null, isConnected = false, hasQr = false;
 let reconnectCount = 0, startTime = Date.now();
+let waKeepAliveTimer = null;
 const BUILD_VERSION = Date.now(); // bumps on every server restart → busts browser asset cache
 let hasEverConnected = false;  // tracks if WA ever reached "open" — used to distinguish real logout vs post-pair restart
 let consecutive401s = 0;       // breaks reconnect loop on stale/bad creds
@@ -1173,6 +1174,12 @@ async function connectToWhatsApp() {
       isConnected = true; hasQr = false; currentQr = null; reconnectCount = 0;
       hasEverConnected = true; consecutive401s = 0;
       console.log("[MFG_bot] Connected to WhatsApp");
+      // ── Keep-alive: ping presence every 25s so Replit/WA never idles the socket ──
+      clearInterval(waKeepAliveTimer);
+      waKeepAliveTimer = setInterval(async () => {
+        if (!isConnected || !sock) { clearInterval(waKeepAliveTimer); return; }
+        try { await sock.sendPresenceUpdate("available"); } catch {}
+      }, 25000);
       // Greet owner on reconnect — but debounce to once per 5 min so rapid
       // reconnections (pairing retries, network blips) don't flood the chat.
       const now = Date.now();
@@ -1191,6 +1198,7 @@ async function connectToWhatsApp() {
     }
     if (connection === "close") {
       isConnected = false;
+      clearInterval(waKeepAliveTimer);
       const err = lastDisconnect?.error;
       const code = err?.output?.statusCode;
       const reason = err?.message || err?.toString() || "unknown";
@@ -5645,51 +5653,152 @@ app.post("/api/tools/garak", async (req, res) => {
   res.json({ ok: true, data: { results, overallScore, totalTests, failed: totalFailed, model, modelType } });
 });
 
-// ─── Telegram status endpoint ─────────────────────────────────────────────────
-app.get("/api/telegram/status", (req, res) => {
-  const tgConfig = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "data", "tg_config.json"), "utf8")); } catch { return {}; } })();
+// ─── Telegram MTProto Userbot ─────────────────────────────────────────────────
+const tgBot = require("./telegram_bot");
+
+// In-memory log queue for frontend polling (last 50 messages)
+const tgLog = [];
+function tgNotify(msg) {
+  tgLog.push({ ts: Date.now(), msg: String(msg) });
+  if (tgLog.length > 50) tgLog.shift();
+  console.log("[TG]", msg);
+}
+
+// Auto-connect if credentials + session already saved
+tgBot.autoConnect(tgNotify).catch(() => {});
+
+// GET /api/tg/status
+app.get("/api/tg/status", (req, res) => {
+  const cfg = tgBot.getConfig();
+  const campaign = tgBot.getCampaignStatus();
   res.json({
-    running: false, // MTProto userbot — status tracked separately
-    hasToken: !!(tgConfig.botToken || process.env.TELEGRAM_BOT_TOKEN),
-    username: tgConfig.botUsername || null,
-    apiId: tgConfig.apiId || null,
-    messagesToday: 0,
+    connected:  tgBot.isConnected(),
+    hasApiId:   !!(tgBot.getApiId()),
+    hasApiHash: !!(tgBot.getApiHash()),
+    apiId:      tgBot.getApiId() || null,
+    campaign,
+    log: tgLog.slice(-20),
   });
 });
 
-// POST /api/telegram/set-token — save a BotFather token for a simple bot
-app.post("/api/telegram/set-token", async (req, res) => {
-  const { token } = req.body || {};
-  if (!token?.trim()) return res.status(400).json({ ok: false, error: "token required" });
-  // Verify token with Telegram
+// POST /api/tg/save-credentials — { apiId, apiHash }
+app.post("/api/tg/save-credentials", (req, res) => {
+  const { apiId, apiHash } = req.body || {};
+  if (!apiId || !apiHash) return res.status(400).json({ ok: false, error: "apiId and apiHash required" });
+  tgBot.saveConfig({ apiId: parseInt(apiId), apiHash: apiHash.trim() });
+  res.json({ ok: true });
+});
+
+// POST /api/tg/connect — { phone } starts MTProto login
+app.post("/api/tg/connect", async (req, res) => {
+  const { phone } = req.body || {};
+  if (!phone?.trim()) return res.status(400).json({ ok: false, error: "phone required" });
+  if (tgBot.isConnected()) return res.json({ ok: true, already: true });
+  // Fire-and-forget — the interactive login flow resolves via /api/tg/submit-code and /api/tg/submit-2fa
+  tgBot.connect(tgNotify, phone.trim()).catch(e => tgNotify("Connect error: " + e.message));
+  res.json({ ok: true, message: "Login started — check log for code prompt" });
+});
+
+// POST /api/tg/submit-code — { code }
+app.post("/api/tg/submit-code", (req, res) => {
+  const { code } = req.body || {};
+  if (!code?.trim()) return res.status(400).json({ ok: false, error: "code required" });
+  const ok = tgBot.resolveCode(code.trim());
+  res.json({ ok, message: ok ? "Code submitted" : "No pending code prompt" });
+});
+
+// POST /api/tg/submit-2fa — { password }
+app.post("/api/tg/submit-2fa", (req, res) => {
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ ok: false, error: "password required" });
+  const ok = tgBot.resolve2FA(password);
+  res.json({ ok, message: ok ? "2FA submitted" : "No pending 2FA prompt" });
+});
+
+// POST /api/tg/disconnect
+app.post("/api/tg/disconnect", async (req, res) => {
+  await tgBot.disconnect().catch(() => {});
+  res.json({ ok: true });
+});
+
+// POST /api/tg/campaign/start — { contacts:[{phone,name}], message, vcf? }
+app.post("/api/tg/campaign/start", async (req, res) => {
+  let { contacts, message, vcf } = req.body || {};
+  if (!message?.trim()) return res.status(400).json({ ok: false, error: "message required" });
+  if (vcf) contacts = tgBot.parseVCF(vcf);
+  if (!Array.isArray(contacts) || contacts.length === 0) return res.status(400).json({ ok: false, error: "contacts required (array or vcf)" });
+  tgBot.startCampaign(contacts, message.trim(), tgNotify).catch(e => tgNotify("Campaign error: " + e.message));
+  res.json({ ok: true, count: contacts.length });
+});
+
+// POST /api/tg/campaign/stop
+app.post("/api/tg/campaign/stop", (req, res) => {
+  const stopped = tgBot.stopCampaign();
+  res.json({ ok: true, stopped });
+});
+
+// GET /api/tg/campaign/status
+app.get("/api/tg/campaign/status", (req, res) => {
+  res.json({ ok: true, campaign: tgBot.getCampaignStatus() });
+});
+
+// POST /api/tg/groups/scrape — { groupUsername } → list of members
+app.post("/api/tg/groups/scrape", async (req, res) => {
+  const { groupUsername } = req.body || {};
+  if (!groupUsername?.trim()) return res.status(400).json({ ok: false, error: "groupUsername required" });
+  if (!tgBot.isConnected()) return res.json({ ok: false, error: "Not connected to Telegram" });
   try {
-    const r = await fetch(`https://api.telegram.org/bot${token.trim()}/getMe`, { signal: AbortSignal.timeout(8000) });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.description || "Invalid token");
-    const tgConfigPath = path.join(__dirname, "data", "tg_config.json");
-    const existing = (() => { try { return JSON.parse(fs.readFileSync(tgConfigPath, "utf8")); } catch { return {}; } })();
-    fs.writeFileSync(tgConfigPath, JSON.stringify({ ...existing, botToken: token.trim(), botUsername: d.result.username }, null, 2));
-    res.json({ ok: true, username: d.result.username });
+    // Access the internal client via the exported getter
+    const client = tgBot._getClient ? tgBot._getClient() : null;
+    if (!client) return res.json({ ok: false, error: "Client not available — reconnect first" });
+    const entity = await client.getEntity(groupUsername.trim().replace(/^@/, ""));
+    const participants = await client.getParticipants(entity, { limit: 500 });
+    const members = participants.map(p => ({
+      id:        p.id?.toString(),
+      username:  p.username || null,
+      firstName: p.firstName || "",
+      lastName:  p.lastName || "",
+      phone:     p.phone || null,
+    }));
+    res.json({ ok: true, members, total: members.length });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
 
-// POST /api/telegram/send — send a message via bot token
-app.post("/api/telegram/send", async (req, res) => {
-  const { chatId, text } = req.body || {};
-  if (!chatId || !text) return res.status(400).json({ ok: false, error: "chatId and text required" });
-  const tgConfig = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "data", "tg_config.json"), "utf8")); } catch { return {}; } })();
-  const token = tgConfig.botToken || process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return res.json({ ok: false, error: "No bot token set" });
+// POST /api/tg/groups/add — { groupUsername, usernames:[...] }
+app.post("/api/tg/groups/add", async (req, res) => {
+  const { groupUsername, usernames } = req.body || {};
+  if (!groupUsername?.trim() || !Array.isArray(usernames) || usernames.length === 0)
+    return res.status(400).json({ ok: false, error: "groupUsername and usernames[] required" });
+  if (!tgBot.isConnected()) return res.json({ ok: false, error: "Not connected" });
   try {
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
-      signal: AbortSignal.timeout(8000)
-    });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.description || "Send failed");
-    res.json({ ok: true });
+    const client = tgBot._getClient ? tgBot._getClient() : null;
+    if (!client) return res.json({ ok: false, error: "Client not available" });
+    const group = await client.getEntity(groupUsername.trim().replace(/^@/, ""));
+    let added = 0, failed = 0, errors = [];
+    for (const u of usernames.slice(0, 50)) {
+      try {
+        const user = await client.getEntity(u.trim().replace(/^@/, ""));
+        await client.invoke(new (require("telegram/tl").functions.channels.InviteToChannelRequest)({
+          channel: group, users: [user]
+        }));
+        added++;
+        await new Promise(r => setTimeout(r, 2000)); // rate limit
+      } catch (e) { failed++; errors.push(`${u}: ${e.message}`); }
+    }
+    res.json({ ok: true, added, failed, errors: errors.slice(0, 10) });
   } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+// Keep old /api/telegram/* routes for backward compat
+app.get("/api/telegram/status", (req, res) => {
+  const tgConfig = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "data", "tg_config.json"), "utf8")); } catch { return {}; } })();
+  res.json({
+    running: tgBot.isConnected(),
+    hasToken: !!(tgConfig.botToken || process.env.TELEGRAM_BOT_TOKEN),
+    username: tgConfig.botUsername || null,
+    apiId: tgBot.getApiId() || null,
+    connected: tgBot.isConnected(),
+    messagesToday: 0,
+  });
 });
 
