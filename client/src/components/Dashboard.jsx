@@ -155,6 +155,47 @@ const SECURITY = [
   { href:'/tools/garak',       icon: Shield,      label:'Garak LLM Probe',   sub:'Jailbreak · injection · red-team AI',       border:'hover:border-rose-600/50',    iconBg:'bg-rose-950/60 border-rose-700/40',       iconColor:'text-rose-400' },
 ]
 
+const COLOR_MAP = {
+  purple: { text: 'text-purple-500', from: 'from-purple-500/30' },
+  cyan:   { text: 'text-cyan-500',   from: 'from-cyan-500/30' },
+  green:  { text: 'text-green-500',  from: 'from-green-500/30' },
+  red:    { text: 'text-red-500',    from: 'from-red-500/30' },
+}
+
+function SectionHeader({ icon: Icon, color, label }) {
+  const c = COLOR_MAP[color] || COLOR_MAP.cyan
+  return (
+    <div className="flex items-center gap-3 mb-5">
+      <div className={`h-px flex-1 bg-gradient-to-r ${c.from} to-transparent`} />
+      <div className="flex items-center gap-2">
+        <Icon size={13} className={c.text} />
+        <span className={`text-[11px] font-mono ${c.text} tracking-widest`}>{label}</span>
+      </div>
+      <div className={`h-px flex-1 bg-gradient-to-l ${c.from} to-transparent`} />
+    </div>
+  )
+}
+
+function ToolGrid({ items }) {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {items.map(t => (
+        <a key={t.href} href={t.href}
+          className={`card-cyber bg-slate-900/50 backdrop-blur-sm border border-slate-800/60 ${t.border} rounded-xl p-5 flex items-center gap-4 transition-all group no-underline`}>
+          <div className={`w-11 h-11 ${t.iconBg} border rounded-xl flex items-center justify-center flex-shrink-0`}>
+            <t.icon size={18} className={t.iconColor} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className={`text-sm font-bold ${t.iconColor} font-mono tracking-wide`}>{t.label}</p>
+            <p className="text-[11px] text-slate-500 mt-0.5 truncate">{t.sub}</p>
+          </div>
+          <ChevronRight size={14} className="text-slate-700 group-hover:text-slate-400 transition-colors flex-shrink-0" />
+        </a>
+      ))}
+    </div>
+  )
+}
+
 export default function Dashboard({ bots, onOpenBot, onAddBot, onRemoveBot }) {
   const [showAdd, setShowAdd] = useState(false)
   const onlineCount = bots.filter(b => b._online).length
@@ -213,15 +254,7 @@ export default function Dashboard({ bots, onOpenBot, onAddBot, onRemoveBot }) {
 
         {/* Tools */}
         <section>
-          <div className="flex items-center gap-3 mb-5">
-            <div className="h-px flex-1 bg-gradient-to-r from-purple-500/30 to-transparent" />
-            <div className="flex items-center gap-2">
-              <Zap size={13} className="text-purple-500" />
-              <span className="text-[11px] font-mono text-purple-500 tracking-widest">TOOLS &amp; MODULES</span>
-            </div>
-            <div className="h-px flex-1 bg-gradient-to-l from-purple-500/30 to-transparent" />
-          </div>
-
+          <SectionHeader icon={Zap} color="purple" label="TOOLS & MODULES" />
           <ToolGrid items={TOOLS} />
         </section>
 
