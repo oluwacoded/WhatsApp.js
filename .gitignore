@@ -5,3 +5,7 @@ auth_info_baileys
 *.log
 .wwebjs_auth
 .wwebjs_cache
+
+# Runtime state, credentials, sessions, contacts, and generated media
+data/
+settings.json

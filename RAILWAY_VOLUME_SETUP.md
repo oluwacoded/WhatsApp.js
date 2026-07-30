@@ -29,7 +29,12 @@ For **each** Railway service (`whatsappjs-production-6831` and `whatsappjs-produ
 3. **Value:** `/data`
 4. Click **Add**
 
-This keeps settings, notes, contact memory, command state, and other JSON runtime files on the same persistent Railway volume instead of resetting them on each deploy.
+This keeps settings, notes, contact memory, command state, Telegram credentials/session state, and other JSON runtime files on the same persistent Railway volume instead of resetting them on each deploy.
+
+The backend reads `DATA_DIR` for runtime state. Set `DATA_DIR=/data` on the
+Railway service and mount the volume at `/data`. Runtime data, credentials,
+sessions, and contact exports must stay on the volume and must not be committed
+to Git.
 
 ### 3. Redeploy ONCE
 The service will redeploy automatically when you add the variable.

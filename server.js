@@ -54,8 +54,8 @@ app.use((req, res, next) => {
 app.use(express.static(path.join(__dirname, "client/dist"), { index: false }));
 
 // ─── Persistence ────────────────────────────────────────────────────────────
-const DATA_DIR = path.join(__dirname, "data");
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const CLONES_DIR = path.join(DATA_DIR, "clones");
 if (!fs.existsSync(CLONES_DIR)) fs.mkdirSync(CLONES_DIR, { recursive: true });
 
@@ -4956,21 +4956,6 @@ app.get("/api/signal/get-captcha", (req, res) => {
   res.json({ ok: false });
 });
 
-// Serve React for all non-API routes (MUST be last — after all API routes)
-// Dynamically inject ?v=BUILD_VERSION into asset URLs so every deploy busts the browser cache.
-// index.html is already no-cache; the injected version changes the asset URLs the browser requests.
-app.get("*", (req, res) => {
-  const indexPath = path.join(__dirname, "client/dist/index.html");
-  if (fs.existsSync(indexPath)) {
-    let html = fs.readFileSync(indexPath, "utf8");
-    html = html.replace(/(\/assets\/[^"']+\.(js|css))/g, `$1?v=${BUILD_VERSION}`);
-    res.set("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.type("html").send(html);
-  } else {
-    res.send("MFG_bot Hub — building frontend... restart after build completes.");
-  }
-});
-
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 const httpServer = http.createServer(app);
@@ -5791,7 +5776,7 @@ app.post("/api/tg/groups/add", async (req, res) => {
 
 // Keep old /api/telegram/* routes for backward compat
 app.get("/api/telegram/status", (req, res) => {
-  const tgConfig = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "data", "tg_config.json"), "utf8")); } catch { return {}; } })();
+  const tgConfig = tgBot.getConfig();
   res.json({
     running: tgBot.isConnected(),
     hasToken: !!(tgConfig.botToken || process.env.TELEGRAM_BOT_TOKEN),
@@ -5800,5 +5785,20 @@ app.get("/api/telegram/status", (req, res) => {
     connected: tgBot.isConnected(),
     messagesToday: 0,
   });
+});
+
+// Serve React for all non-API routes (MUST be last — after all API routes)
+// Dynamically inject ?v=BUILD_VERSION into asset URLs so every deploy busts the browser cache.
+// index.html is already no-cache; the injected version changes the asset URLs the browser requests.
+app.get("*", (req, res) => {
+  const indexPath = path.join(__dirname, "client/dist/index.html");
+  if (fs.existsSync(indexPath)) {
+    let html = fs.readFileSync(indexPath, "utf8");
+    html = html.replace(/(\/assets\/[^"']+\.(js|css))/g, `$1?v=${BUILD_VERSION}`);
+    res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.type("html").send(html);
+  } else {
+    res.send("MFG_bot Hub — building frontend... restart after build completes.");
+  }
 });
 

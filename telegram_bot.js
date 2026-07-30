@@ -10,8 +10,10 @@ const input              = require("input");
 const fs                 = require("fs");
 const path               = require("path");
 
-const CONFIG_FILE  = path.join(__dirname, "data", "tg_config.json");
-const SESSION_FILE = path.join(__dirname, "data", "tg_session.json");
+const TG_DATA_DIR  = process.env.DATA_DIR || path.join(__dirname, "data");
+if (!fs.existsSync(TG_DATA_DIR)) fs.mkdirSync(TG_DATA_DIR, { recursive: true });
+const CONFIG_FILE  = path.join(TG_DATA_DIR, "tg_config.json");
+const SESSION_FILE = path.join(TG_DATA_DIR, "tg_session.json");
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -44,6 +46,8 @@ let tgCampaign = {
   failed:     0,
   startTime:  null,
   timer:      null,
+  runId:      0,
+  floodWait:  0,
 };
 
 // ─── getters ───────────────────────────────────────────────────────────────
@@ -171,26 +175,41 @@ async function getMe() {
 
 // ─── campaign ──────────────────────────────────────────────────────────────
 
-const TG_RATE    = 30;        // messages per minute (safe for userbot)
-const TG_DELAY   = Math.ceil(60000 / TG_RATE);  // ms between messages
+const TG_RATE = 4; // server-side estimate; actual pacing is randomized 15–30s
+const MIN_SEND_DELAY_MS = 15_000;
+const MAX_SEND_DELAY_MS = 30_000;
+
+function campaignIsCurrent(runId) {
+  return tgCampaign.active && tgCampaign.runId === runId;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 /**
  * Parse a VCF string into [{phone, name}]
  */
 function parseVCF(vcfText) {
-  const contacts = [];
+  const contacts = new Map();
   const cards    = vcfText.split(/END:VCARD/i);
   for (const card of cards) {
     const nameMatch  = card.match(/FN:(.*)/i);
-    const phoneMatch = card.match(/TEL[^:]*:([\d+\s\-().]+)/i);
-    if (phoneMatch) {
-      let phone = phoneMatch[1].replace(/\s/g, "").replace(/[^\d+]/g, "");
-      if (!phone.startsWith("+")) phone = "+" + phone;
-      const name = nameMatch ? nameMatch[1].trim() : phone;
-      if (phone.length >= 7) contacts.push({ phone, name });
+    for (const phoneMatch of card.matchAll(/TEL[^:]*:([\d+\s\-().]+)/gi)) {
+      const digits = phoneMatch[1].replace(/\D/g, "");
+      // VCF imports for this campaign are intentionally limited to valid
+      // North American +1 numbers and are deduplicated server-side.
+      if (digits.length !== 11 || !digits.startsWith("1")) continue;
+      const phone = `+1${digits.slice(1)}`;
+      if (!contacts.has(phone)) {
+        contacts.set(phone, {
+          phone,
+          name: nameMatch ? nameMatch[1].trim() : phone,
+        });
+      }
     }
   }
-  return contacts;
+  return [...contacts.values()];
 }
 
 /**
@@ -203,9 +222,31 @@ async function startCampaign(contacts, message, onUpdate) {
   if (!isConnected()) { await onUpdate("❌ Telegram not connected. Send .tg connect first."); return; }
   if (tgCampaign.active) { await onUpdate("⚠️ A campaign is already running. Send .tg stop to cancel it first."); return; }
 
+  const uniqueContacts = [];
+  const seen = new Set();
+  for (const contact of contacts) {
+    const rawPhone = String(contact?.phone || "").trim();
+    if (!rawPhone) continue;
+    const phone = rawPhone.startsWith("@")
+      ? rawPhone.toLowerCase()
+      : rawPhone.replace(/[^\d+]/g, "");
+    if (!phone || seen.has(phone)) continue;
+    seen.add(phone);
+    uniqueContacts.push({
+      ...contact,
+      phone,
+      name: String(contact?.name || phone),
+    });
+  }
+  if (!uniqueContacts.length) {
+    await onUpdate("❌ No valid contacts were supplied.");
+    return;
+  }
+
+  const runId = (tgCampaign.runId || 0) + 1;
   tgCampaign = {
     active:    true,
-    contacts,
+    contacts:  uniqueContacts,
     index:     0,
     message,
     sent:      0,
@@ -213,14 +254,16 @@ async function startCampaign(contacts, message, onUpdate) {
     startTime: Date.now(),
     timer:     null,
     onUpdate,
+    runId,
+    floodWait: 0,
   };
 
-  await onUpdate(`🚀 *Telegram Campaign Started*\n📋 Contacts: ${contacts.length}\n⏱ Rate: ${TG_RATE}/min\n🕐 Est. time: ~${Math.ceil(contacts.length / TG_RATE)} min\n\nSend *.tg stop* to cancel`);
-  _sendNext();
+  await onUpdate(`🚀 *Telegram Campaign Started*\n📋 Contacts: ${uniqueContacts.length}\n⏱ Rate: ${TG_RATE}/min maximum\n🕐 Est. time: ~${Math.ceil(uniqueContacts.length / TG_RATE)} min\n\nSend *.tg stop* to cancel`);
+  _sendNext(runId);
 }
 
-async function _sendNext() {
-  if (!tgCampaign.active) return;
+async function _sendNext(runId = tgCampaign.runId) {
+  if (!campaignIsCurrent(runId)) return;
   const { contacts, index, message, onUpdate } = tgCampaign;
 
   if (index >= contacts.length) {
@@ -238,7 +281,14 @@ async function _sendNext() {
   const personalised = message.replace(/\{name\}/gi, name);
 
   try {
+    // Delay before lookup as well as between messages, including the first
+    // message after start. This prevents an initial burst.
+    const delay = Math.floor(Math.random() * (MAX_SEND_DELAY_MS - MIN_SEND_DELAY_MS + 1)) + MIN_SEND_DELAY_MS;
+    await sleep(delay);
+    if (!campaignIsCurrent(runId)) return;
+
     const entity = await tgClient.getInputEntity(phone);
+    if (!campaignIsCurrent(runId)) return;
     await tgClient.sendMessage(entity, { message: personalised });
     tgCampaign.sent++;
 
@@ -248,19 +298,33 @@ async function _sendNext() {
       await onUpdate(`📊 Campaign progress: ${tgCampaign.sent}/${total} sent (${Math.round(tgCampaign.sent/total*100)}%)`);
     }
   } catch (err) {
+    if (!campaignIsCurrent(runId)) return;
+    const errorText = err?.errorMessage || err?.message || String(err);
+    const isThrottle = /FLOOD_WAIT|PEER_FLOOD|SLOWMODE_WAIT|TOO_MANY_REQUESTS|RATE_LIMIT/i.test(errorText) || Number.isFinite(err?.seconds);
+    if (isThrottle) {
+      const waitSeconds = Number(err?.seconds) || 60;
+      tgCampaign.floodWait = waitSeconds;
+      tgCampaign.active = false;
+      clearTimeout(tgCampaign.timer);
+      await onUpdate(`⏹ Telegram throttled this account (${errorText}). Campaign stopped; no automatic retry.`);
+      return;
+    }
     tgCampaign.failed++;
     // Only log every 10th failure to avoid spam
     if (tgCampaign.failed % 10 === 1) {
-      await onUpdate(`⚠️ Failed to send to ${phone}: ${err.message}`);
+      await onUpdate(`⚠️ Failed to send to ${phone}: ${errorText}`);
     }
   }
 
-  tgCampaign.timer = setTimeout(_sendNext, TG_DELAY);
+  if (campaignIsCurrent(runId)) {
+    tgCampaign.timer = setTimeout(() => _sendNext(runId), 0);
+  }
 }
 
 function stopCampaign() {
   if (!tgCampaign.active) return false;
   clearTimeout(tgCampaign.timer);
+  tgCampaign.runId = (tgCampaign.runId || 0) + 1;
   tgCampaign.active = false;
   return true;
 }
